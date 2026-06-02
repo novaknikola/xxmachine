@@ -1,0 +1,257 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ─────────────────────────────────────────────────────────────
+   XXmachine — Cosmic Orchestrator theme (Material 3 inspired)
+   ───────────────────────────────────────────────────────────── */
+
+html, body {
+  background: radial-gradient(circle at top right, #131b2e 0%, #0b1326 100%);
+  background-attachment: fixed;
+  color: var(--foreground);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  overflow-x: hidden;
+}
+
+/* Cosmic ambient orbs (subtle color washes in corners) */
+.cosmic-orb {
+  position: fixed;
+  width: 600px;
+  height: 600px;
+  border-radius: 9999px;
+  filter: blur(120px);
+  opacity: 0.15;
+  z-index: 0;
+  pointer-events: none;
+}
+.cosmic-orb-primary {
+  background: #d2bbff;
+  top: -200px;
+  right: -100px;
+}
+.cosmic-orb-secondary {
+  background: #4cd7f6;
+  bottom: -200px;
+  left: -100px;
+}
+
+/* Glass surfaces */
+.glass-card {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.glass-input {
+  background: rgba(6, 14, 32, 0.6);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(210, 187, 255, 0.2);
+}
+
+/* Legacy aliases — kept so older pages still render until they're migrated */
+.glass {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.75rem;
+}
+.glass-hover {
+  transition: background-color 250ms ease, border-color 250ms ease;
+}
+.glass-hover:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+/* Glow — subtle, single soft halo */
+.glow-primary {
+  transition: box-shadow 250ms ease;
+}
+.glow-primary:hover {
+  box-shadow: 0 0 20px rgba(210, 187, 255, 0.25);
+}
+.glow-purple {
+  box-shadow: 0 0 18px rgba(210, 187, 255, 0.18);
+}
+.glow-purple-lg {
+  box-shadow: 0 0 28px rgba(210, 187, 255, 0.28);
+}
+.glow-cyan {
+  box-shadow: 0 0 18px rgba(76, 215, 246, 0.22);
+}
+
+/* Brand text gradient (lavender → cyan) */
+.text-gradient {
+  background: linear-gradient(90deg, #d2bbff, #4cd7f6);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Solid lavender CTA used to be the rainbow gradient — keep the class name */
+.btn-gradient {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-weight: 600;
+  border-radius: 0.75rem;
+  transition: box-shadow 250ms ease, transform 250ms ease;
+}
+.btn-gradient:hover {
+  box-shadow: 0 0 22px rgba(210, 187, 255, 0.35);
+}
+.btn-gradient-hover {
+  transition: box-shadow 250ms ease;
+}
+.btn-gradient-hover:hover {
+  box-shadow: 0 0 22px rgba(210, 187, 255, 0.35);
+}
+
+/* Active card highlight */
+.card-active {
+  background: rgba(210, 187, 255, 0.08);
+  border: 1px solid rgba(210, 187, 255, 0.35);
+  box-shadow: 0 0 18px rgba(210, 187, 255, 0.15);
+}
+
+/* Smooth transitions */
+.transition-smooth {
+  transition: all 300ms ease-out;
+}
+
+/* Token mapping — exposes our palette to Tailwind utilities like bg-primary, text-tertiary */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-sans);
+  --font-display: var(--font-display);
+  --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-display);
+
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+
+  /* Material 3 extras: tertiary (mint) and cyan accent — semantic, not decorative */
+  --color-tertiary: #4edea3;
+  --color-tertiary-foreground: #003824;
+  --color-cyan-accent: #4cd7f6;
+  --color-cyan-accent-foreground: #003640;
+
+  /* Surface containers (depth scale) */
+  --color-surface: #0b1326;
+  --color-surface-low: #131b2e;
+  --color-surface-container: #171f33;
+  --color-surface-high: #222a3d;
+  --color-surface-highest: #2d3449;
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  /* Surface (deep navy) */
+  --background: #0b1326;
+  --foreground: #dae2fd;
+
+  /* Layered card surfaces */
+  --card: #131b2e;
+  --card-foreground: #dae2fd;
+  --popover: #171f33;
+  --popover-foreground: #dae2fd;
+
+  /* Primary = soft lavender, used as the dominant accent on dark surfaces */
+  --primary: #d2bbff;
+  --primary-foreground: #3f008e;
+
+  /* Secondary = neutral surface (NOT cyan — cyan is its own token) */
+  --secondary: #2d3449;
+  --secondary-foreground: #dae2fd;
+
+  --muted: #171f33;
+  --muted-foreground: #ccc3d8;
+
+  --accent: #d2bbff;
+  --accent-foreground: #3f008e;
+
+  --destructive: oklch(0.577 0.245 27.325);
+
+  --border: rgba(255, 255, 255, 0.08);
+  --input: #171f33;
+  --ring: #d2bbff;
+
+  --chart-1: #d2bbff;
+  --chart-2: #4cd7f6;
+  --chart-3: #4edea3;
+  --chart-4: #ffb4ab;
+  --chart-5: #ccc3d8;
+
+  --radius: 0.75rem;
+
+  /* Sidebar */
+  --sidebar: #131b2e;
+  --sidebar-foreground: #dae2fd;
+  --sidebar-primary: #d2bbff;
+  --sidebar-primary-foreground: #3f008e;
+  --sidebar-accent: #222a3d;
+  --sidebar-accent-foreground: #dae2fd;
+  --sidebar-border: rgba(255, 255, 255, 0.06);
+  --sidebar-ring: #d2bbff;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+  h1, h2, h3 {
+    font-family: var(--font-display), var(--font-sans), system-ui, sans-serif;
+    letter-spacing: -0.01em;
+  }
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.08); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.16); }

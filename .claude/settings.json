@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:3000/login)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:3000/calendar)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:3000/generate)",
+      "Bash(wait)",
+      "Bash(taskkill //PID 11820 //F)",
+      "Bash(curl -s -X POST http://localhost:3000/api/chat -H \"Content-Type: application/json\" -d '{\"messages\":[{\"role\":\"user\",\"content\":\"Reply with just the word OK\"}]}')",
+      "Bash(curl -s -o /dev/null -w \"login %{http_code}\\\\n\" http://localhost:3000/login)",
+      "Bash(curl -s -o /dev/null -w \"generate %{http_code}\\\\n\" http://localhost:3000/generate)",
+      "Bash(curl -s -o /dev/null -w \"calendar %{http_code}\\\\n\" http://localhost:3000/calendar)",
+      "WebFetch(domain:api.fanvue.com)",
+      "Bash(curl -s -o /dev/null -w \"admin %{http_code}\\\\n\" http://localhost:3000/admin)",
+      "Bash(curl -s -o /dev/null -w \"fans %{http_code}\\\\n\" http://localhost:3000/fans)",
+      "WebFetch(domain:help.fanvue.com)",
+      "Bash(openssl rand *)",
+      "Bash(netstat -ano)"
+    ]
+  }
+}
