@@ -1,7 +1,6 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { fansStore } from '@/lib/store'
 import type { Fan } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -53,20 +52,26 @@ export function FanNotesPopover({ fan, onUpdated, onDeleted }: Props) {
     setTagInput('')
   }
 
-  function save() {
+  async function save() {
     if (!name.trim()) {
       toast.error('Display name required')
       return
     }
-    fansStore.update(fan.id, { displayName: name.trim(), notes, tags })
+    await fetch(`/api/fans/${fan.id}`, {
+  method: 'PATCH',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ displayName: name.trim(), notes, tags }),
+})
     onUpdated()
     setOpen(false)
     toast.success('Saved')
   }
 
-  function del() {
+  async function del() {
     if (!confirm(`Delete fan "${fan.displayName}"? This removes them from XXmachine only — Fanvue is untouched.`)) return
-    fansStore.delete(fan.id)
+    await fetch(`/api/fans/${fan.id}`, {
+  method: 'DELETE',
+})
     onDeleted()
     setOpen(false)
     toast.success('Fan removed from XXmachine')

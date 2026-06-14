@@ -18,12 +18,13 @@ export async function GET(req: NextRequest) {
   const params = new URLSearchParams({
     client_id: appId,
     redirect_uri: redirectUri,
-    scope: 'instagram_business_basic,instagram_business_content_publish',
+    scope: 'instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments,instagram_business_content_publish,instagram_business_manage_insights',
     response_type: 'code',
+    force_reauth: 'true',
     state: accountId,
   })
 
   return NextResponse.redirect(
-    `https://api.instagram.com/oauth/authorize?${params.toString()}`
-  )
+  `https://www.instagram.com/oauth/authorize?${params.toString()}`
+)
 }

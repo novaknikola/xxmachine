@@ -11,14 +11,23 @@ export async function GET() {
       google_drive_folder_id: string | null
       token_expires_at: string | null
       has_password: boolean
+connected: boolean
+graph_connected: boolean
+browser_connected: boolean
     }>(
-      `SELECT id, name, ig_username,
-              (ig_access_token IS NOT NULL OR ig_session IS NOT NULL) AS connected,
-              ig_token_expires_at AS token_expires_at,
-              proxy_url, google_drive_folder_id,
-              (ig_password IS NOT NULL) AS has_password
-       FROM instagram_accounts ORDER BY name`
-    )
+      
+  `SELECT id, name, ig_username,
+          (ig_access_token IS NOT NULL OR ig_session IS NOT NULL) AS connected,
+          (ig_access_token IS NOT NULL AND ig_user_id IS NOT NULL) AS graph_connected,
+          (ig_session IS NOT NULL) AS browser_connected,
+          ig_token_expires_at AS token_expires_at,
+          proxy_url,
+          google_drive_folder_id,
+          (ig_password IS NOT NULL) AS has_password
+   FROM instagram_accounts
+   ORDER BY name`
+)
+      
     return NextResponse.json(accounts)
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 })

@@ -3,7 +3,6 @@
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@/contexts/auth-context'
-import { usersStore, charactersStore } from '@/lib/store'
 import { User, Character } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -42,6 +41,7 @@ import {
   X,
   ImageIcon,
   ShieldCheck,
+  Settings,
 } from 'lucide-react'
 
 // ─────────────────────────────────────────────
@@ -55,63 +55,129 @@ function UsersTab() {
   const [form, setForm] = useState({ name: '', email: '', password: '', role: 'chatter' as 'admin' | 'chatter' })
   const [editForm, setEditForm] = useState<Partial<User & { password: string }>>({})
 
-  useEffect(() => { setUsers(usersStore.getAll()) }, [])
+  async function refresh() {
+  const res = await fetch('/api/admin/users')
 
-  function refresh() { setUsers(usersStore.getAll()) }
+  if (!res.ok) return
 
-  function addUser() {
-    if (!form.name.trim() || !form.email.trim() || !form.password.trim()) {
-      toast.error('All fields are required')
-      return
-    }
-    if (usersStore.findByEmail(form.email)) {
-      toast.error('Email already exists')
-      return
-    }
-    usersStore.add({
-      id: crypto.randomUUID(),
-      name: form.name.trim(),
+  const data = await res.json()
+
+  setUsers(
+    (data.users ?? []).map((u: any) => ({
+      id: u.id,
+      name: u.display_name,
+      email: u.email,
+      role: u.role,
+      active: u.active,
+      createdAt: u.created_at,
+    }))
+  )
+}
+
+useEffect(() => {
+  refresh()
+}, [])
+
+  
+async function addUser() {
+  if (!form.name.trim() || !form.email.trim() || !form.password.trim()) {
+    toast.error('All fields are required')
+    return
+  }
+
+  const res = await fetch('/api/admin/users', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      display_name: form.name.trim(),
       email: form.email.trim().toLowerCase(),
       password: form.password,
       role: form.role,
-      createdAt: new Date().toISOString(),
-      active: true,
-    })
-    setForm({ name: '', email: '', password: '', role: 'chatter' })
-    refresh()
-    toast.success('User added')
+    }),
+  })
+
+  if (!res.ok) {
+    toast.error('Failed to create user')
+    return
   }
 
-  function toggleActive(u: User) {
-    if (u.id === currentUser?.id) { toast.error('You cannot deactivate yourself'); return }
-    usersStore.update(u.id, { active: !u.active })
-    refresh()
+  setForm({ name: '', email: '', password: '', role: 'chatter' })
+  await refresh()
+  toast.success('User added')
+}
+
+async function toggleActive(u: User) {
+  if (u.id === currentUser?.id) {
+    toast.error('You cannot deactivate yourself')
+    return
   }
 
-  function deleteUser(u: User) {
-    if (u.id === currentUser?.id) { toast.error('You cannot delete yourself'); return }
-    usersStore.delete(u.id)
-    setDeleteTarget(null)
-    refresh()
-    toast.success('User deleted')
+  const res = await fetch('/api/admin/users', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      id: u.id,
+      active: !u.active,
+    }),
+  })
+
+  if (!res.ok) {
+    toast.error('Failed to update user')
+    return
   }
 
-  function startEdit(u: User) {
-    setEditTarget(u.id)
-    setEditForm({ name: u.name, email: u.email, role: u.role, password: '' })
+  await refresh()
+}
+
+async function deleteUser(u: User) {
+  if (u.id === currentUser?.id) {
+    toast.error('You cannot delete yourself')
+    return
   }
 
-  function saveEdit(u: User) {
-    const update: Partial<User> = {}
-    if (editForm.name?.trim()) update.name = editForm.name.trim()
-    if (editForm.email?.trim()) update.email = editForm.email.trim().toLowerCase()
-    if (editForm.role) update.role = editForm.role
-    if (editForm.password?.trim()) (update as Record<string, unknown>).password = editForm.password.trim()
-    usersStore.update(u.id, update)
-    setEditTarget(null)
-    refresh()
-    toast.success('Changes saved')
+  const res = await fetch('/api/admin/users', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: u.id }),
+  })
+
+  if (!res.ok) {
+    toast.error('Failed to delete user')
+    return
   }
+
+  setDeleteTarget(null)
+  await refresh()
+  toast.success('User deleted')
+}
+
+function startEdit(u: User) {
+  setEditTarget(u.id)
+  setEditForm({ name: u.name, email: u.email, role: u.role, password: '' })
+}
+
+async function saveEdit(u: User) {
+  const payload: Record<string, unknown> = { id: u.id }
+
+  if (editForm.name?.trim()) payload.display_name = editForm.name.trim()
+  if (editForm.role) payload.role = editForm.role
+  if (typeof editForm.active === 'boolean') payload.active = editForm.active
+
+  const res = await fetch('/api/admin/users', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+
+  if (!res.ok) {
+    toast.error('Failed to save changes')
+    return
+  }
+
+  setEditTarget(null)
+  await refresh()
+  toast.success('Changes saved')
+}
 
   return (
     <div className="space-y-6">
@@ -303,7 +369,155 @@ function UsersTab() {
     </div>
   )
 }
+const MODULES = [
+  { key: 'generator', label: 'Generator' },
+  { key: 'reels', label: 'Bulk Carousel' },
+  { key: 'socials', label: 'Connect account' },
+  { key: 'motion', label: 'Motion' },
+  { key: 'schedule', label: 'Schedule' },
+  { key: 'history', label: 'History' },
+]
 
+function PermissionsTab() {
+  const [users, setUsers] = useState<User[]>([])
+  const [selectedUserId, setSelectedUserId] = useState('')
+  const [permissions, setPermissions] = useState<Record<string, boolean>>({})
+
+  async function loadUsers() {
+    const res = await fetch('/api/admin/users')
+    if (!res.ok) return
+    const data = await res.json()
+
+    setUsers(
+      (data.users ?? []).map((u: any) => ({
+        id: u.id,
+        name: u.display_name,
+        email: u.email,
+        role: u.role,
+        active: u.active,
+        createdAt: u.created_at,
+      }))
+    )
+  }
+
+  async function loadPermissions(userId: string) {
+    const res = await fetch(`/api/admin/permissions?userId=${userId}`)
+    if (!res.ok) return
+
+    const data = await res.json()
+    const map: Record<string, boolean> = {}
+
+    for (const module of MODULES) {
+      map[module.key] = true
+    }
+
+    for (const p of data.permissions ?? []) {
+      map[p.module_name] = p.enabled
+    }
+
+    setPermissions(map)
+  }
+
+  useEffect(() => {
+    loadUsers()
+  }, [])
+
+  async function selectUser(userId: string) {
+    setSelectedUserId(userId)
+    await loadPermissions(userId)
+  }
+
+  async function togglePermission(moduleName: string) {
+    if (!selectedUserId) return
+
+    const next = !(permissions[moduleName] ?? true)
+
+    const res = await fetch('/api/admin/permissions', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: selectedUserId,
+        moduleName,
+        enabled: next,
+      }),
+    })
+
+    if (!res.ok) {
+      toast.error('Failed to update permission')
+      return
+    }
+
+    setPermissions(prev => ({ ...prev, [moduleName]: next }))
+    toast.success('Permission updated')
+  }
+
+  return (
+    <div className="space-y-6">
+      <Card className="border-[rgba(255,255,255,0.12)] bg-[rgba(255,255,255,0.04)]">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <Settings className="w-4 h-4 text-primary" />
+            Module permissions
+          </CardTitle>
+        </CardHeader>
+
+        <CardContent className="space-y-4">
+          <div className="space-y-1.5">
+            <Label className="text-xs text-muted-foreground">User</Label>
+
+            <Select
+              value={selectedUserId}
+              onValueChange={(v: string | null) => {
+                if (v) selectUser(v)
+              }}
+            >
+              <SelectTrigger className="bg-[rgba(255,255,255,0.08)] border-[rgba(255,255,255,0.12)] h-8 text-sm">
+                <SelectValue placeholder="Select user..." />
+              </SelectTrigger>
+
+              <SelectContent>
+                {users.map(u => (
+                  <SelectItem key={u.id} value={u.id}>
+                    {u.name} ({u.role})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {selectedUserId && (
+            <div className="space-y-2">
+              {MODULES.map(module => {
+                const enabled = permissions[module.key] ?? true
+
+                return (
+                  <div
+                    key={module.key}
+                    className="flex items-center justify-between rounded-lg border border-border/50 px-3 py-2"
+                  >
+                    <div>
+                      <p className="text-sm font-medium">{module.label}</p>
+                      <p className="text-xs text-muted-foreground">{module.key}</p>
+                    </div>
+
+                    <Button
+                      size="sm"
+                      variant={enabled ? 'default' : 'outline'}
+                      className="h-7 text-xs"
+                      onClick={() => togglePermission(module.key)}
+                    >
+                      {enabled ? 'Enabled' : 'Disabled'}
+                    </Button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
 // ─────────────────────────────────────────────
 // CHARACTER FORM (module-level to preserve focus)
 // ─────────────────────────────────────────────
@@ -361,41 +575,86 @@ function CharactersTab() {
   const [newForm, setNewForm] = useState<Partial<Character>>({
     name: '', loraUrl: '', loraScale: 0.8, basePromptStyle: '', story: '', startDate: '', defaultMode: 'SFW',
   })
+  
+  useEffect(() => {
+  refresh()
+}, [])
 
-  useEffect(() => { setCharacters(charactersStore.getAll()) }, [])
-  function refresh() { setCharacters(charactersStore.getAll()) }
+async function refresh() {
+  const res = await fetch('/api/characters')
+  if (!res.ok) return
+  const data = await res.json()
+  setCharacters(data)
+}
 
-  function addCharacter() {
-    if (!newForm.name?.trim()) { toast.error('Name is required'); return }
-    charactersStore.add({
-      id: crypto.randomUUID(),
-      name: newForm.name!.trim(),
+async function addCharacter() {
+  if (!newForm.name?.trim()) {
+    toast.error('Name is required')
+    return
+  }
+
+  const res = await fetch('/api/characters', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: newForm.name.trim(),
       loraUrl: newForm.loraUrl ?? '',
       loraScale: newForm.loraScale ?? 0.8,
       basePromptStyle: newForm.basePromptStyle ?? '',
       story: newForm.story ?? '',
       startDate: newForm.startDate ?? '',
       defaultMode: newForm.defaultMode ?? 'SFW',
-    })
-    setAdding(false)
-    setNewForm({ name: '', loraUrl: '', loraScale: 0.8, basePromptStyle: '', story: '', startDate: '', defaultMode: 'SFW' })
-    refresh()
-    toast.success('Character added')
+    }),
+  })
+
+  if (!res.ok) {
+    toast.error('Failed to add character')
+    return
   }
 
-  function saveEdit() {
-    if (!editId) return
-    charactersStore.update(editId, editForm)
-    setEditId(null)
-    refresh()
-    toast.success('Character updated')
+  setAdding(false)
+  setNewForm({ name: '', loraUrl: '', loraScale: 0.8, basePromptStyle: '', story: '', startDate: '', defaultMode: 'SFW' })
+  await refresh()
+  toast.success('Character added')
+}
+
+async function saveEdit() {
+  if (!editId) return
+
+  const res = await fetch('/api/characters', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      id: editId,
+      ...editForm,
+    }),
+  })
+
+  if (!res.ok) {
+    toast.error('Failed to update character')
+    return
   }
 
-  function deleteChar(id: string) {
-    charactersStore.delete(id)
-    refresh()
-    toast.success('Character deleted')
+  setEditId(null)
+  await refresh()
+  toast.success('Character updated')
+}
+
+async function deleteChar(id: string) {
+  const res = await fetch('/api/characters', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  })
+
+  if (!res.ok) {
+    toast.error('Failed to delete character')
+    return
   }
+
+  await refresh()
+  toast.success('Character deleted')
+}
 
   return (
     <div className="space-y-4">
@@ -513,6 +772,10 @@ export default function AdminPage() {
             <Users className="w-3.5 h-3.5 mr-1.5" />
             Users
           </TabsTrigger>
+          <TabsTrigger value="permissions" className="text-sm">
+           <Settings className="w-3.5 h-3.5 mr-1.5" />
+           Permissions
+          </TabsTrigger>
           <TabsTrigger value="characters" className="text-sm">
             <ImageIcon className="w-3.5 h-3.5 mr-1.5" />
             Characters
@@ -522,6 +785,10 @@ export default function AdminPage() {
         <TabsContent value="users">
           <UsersTab />
         </TabsContent>
+
+     <TabsContent value="permissions">
+  <PermissionsTab />
+</TabsContent>
         <TabsContent value="characters">
           <CharactersTab />
         </TabsContent>

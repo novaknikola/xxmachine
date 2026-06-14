@@ -1,5 +1,7 @@
 'use client'
 
+import { ContentSourceMappings } from '@/components/content-source-mappings'
+
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -61,6 +63,8 @@ interface IgAccount {
   name: string
   ig_username: string | null
   connected: boolean
+  graph_connected?: boolean
+browser_connected?: boolean
   proxy_url: string | null
   google_drive_folder_id: string | null
   token_expires_at: string | null
@@ -189,7 +193,11 @@ export function InstagramTab() {
     const acc = accounts.find(a => a.id === accountId)
     setDriveFolderInput(acc?.google_drive_folder_id ?? '')
   }, [accountId, accounts])
-
+  
+  function connectWithInstagramApi(id = accountId) {
+  if (!id) return
+  window.location.href = `/api/instagram/oauth?accountId=${id}`
+}
   async function connectWithInstagram() {
     if (!accountId) return
     const acc = accounts.find(a => a.id === accountId)
@@ -629,6 +637,15 @@ export function InstagramTab() {
                       </div>
                     )}
                     <Button
+  variant="outline"
+  className="w-full border-green-500/30 text-green-400 hover:bg-green-500/10 hover:border-green-500/50"
+  onClick={() => connectWithInstagramApi()}
+  disabled={!accountId}
+>
+  <Link2 className="w-4 h-4 mr-2" />
+  {acc?.graph_connected ? 'Reconnect API / Graph' : 'Connect API / Graph'}
+</Button>
+                    <Button
                       variant="outline"
                       className="w-full border-pink-500/30 text-pink-400 hover:bg-pink-500/10 hover:border-pink-500/50"
                       onClick={connectWithInstagram}
@@ -934,8 +951,10 @@ export function InstagramTab() {
       </div>
 
       {/* Right panel */}
-      <div className="flex-1 overflow-y-auto p-6 space-y-6">
-        {tab === 'queue' && (
+<div className="flex-1 overflow-y-auto p-6 space-y-6">
+  <ContentSourceMappings />
+
+  {tab === 'queue' && (
           <>
             {driveFiles.length > 0 && (
               <div>
@@ -1115,7 +1134,8 @@ export function InstagramTab() {
                       <div className="flex items-center gap-2 flex-wrap">
                         <p className="text-sm font-medium">{prettyAccountName(acc.ig_username ?? acc.name)}</p>
                         {acc.ig_username && <span className="text-xs text-pink-400">@{acc.ig_username}</span>}
-                        {acc.connected && <span className="text-[10px] bg-green-500/15 text-green-400 rounded px-1">connected</span>}
+                        {acc.graph_connected && <span className="text-[10px] bg-green-500/15 text-green-400 rounded px-1">api</span>}
+{acc.browser_connected && <span className="text-[10px] bg-blue-500/15 text-blue-400 rounded px-1">browser</span>}
                         {acc.google_drive_folder_id && <span className="text-[10px] bg-yellow-500/15 text-yellow-400 rounded px-1">drive</span>}
                       </div>
                       <div className="flex items-center gap-3 mt-0.5">
@@ -1161,3 +1181,4 @@ export function InstagramTab() {
     </div>
   )
 }
+

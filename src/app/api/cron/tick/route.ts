@@ -41,7 +41,7 @@ export async function GET(req: NextRequest) {
 
   // Instagram token refresh (tokens expiring within 7 days)
   if (dueReels.length > 0 || Math.random() < 0.1) {
-    fetch(`${base}/api/instagram/refresh`, {
+    fetch(`${base}/api/instagram/refresh-token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),

@@ -25,7 +25,7 @@ async function uploadZipToWavespeed(zipBuffer: Buffer): Promise<string> {
       'Offset': '0',
       'Content-Type': 'application/octet-stream',
     },
-    body: zipBuffer,
+    body: new Uint8Array(zipBuffer),
   })
   const data = await res.json()
   if (!res.ok || !data.download_url) {

@@ -203,7 +203,7 @@ export default function SchedulePage() {
           {/* Character */}
           <div className="space-y-1.5">
             <Label className="text-xs text-muted-foreground uppercase tracking-wider">Character</Label>
-            <Select value={characterId} onValueChange={v => { if (v) { setCharacterId(v); setPrefilled(false) }; setImageUrl('') }}>
+            <Select value={characterId} onValueChange={v => { if (v) { setCharacterId(v); setPrefilled(false) }; setImageUrls([]) }}>
               <SelectTrigger className="bg-input border-border">
                 <SelectValue placeholder="Select character" />
               </SelectTrigger>

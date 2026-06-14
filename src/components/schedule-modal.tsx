@@ -1,7 +1,6 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { charactersStore } from '@/lib/store'
 import { Character } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -36,9 +35,35 @@ export function ScheduleModal({ open, onClose, imageUrls, characterId: initCharI
   const [scheduledAt, setScheduledAt] = useState(toLocalDatetimeInput())
   const [loading, setLoading] = useState(false)
 
-  useEffect(() => {
-    setCharacters(charactersStore.getAll())
-  }, [])
+useEffect(() => {
+  let cancelled = false
+
+  async function loadCharacters() {
+    try {
+      const res = await fetch('/api/characters')
+      const data = await res.json()
+
+      if (!res.ok) {
+        throw new Error(data.error ?? 'Failed to load characters')
+      }
+
+      if (!cancelled) {
+        setCharacters(data)
+      }
+    } catch (err) {
+      console.error('[schedule-modal] load characters failed', err)
+      if (!cancelled) {
+        setCharacters([])
+      }
+    }
+  }
+
+  loadCharacters()
+
+  return () => {
+    cancelled = true
+  }
+}, [])
 
   useEffect(() => {
     if (open) {
@@ -57,14 +82,15 @@ export function ScheduleModal({ open, onClose, imageUrls, characterId: initCharI
       const res = await fetch('/api/schedule/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          characterId: charId,
-          characterName: char?.name ?? initCharName ?? charId,
-          imageUrls,
-          caption,
-          scheduledAt: new Date(scheduledAt).toISOString(),
-          status: 'pending_approval',
-        }),
+       body: JSON.stringify({
+  characterId: charId,
+  characterName: char?.name ?? initCharName ?? charId,
+  imageUrls,
+  caption: caption.trim() || 'Scheduled post',
+  platforms: ['telegram'],
+  scheduledAt: new Date(scheduledAt).toISOString(),
+  createdBy: 'admin',
+}),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Failed')
