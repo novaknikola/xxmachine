@@ -427,10 +427,34 @@ export function GenerateTab() {
   }, [user])
 
   useEffect(() => {
-    const chars = charactersStore.getAll()
-    setCharacters(chars)
-    if (chars.length > 0) setCharacterId(chars[0].id)
-    refreshHistory()
+    let cancelled = false
+
+    async function loadCharacters() {
+      try {
+        const res = await fetch('/api/characters', { cache: 'no-store' })
+        const chars = await res.json()
+        if (!res.ok) throw new Error(chars.error || 'Failed to load characters')
+        if (cancelled) return
+
+        setCharacters(chars)
+        setCharacterId(prev => prev || (chars.length > 0 ? chars[0].id : ''))
+      } catch (err) {
+        console.error('[GenerateTab] failed to load characters from API', err)
+        const fallback = charactersStore.getAll()
+        if (!cancelled) {
+          setCharacters(fallback)
+          setCharacterId(prev => prev || (fallback.length > 0 ? fallback[0].id : ''))
+        }
+      } finally {
+        if (!cancelled) refreshHistory()
+      }
+    }
+
+    loadCharacters()
+
+    return () => {
+      cancelled = true
+    }
   }, [user, refreshHistory])
 
   async function handleGenerate() {

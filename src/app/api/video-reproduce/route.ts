@@ -7,6 +7,7 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 
 const execFileAsync = promisify(execFile)
+const FFMPEG_BIN = process.env.FFMPEG_PATH || 'ffmpeg'
 
 // In-memory store: id → file path (cleaned up after 1 hour)
 const videoStore = new Map<string, { path: string; expires: number }>()
@@ -100,6 +101,7 @@ export async function POST(req: NextRequest) {
     writeFileSync(inputPath, Buffer.from(await file.arrayBuffer()))
 
     const results: Array<{ id: string; seed: number }> = []
+    const failures: string[] = []
 
     for (let i = 0; i < count; i++) {
       const seed = baseSeed + i * 1337
@@ -109,7 +111,7 @@ export async function POST(req: NextRequest) {
 
       try {
         const vf = buildVf(settings)
-        await execFileAsync('ffmpeg', [
+        await execFileAsync(FFMPEG_BIN, [
           '-y', '-i', inputPath,
           '-vf', vf,
           '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
@@ -127,6 +129,14 @@ export async function POST(req: NextRequest) {
     }
 
     try { unlinkSync(inputPath) } catch {}
+
+    if (results.length === 0) {
+      return NextResponse.json({
+        error: failures[0] || 'No video variants generated. Please verify FFmpeg is installed and the uploaded file is a valid video.',
+        failures,
+      }, { status: 500 })
+    }
+
     return NextResponse.json({ results })
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : 'Unknown error' }, { status: 500 })
@@ -155,3 +165,4 @@ export async function GET(req: NextRequest) {
     },
   })
 }
+
