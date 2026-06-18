@@ -240,6 +240,7 @@ try {
 
   const args = [
     '--no-sandbox',
+    '--disable-dev-shm-usage',
     '--disable-blink-features=AutomationControlled',
     '--window-size=1280,900',
     '--lang=en-US',
@@ -259,8 +260,12 @@ try {
     }
   }
 
+  const hasDisplay = Boolean(process.env.DISPLAY)
+  const launchHeadless = process.env.PUPPETEER_HEADLESS === 'true' || (process.platform !== 'win32' && !hasDisplay)
+  console.log(`[open-browser] Launch mode: ${launchHeadless ? 'headless' : 'headful'}${hasDisplay ? ' (DISPLAY available)' : ''}`)
+
   browser = await puppeteer.launch({
-    headless: false,
+    headless: launchHeadless ? 'new' : false,
     executablePath,
     userDataDir,
     args,

@@ -74,10 +74,19 @@ export function VideoReproduceTab() {
 
       try {
         const res = await fetch('/api/video-reproduce', { method: 'POST', body: fd })
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error ?? 'Failed')
+        const contentType = res.headers.get('content-type') || ''
+        const data = contentType.includes('application/json')
+          ? await res.json()
+          : { error: (await res.text()).slice(0, 500) || `Non-JSON response (${res.status})` }
 
-        for (const r of (data.results ?? [])) {
+        if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`)
+
+        const results = Array.isArray(data.results) ? data.results : []
+        if (results.length === 0) {
+          throw new Error(data.error ?? 'No video variations were generated.')
+        }
+
+        for (const r of results) {
           setVariants(prev => [...prev, {
             id: r.id,
             sourceName: src.name,
@@ -95,7 +104,11 @@ export function VideoReproduceTab() {
     }
 
     setRunning(false)
-    if (!abortRef.current) toast.success(`${done} video variations ready`)
+    if (!abortRef.current && done > 0) {
+      toast.success(`${done} video variations ready`)
+    } else if (!abortRef.current && done === 0) {
+      toast.error('No video variations were generated. Please check the error above.')
+    }
   }
 
   async function downloadAll() {
