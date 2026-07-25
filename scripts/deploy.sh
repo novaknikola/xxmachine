@@ -32,6 +32,7 @@ tar -czf "${BACKUP_DIR}/app-src.tgz" \
   --exclude=node_modules \
   --exclude=.next \
   --exclude='.next-before-*' \
+  --exclude=.git \
   .
 log "Backup → ${BACKUP_DIR}"
 
