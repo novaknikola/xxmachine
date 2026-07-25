@@ -1,9 +1,20 @@
 import { one, query, rows } from '@/lib/db'
-import { classifyContentImage } from './classify'
-import { extractScenePrompt, getFrameBase64 } from './analyze'
+import { analyzeVideoContent, classifyContentImage } from './classify'
+import {
+  extractKeyframePrompts,
+  extractMotionPrompt,
+  getFrameBase64,
+  probeSourceVideo,
+  scenePromptFromFrame,
+  type SourceProbe,
+} from './analyze'
 import { generateReplicaImage, generateReplicaVideo } from './replicate'
+import { getTechnique, resolveExecutable } from './techniques'
 import { notifyReplicationDone, notifyReplicationFailed } from './notify'
-import type { CharacterLora, DiscoveryItemRow, TrackedProfileRow } from './types'
+import type { CharacterLora, DiscoveryItemRow, TrackedProfileRow, VideoTechnique } from './types'
+
+/** Frames sampled per clip for technique detection. */
+const PROBE_FRAME_COUNT = 5
 
 export async function loadCharacter(characterId: string | null): Promise<CharacterLora | null> {
   if (!characterId) return null
@@ -13,6 +24,21 @@ export async function loadCharacter(characterId: string | null): Promise<Charact
        FROM characters WHERE id = $1`,
     [characterId],
   )
+}
+
+/**
+ * Only content with nothing to reproduce is skipped. Whether the source was generated
+ * or filmed does not matter — we are recreating the shot with our own character either
+ * way, and authentic footage is often the better reference.
+ */
+function isSkippable(contentType: string | null): boolean {
+  return contentType === 'other'
+}
+
+/** Still-only content yields just a keyframe; anything else with a clip gets a video. */
+function shouldGenerateVideo(contentType: string | null, videoUrl: string | null): boolean {
+  if (!videoUrl) return false
+  return contentType !== 'carousel' && contentType !== 'image_gen'
 }
 
 export async function classifyDiscoveryItem(itemId: string, userId: string) {
@@ -28,28 +54,73 @@ export async function classifyDiscoveryItem(itemId: string, userId: string) {
   )
 
   try {
-    const frame = await getFrameBase64({
-      videoUrl: item.video_url,
-      thumbnailUrl: item.thumbnail_url,
-      tag: itemId.slice(0, 8),
-    })
-    const result = await classifyContentImage(frame)
+    // With a source clip we can measure duration and cuts, which lets us decide the
+    // technique. Without one there is nothing to detect beyond the content type.
+    const probe = item.video_url
+      ? await probeSourceVideo(item.video_url, PROBE_FRAME_COUNT)
+      : null
+
+    if (!probe) {
+      const frame = await getFrameBase64({
+        videoUrl: item.video_url,
+        thumbnailUrl: item.thumbnail_url,
+        tag: itemId.slice(0, 8),
+      })
+      const result = await classifyContentImage(frame)
+
+      await query(
+        `UPDATE discovery_items
+            SET content_type = $2, category = $2,
+                replicate_status = $3, replicate_error = NULL
+          WHERE id = $1`,
+        [
+          itemId,
+          result.content_type,
+          isSkippable(result.content_type) ? 'skipped' : 'classified',
+        ],
+      )
+      return { ...result, video_technique: null as VideoTechnique | null }
+    }
+
+    const analysis = await analyzeVideoContent(probe)
+    const spec = getTechnique(analysis.video_technique)
+
+    // Park what we can identify but cannot yet reproduce, rather than routing it
+    // to a model that would return something unrelated.
+    const status = isSkippable(analysis.content_type)
+      ? 'skipped'
+      : spec.model
+        ? 'classified'
+        : 'needs_review'
 
     await query(
       `UPDATE discovery_items
-          SET content_type = $2, category = $2, replicate_status = 'classified', replicate_error = NULL
+          SET content_type = $2, category = $2,
+              video_technique = $3, technique_confidence = $4, technique_reasoning = $5,
+              source_duration = $6, source_cut_count = $7,
+              replicate_status = $8,
+              replicate_error = $9
         WHERE id = $1`,
-      [itemId, result.content_type],
+      [
+        itemId,
+        analysis.content_type,
+        analysis.video_technique,
+        analysis.technique_confidence,
+        analysis.reasoning,
+        probe.duration,
+        probe.cutCount,
+        status,
+        status === 'needs_review' ? spec.reviewReason ?? null : null,
+      ],
     )
 
-    if (result.content_type === 'real_photo' || result.content_type === 'other') {
-      await query(
-        `UPDATE discovery_items SET replicate_status = 'skipped' WHERE id = $1`,
-        [itemId],
-      )
+    return {
+      content_type: analysis.content_type,
+      confidence: analysis.technique_confidence,
+      reasoning: analysis.reasoning,
+      suggested_pipeline: spec.label,
+      video_technique: analysis.video_technique,
     }
-
-    return result
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     await query(
@@ -60,10 +131,16 @@ export async function classifyDiscoveryItem(itemId: string, userId: string) {
   }
 }
 
+export interface ReplicateOptions {
+  /** Stop once the keyframes exist, so they can be reviewed before paying for video. */
+  stopAfterImage?: boolean
+}
+
 export async function replicateDiscoveryItem(
   itemId: string,
   userId: string,
   characterOverride?: CharacterLora | null,
+  options?: ReplicateOptions,
 ) {
   const item = await one<DiscoveryItemRow>(
     `SELECT * FROM discovery_items WHERE id = $1 AND user_id = $2`,
@@ -86,7 +163,7 @@ export async function replicateDiscoveryItem(
 
   const contentType = item.content_type ?? 'video_gen'
 
-  if (contentType === 'real_photo' || contentType === 'other') {
+  if (isSkippable(contentType)) {
     await query(
       `UPDATE discovery_items SET replicate_status = 'skipped' WHERE id = $1`,
       [itemId],
@@ -94,15 +171,47 @@ export async function replicateDiscoveryItem(
     return { skipped: true, reason: contentType }
   }
 
+  const isVideo = shouldGenerateVideo(contentType, item.video_url)
+
+  // Techniques we cannot build are parked as needs_review during classification, which
+  // keeps autopilot away from them. Reaching this function means someone asked for it
+  // explicitly, so fall back to the closest runnable approach and record what was used.
+  const { technique, fellBack } = resolveExecutable(item.video_technique, Boolean(item.video_url))
+  const spec = getTechnique(technique)
+
   try {
-    // Step 1: Scene prompt
-    if (!item.scene_prompt) {
+    // Probing downloads the clip and runs ffmpeg, so do it once and only when a
+    // prompt we still need can't be produced without it.
+    let probe: SourceProbe | null = null
+    const needsProbe = isVideo && (
+      !item.scene_prompt ||
+      (spec.needsMotionPrompt && !item.motion_prompt) ||
+      (spec.needsEndImage && !item.end_scene_prompt)
+    )
+    if (needsProbe && item.video_url) {
       await query(`UPDATE discovery_items SET replicate_status = 'analyzing' WHERE id = $1`, [itemId])
-      const scenePrompt = await extractScenePrompt({
-        videoUrl: item.video_url,
-        thumbnailUrl: item.thumbnail_url,
-        tag: itemId.slice(0, 8),
-      })
+      probe = await probeSourceVideo(item.video_url, PROBE_FRAME_COUNT)
+    }
+
+    // Step 1: keyframe descriptions — two of them when interpolating between states.
+    if (spec.needsEndImage && (!item.scene_prompt || !item.end_scene_prompt)) {
+      if (!probe) throw new Error('Could not read source video for keyframe analysis')
+      const { start, end } = await extractKeyframePrompts(probe)
+      await query(
+        `UPDATE discovery_items SET scene_prompt = $2, end_scene_prompt = $3 WHERE id = $1`,
+        [itemId, start, end],
+      )
+      item.scene_prompt = start
+      item.end_scene_prompt = end
+    } else if (!item.scene_prompt) {
+      await query(`UPDATE discovery_items SET replicate_status = 'analyzing' WHERE id = $1`, [itemId])
+      const scenePrompt = probe
+        ? await scenePromptFromFrame(probe.frames[0])
+        : await scenePromptFromFrame(await getFrameBase64({
+            videoUrl: item.video_url,
+            thumbnailUrl: item.thumbnail_url,
+            tag: itemId.slice(0, 8),
+          }))
       await query(
         `UPDATE discovery_items SET scene_prompt = $2 WHERE id = $1`,
         [itemId, scenePrompt],
@@ -110,7 +219,17 @@ export async function replicateDiscoveryItem(
       item.scene_prompt = scenePrompt
     }
 
-    // Step 2: Image
+    // Step 2: motion description, for the models that are driven by it.
+    if (spec.needsMotionPrompt && !item.motion_prompt && probe) {
+      const motionPrompt = await extractMotionPrompt(probe)
+      await query(
+        `UPDATE discovery_items SET motion_prompt = $2 WHERE id = $1`,
+        [itemId, motionPrompt],
+      )
+      item.motion_prompt = motionPrompt
+    }
+
+    // Step 3: character keyframes.
     if (!item.generated_image_url) {
       await query(`UPDATE discovery_items SET replicate_status = 'image_generating' WHERE id = $1`, [itemId])
       const imageUrl = await generateReplicaImage({
@@ -127,13 +246,54 @@ export async function replicateDiscoveryItem(
       item.generated_image_url = imageUrl
     }
 
-    // Step 3: Video (for video_gen)
-    if (contentType === 'video_gen' && item.video_url && !item.kling_video_url) {
-      await query(`UPDATE discovery_items SET replicate_status = 'video_generating' WHERE id = $1`, [itemId])
-      const videoUrl = await generateReplicaVideo(item.generated_image_url!, item.video_url)
+    if (spec.needsEndImage && !item.generated_end_image_url) {
+      await query(`UPDATE discovery_items SET replicate_status = 'image_generating' WHERE id = $1`, [itemId])
+      const endImageUrl = await generateReplicaImage({
+        scenePrompt: item.end_scene_prompt!,
+        loraUrl: character.lora_url,
+        loraScale: character.lora_scale,
+        triggerWord: character.trigger_word,
+        basePromptStyle: character.base_prompt_style,
+      })
       await query(
-        `UPDATE discovery_items SET kling_video_url = $2, replicate_status = 'done', replicate_error = NULL WHERE id = $1`,
-        [itemId, videoUrl],
+        `UPDATE discovery_items SET generated_end_image_url = $2, replicate_status = 'image_done' WHERE id = $1`,
+        [itemId, endImageUrl],
+      )
+      item.generated_end_image_url = endImageUrl
+    }
+
+    if (options?.stopAfterImage) {
+      await query(
+        `UPDATE discovery_items SET replicate_status = 'image_done', replicate_error = NULL WHERE id = $1`,
+        [itemId],
+      )
+      return {
+        ok: true,
+        stoppedAfterImage: true,
+        imageUrl: item.generated_image_url,
+        endImageUrl: item.generated_end_image_url,
+        technique,
+        fellBack,
+      }
+    }
+
+    // Step 4: video via whichever model the technique resolved to.
+    if (isVideo && !item.kling_video_url) {
+      await query(`UPDATE discovery_items SET replicate_status = 'video_generating' WHERE id = $1`, [itemId])
+      const result = await generateReplicaVideo({
+        technique,
+        imageUrl: item.generated_image_url!,
+        endImageUrl: item.generated_end_image_url,
+        sourceVideoUrl: item.video_url,
+        motionPrompt: item.motion_prompt,
+        duration: item.source_duration ?? probe?.duration ?? null,
+      })
+      await query(
+        `UPDATE discovery_items
+            SET kling_video_url = $2, video_model = $3, video_technique = $4,
+                replicate_status = 'done', replicate_error = NULL
+          WHERE id = $1`,
+        [itemId, result.videoUrl, result.model, result.technique],
       )
       await notifyReplicationDone({
         userId,
@@ -141,9 +301,16 @@ export async function replicateDiscoveryItem(
         contentUrl: item.content_url,
         contentType,
         imageUrl: item.generated_image_url,
-        videoUrl,
+        videoUrl: result.videoUrl,
       }).catch(() => {})
-      return { ok: true, imageUrl: item.generated_image_url, videoUrl }
+      return {
+        ok: true,
+        imageUrl: item.generated_image_url,
+        videoUrl: result.videoUrl,
+        technique: result.technique,
+        model: result.model,
+        fellBack,
+      }
     }
 
     await query(
@@ -175,13 +342,21 @@ export async function processNewItems(userId: string, itemIds: string[]) {
   for (const id of itemIds) {
     try {
       await classifyDiscoveryItem(id, userId)
-      const item = await one<{ content_type: string | null; admin_status: string }>(
-        `SELECT content_type, admin_status FROM discovery_items WHERE id = $1`,
+      const item = await one<{
+        content_type: string | null
+        admin_status: string
+        replicate_status: string
+      }>(
+        `SELECT content_type, admin_status, replicate_status FROM discovery_items WHERE id = $1`,
         [id],
       )
-      if (item?.admin_status === 'APPROVED' && item.content_type && !['real_photo', 'other'].includes(item.content_type)) {
-        await replicateDiscoveryItem(id, userId)
-      }
+      const replicable =
+        item?.admin_status === 'APPROVED' &&
+        item.content_type &&
+        !isSkippable(item.content_type) &&
+        item.replicate_status !== 'needs_review'
+
+      if (replicable) await replicateDiscoveryItem(id, userId)
       results.push({ id, ok: true })
     } catch (err) {
       results.push({ id, ok: false, error: err instanceof Error ? err.message : String(err) })

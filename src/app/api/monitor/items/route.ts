@@ -13,11 +13,13 @@ export async function GET(req: NextRequest) {
   const params: unknown[] = [auth.id]
 
   if (status === 'active') {
-    where += ` AND replicate_status NOT IN ('done', 'skipped', 'failed', 'none')`
+    where += ` AND replicate_status NOT IN ('done', 'skipped', 'failed', 'none', 'needs_review')`
   } else if (status === 'done') {
     where += ` AND replicate_status = 'done'`
   } else if (status === 'failed') {
     where += ` AND replicate_status = 'failed'`
+  } else if (status === 'review') {
+    where += ` AND replicate_status = 'needs_review'`
   } else if (status === 'pending') {
     where += ` AND replicate_status IN ('none', 'pending_classify', 'classified')`
   }
@@ -26,8 +28,11 @@ export async function GET(req: NextRequest) {
 
   const items = await rows(
     `SELECT id, platform, profile, content_url, content_id, views, score,
-            content_type, thumbnail_url, video_url, scene_prompt,
-            generated_image_url, kling_video_url, replicate_status, replicate_error,
+            content_type, video_technique, technique_confidence, technique_reasoning,
+            source_duration, source_cut_count, video_model,
+            thumbnail_url, video_url, scene_prompt, end_scene_prompt, motion_prompt,
+            generated_image_url, generated_end_image_url,
+            kling_video_url, replicate_status, replicate_error,
             admin_status, posted_at, discovered_at
        FROM discovery_items
       WHERE ${where}

@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
   if (!profile) return NextResponse.json({ error: 'Profile not found' }, { status: 404 })
 
   try {
-    const { added, newItemIds, scanned } = await scanTrackedProfile(userId, profile)
+    const { added, newItemIds, scanned, source } = await scanTrackedProfile(userId, profile)
 
     if (added > 0) {
       await notifyNewPosts(userId, profile.username, added).catch(() => {})
@@ -59,7 +59,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    return NextResponse.json({ ok: true, added, scanned, newItemIds, processed })
+    return NextResponse.json({ ok: true, added, scanned, newItemIds, processed, source })
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : 'Scan failed' },

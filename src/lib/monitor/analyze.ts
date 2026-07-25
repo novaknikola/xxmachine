@@ -3,9 +3,16 @@ import { promisify } from 'util'
 import { writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { randomUUID } from 'crypto'
 import { callGrok, GROK_SMART, base64ImageContent } from '@/lib/grok'
 
 const execFileAsync = promisify(execFile)
+
+/** Frames are downscaled before base64 encoding — vision tokens scale with pixels. */
+const FRAME_WIDTH = 512
+/** ffmpeg scene score above which a frame boundary counts as a hard cut. */
+const SCENE_THRESHOLD = 0.35
+const MAX_VIDEO_BYTES = 40_000_000
 
 export const SCENE_PROMPT_SYSTEM = `You are analyzing an Instagram Reel frame to generate a detailed image generation prompt.
 
@@ -63,6 +70,126 @@ export async function extractVideoFrame(videoUrl: string, tag: string): Promise<
   }
 }
 
+/** Measured properties of the source clip. Objective — no model inference involved. */
+export interface SourceProbe {
+  /** Evenly spaced JPEG frames as base64, first to last. */
+  frames: string[]
+  duration: number | null
+  /** Hard cuts detected by ffmpeg scene scoring. 0 means one continuous shot. */
+  cutCount: number
+  hasAudio: boolean
+}
+
+async function downloadVideo(videoUrl: string, path: string): Promise<void> {
+  const res = await fetch(videoUrl, { signal: AbortSignal.timeout(45_000) })
+  if (!res.ok) throw new Error(`source video fetch failed: ${res.status}`)
+
+  const declared = Number(res.headers.get('content-length') ?? 0)
+  if (declared > MAX_VIDEO_BYTES) throw new Error(`source video too large: ${declared} bytes`)
+
+  const buffer = Buffer.from(await res.arrayBuffer())
+  if (buffer.byteLength === 0) throw new Error('source video is empty')
+  if (buffer.byteLength > MAX_VIDEO_BYTES) throw new Error('source video too large')
+
+  writeFileSync(path, buffer)
+}
+
+async function probeFormat(path: string): Promise<{ duration: number | null; hasAudio: boolean }> {
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', path,
+    ])
+    const json = JSON.parse(stdout)
+    const duration = parseFloat(json.format?.duration ?? '0')
+    const hasAudio = (json.streams ?? []).some(
+      (s: { codec_type?: string }) => s.codec_type === 'audio',
+    )
+    return { duration: duration > 0 ? duration : null, hasAudio }
+  } catch {
+    return { duration: null, hasAudio: false }
+  }
+}
+
+/**
+ * Counts hard cuts via ffmpeg's scene score. This is the single most decisive
+ * signal for technique routing: a clip with cuts cannot be reproduced by any
+ * one-shot generation call regardless of what the vision model thinks it sees.
+ */
+async function countSceneCuts(path: string): Promise<number> {
+  try {
+    const { stderr } = await execFileAsync('ffmpeg', [
+      '-i', path,
+      '-vf', `select='gt(scene,${SCENE_THRESHOLD})',showinfo`,
+      '-f', 'null', '-',
+    ], { maxBuffer: 20_000_000 })
+    return (stderr.match(/pts_time:/g) ?? []).length
+  } catch {
+    return 0
+  }
+}
+
+async function extractFrameAt(path: string, seconds: number, outPath: string): Promise<string | null> {
+  try {
+    await execFileAsync('ffmpeg', [
+      '-y', '-ss', seconds.toFixed(2), '-i', path,
+      '-vframes', '1', '-vf', `scale=${FRAME_WIDTH}:-2`, '-q:v', '3', outPath,
+    ])
+    if (!existsSync(outPath)) return null
+    return readFileSync(outPath).toString('base64')
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Downloads the clip once, then derives everything technique detection needs:
+ * evenly spaced frames plus the measured duration, cut count and audio presence.
+ */
+export async function probeSourceVideo(
+  videoUrl: string,
+  frameCount = 5,
+): Promise<SourceProbe | null> {
+  const id = randomUUID()
+  const videoPath = join(tmpdir(), `mon_probe_${id}.mp4`)
+  const framePaths: string[] = []
+
+  try {
+    await downloadVideo(videoUrl, videoPath)
+
+    const { duration, hasAudio } = await probeFormat(videoPath)
+    const cutCount = await countSceneCuts(videoPath)
+
+    // Without a duration we can only trust an early frame; seeking blind risks empty output.
+    const span = duration ?? 3
+    const first = Math.min(0.4, span * 0.05)
+    const last = Math.max(first, span - 0.25)
+    const step = frameCount > 1 ? (last - first) / (frameCount - 1) : 0
+
+    const frames: string[] = []
+    for (let i = 0; i < frameCount; i++) {
+      const outPath = join(tmpdir(), `mon_probe_${id}_${i}.jpg`)
+      framePaths.push(outPath)
+      const frame = await extractFrameAt(videoPath, first + step * i, outPath)
+      if (frame) frames.push(frame)
+    }
+
+    if (!frames.length) {
+      console.warn('[monitor/probe] no frames extracted from', videoUrl.slice(0, 80))
+      return null
+    }
+    return { frames, duration, cutCount, hasAudio }
+  } catch (err) {
+    // Callers fall back to thumbnail-only classification, which silently loses
+    // technique detection — so make the reason visible.
+    console.warn('[monitor/probe] failed:', err instanceof Error ? err.message : err)
+    return null
+  } finally {
+    for (const p of [videoPath, ...framePaths]) {
+      try { if (existsSync(p)) unlinkSync(p) } catch {}
+    }
+  }
+}
+
 export async function fetchImageAsBase64(url: string): Promise<string> {
   const res = await fetch(url, { signal: AbortSignal.timeout(15_000) })
   if (!res.ok) throw new Error(`Image fetch failed: ${res.status}`)
@@ -100,6 +227,92 @@ export async function extractScenePrompt(opts: {
   })
 
   if (!prompt?.trim()) throw new Error('Empty scene prompt from Grok')
+  return prompt.trim()
+}
+
+/** Scene description for a single frame, reusing the shared 4-element system prompt. */
+export async function scenePromptFromFrame(frameBase64: string): Promise<string> {
+  const prompt = await callGrok({
+    model: GROK_SMART,
+    messages: [{
+      role: 'user',
+      content: [
+        base64ImageContent(frameBase64),
+        { type: 'text', text: SCENE_PROMPT_SYSTEM },
+      ],
+    }],
+    maxTokens: 2048,
+    temperature: 0.4,
+  })
+  if (!prompt?.trim()) throw new Error('Empty scene prompt from Grok')
+  return prompt.trim()
+}
+
+const END_FRAME_SUFFIX = `
+
+IMPORTANT: this is the FINAL frame of a clip that began in a different state.
+Describe this end state on its own terms, in full — do not reference the beginning
+or use words like "now", "then", "has changed".`
+
+/**
+ * Start and end descriptions for a first_last_frame reproduction. Both frames get
+ * their own standalone prompt so each generated keyframe is independently valid.
+ */
+export async function extractKeyframePrompts(probe: SourceProbe): Promise<{
+  start: string
+  end: string
+}> {
+  const firstFrame = probe.frames[0]
+  const lastFrame = probe.frames[probe.frames.length - 1]
+  if (!firstFrame || !lastFrame) throw new Error('Not enough frames for keyframe analysis')
+
+  const start = await scenePromptFromFrame(firstFrame)
+  const end = await callGrok({
+    model: GROK_SMART,
+    messages: [{
+      role: 'user',
+      content: [
+        base64ImageContent(lastFrame),
+        { type: 'text', text: SCENE_PROMPT_SYSTEM + END_FRAME_SUFFIX },
+      ],
+    }],
+    maxTokens: 2048,
+    temperature: 0.4,
+  })
+  if (!end?.trim()) throw new Error('Empty end-frame prompt from Grok')
+  return { start, end: end.trim() }
+}
+
+const MOTION_PROMPT_SYSTEM = `You are given frames sampled in order from a short vertical video.
+
+Write a single motion prompt for an image-to-video model: describe ONLY what moves
+and how, across the clip.
+
+Cover:
+- Subject motion (what the body/hands/head do, and at what pace)
+- Camera motion (static / slow push in / pull back / pan left-right / orbit / handheld sway)
+- Any environmental motion (hair, fabric, water, traffic, light shifts)
+
+RULES:
+- Do NOT describe appearance, face, clothing or setting — only movement.
+- Do NOT mention frames, images or the video itself.
+- One or two sentences, present tense, max 60 words.`
+
+/** Motion description for image_to_video and extend techniques. */
+export async function extractMotionPrompt(probe: SourceProbe): Promise<string> {
+  const prompt = await callGrok({
+    model: GROK_SMART,
+    messages: [{
+      role: 'user',
+      content: [
+        ...probe.frames.map(f => base64ImageContent(f)),
+        { type: 'text', text: MOTION_PROMPT_SYSTEM },
+      ],
+    }],
+    maxTokens: 512,
+    temperature: 0.4,
+  })
+  if (!prompt?.trim()) throw new Error('Empty motion prompt from Grok')
   return prompt.trim()
 }
 

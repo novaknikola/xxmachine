@@ -1,6 +1,8 @@
+import { getTechnique } from './techniques'
+import type { VideoTechnique } from './types'
+
 const WAVESPEED_KEY = process.env.WAVESPEED_API_KEY!
 const IMAGE_MODEL = 'wavespeed-ai/z-image/turbo-lora'
-const VIDEO_MODEL = 'kwaivgi/kling-v2.6-std/motion-control'
 const API_V2 = 'https://api.wavespeed.ai/api/v2'
 const API_V3 = 'https://api.wavespeed.ai/api/v3'
 
@@ -24,7 +26,7 @@ async function pollV2(requestId: string, signal: AbortSignal): Promise<string> {
   throw new Error('Wavespeed image timeout')
 }
 
-async function pollV3(requestId: string, signal: AbortSignal): Promise<string> {
+async function pollV3(requestId: string, signal: AbortSignal, label: string): Promise<string> {
   for (let i = 0; i < 60; i++) {
     if (signal.aborted) throw new Error('Aborted')
     await new Promise(r => setTimeout(r, 5000))
@@ -36,12 +38,14 @@ async function pollV3(requestId: string, signal: AbortSignal): Promise<string> {
     const status = data?.data?.status ?? data?.status
     if (status === 'completed') {
       const outputs = data?.data?.outputs ?? data?.outputs
-      if (!outputs?.length) throw new Error('No video output')
+      if (!outputs?.length) throw new Error(`${label}: no video output`)
       return outputs[0] as string
     }
-    if (status === 'failed') throw new Error('Kling failed: ' + JSON.stringify(data?.data?.error))
+    if (status === 'failed') {
+      throw new Error(`${label} failed: ` + JSON.stringify(data?.data?.error))
+    }
   }
-  throw new Error('Kling video timeout')
+  throw new Error(`${label}: video timeout`)
 }
 
 export async function generateReplicaImage(opts: {
@@ -86,27 +90,52 @@ export async function generateReplicaImage(opts: {
   return pollV2(requestId, AbortSignal.timeout(130_000))
 }
 
-export async function generateReplicaVideo(imageUrl: string, sourceVideoUrl: string): Promise<string> {
+export interface ReplicaVideoInput {
+  technique: VideoTechnique
+  imageUrl: string
+  endImageUrl?: string | null
+  sourceVideoUrl?: string | null
+  motionPrompt?: string | null
+  duration?: number | null
+}
+
+export interface ReplicaVideoResult {
+  videoUrl: string
+  /** The endpoint that produced the clip, recorded for auditing routing decisions. */
+  model: string
+  technique: VideoTechnique
+}
+
+/** Dispatches to whichever model the detected technique calls for. */
+export async function generateReplicaVideo(input: ReplicaVideoInput): Promise<ReplicaVideoResult> {
   if (!WAVESPEED_KEY) throw new Error('WAVESPEED_API_KEY not configured')
 
-  const initRes = await fetch(`${API_V3}/${VIDEO_MODEL}`, {
+  const spec = getTechnique(input.technique)
+  if (!spec.model || !spec.buildPayload) {
+    throw new Error(spec.reviewReason ?? `Technique ${input.technique} is not executable`)
+  }
+  if (spec.needsSourceVideo && !input.sourceVideoUrl) {
+    throw new Error(`${spec.label} requires the source video, which is unavailable`)
+  }
+  if (spec.needsEndImage && !input.endImageUrl) {
+    throw new Error(`${spec.label} requires a generated end frame`)
+  }
+
+  const initRes = await fetch(`${API_V3}/${spec.model}`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${WAVESPEED_KEY}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      image: imageUrl,
-      video: sourceVideoUrl,
-      character_orientation: 'image',
-    }),
+    body: JSON.stringify(spec.buildPayload(input)),
   })
   const initData = await initRes.json()
   if (initData.code && initData.code !== 200) {
-    throw new Error(initData.message ?? JSON.stringify(initData))
+    throw new Error(`${spec.label} failed: ${initData.message ?? JSON.stringify(initData)}`)
   }
   const requestId = initData?.data?.id ?? initData?.id
-  if (!requestId) throw new Error('No request ID from Kling')
+  if (!requestId) throw new Error(`No request ID from ${spec.model}`)
 
-  return pollV3(requestId, AbortSignal.timeout(310_000))
+  const videoUrl = await pollV3(requestId, AbortSignal.timeout(310_000), spec.label)
+  return { videoUrl, model: spec.model, technique: spec.id }
 }

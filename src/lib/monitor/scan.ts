@@ -1,6 +1,6 @@
 import { one, query } from '@/lib/db'
 import { resolveKey } from '@/lib/user-keys'
-import { runApifyActorForUser, resolveVideoUrlViaRapidApi, type ApifyReel } from '@/lib/instagram-scrape'
+import { listProfileReels, resolveVideoUrlViaRapidApi, type ApifyReel } from '@/lib/instagram-scrape'
 import { calculateViralityScore, calculateVelocity } from '@/lib/virality'
 import type { TrackedProfileRow } from './types'
 
@@ -10,6 +10,8 @@ export interface ScanResult {
   added: number
   newItemIds: string[]
   scanned: number
+  /** Which lister produced the reels, so a silent Apify outage is visible. */
+  source: 'apify' | 'rapidapi'
 }
 
 export async function scanTrackedProfile(
@@ -23,11 +25,16 @@ export async function scanTrackedProfile(
 
   const rapidApiKey = await resolveKey(userId, 'RAPIDAPI_KEY')
   const limit = options?.resultsLimit ?? 12
-  const apifyReels = await runApifyActorForUser(profile.username, limit)
+  const {
+    reels: apifyReels,
+    source,
+    followers: listedFollowers,
+  } = await listProfileReels(profile.username, limit, rapidApiKey)
 
-  const followers = rapidApiKey
-    ? await fetchIgFollowers(profile.username, rapidApiKey).catch(() => 1)
-    : 1
+  // The lister already knows the follower count when it went through RapidAPI; only the
+  // Apify path needs a separate lookup. Falling back to 1 would inflate every score.
+  const followers = listedFollowers
+    ?? (rapidApiKey ? await fetchIgFollowers(profile.username, rapidApiKey).catch(() => 1) : 1)
 
   const cutoff = Date.now() - profile.max_age_days * 86_400_000
   const newItemIds: string[] = []
@@ -107,7 +114,7 @@ export async function scanTrackedProfile(
     [profile.id, userId, newItemIds.length],
   )
 
-  return { added: newItemIds.length, newItemIds, scanned }
+  return { added: newItemIds.length, newItemIds, scanned, source }
 }
 
 async function enrichReels(

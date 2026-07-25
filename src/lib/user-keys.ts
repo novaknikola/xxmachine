@@ -94,6 +94,7 @@ export async function resolveKey(userId: string, keyName: ByokKeyName): Promise<
   // Fallbacks to platform env vars
   const envFallbacks: Partial<Record<ByokKeyName, string | undefined>> = {
     WAVESPEED_API_KEY: process.env.WAVESPEED_API_KEY,
+    RAPIDAPI_KEY: process.env.RAPIDAPI_KEY,
   }
   return envFallbacks[keyName] ?? null
 }

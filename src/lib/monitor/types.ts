@@ -1,5 +1,18 @@
 export type ContentType = 'video_gen' | 'image_gen' | 'carousel' | 'real_photo' | 'other'
 
+/**
+ * What the source shot *requires*, not which product made it — a generated clip
+ * carries no reliable fingerprint of its origin model, but the motion structure
+ * of the shot is measurable and is what decides our own model choice.
+ */
+export type VideoTechnique =
+  | 'motion_transfer'   // body/camera motion copied 1:1 from the source clip
+  | 'image_to_video'    // one still + prompted motion, single continuous shot
+  | 'first_last_frame'  // clear A -> B state change, interpolated between keyframes
+  | 'multi_shot'        // several cuts, each segment generated then stitched
+  | 'extend'            // continuous shot longer than a single generation allows
+  | 'unknown'
+
 export type ReplicateStatus =
   | 'none'
   | 'pending_classify'
@@ -11,6 +24,7 @@ export type ReplicateStatus =
   | 'done'
   | 'failed'
   | 'skipped'
+  | 'needs_review'
 
 export interface TrackedProfileRow {
   id: string
@@ -42,9 +56,18 @@ export interface DiscoveryItemRow {
   thumbnail_url: string | null
   video_url: string | null
   content_type: ContentType | null
+  video_technique: VideoTechnique | null
+  technique_confidence: number | null
+  technique_reasoning: string | null
   scene_prompt: string | null
+  end_scene_prompt: string | null
+  motion_prompt: string | null
   generated_image_url: string | null
+  generated_end_image_url: string | null
   kling_video_url: string | null
+  video_model: string | null
+  source_duration: number | null
+  source_cut_count: number | null
   replicate_status: ReplicateStatus
   replicate_error: string | null
   posted_at: string | null
