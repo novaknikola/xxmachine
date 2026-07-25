@@ -1,10 +1,12 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, Suspense } from 'react'
+import { useSearchParams } from 'next/navigation'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
+import { IgDownloaderTab } from './ig-downloader-tab'
 import {
   Telescope,
   Plus,
@@ -316,11 +318,11 @@ function AddProfilePanel({ onAdd }: { onAdd: (p: Profile) => void }) {
   )
 }
 
-// ─── Main Page ──────────────────────────────────────────────────────
+// ─── Viral Feed Tab ─────────────────────────────────────────────────
 
 type ViewTab = 'pending' | 'approved' | 'rejected'
 
-export default function DiscoveryPage() {
+function ViralFeedTab() {
   const [profiles, setProfiles]       = useState<Profile[]>([])
   const [items, setItems]             = useState<DiscoveryItem[]>([])
   const [viewTab, setViewTab]         = useState<ViewTab>('pending')
@@ -421,21 +423,15 @@ export default function DiscoveryPage() {
   }`
 
   return (
-    <div className="p-6 max-w-4xl mx-auto space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            <Telescope className="w-5 h-5 text-primary" /> Discovery
-          </h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Track viral content on Instagram and TikTok profiles
-          </p>
-        </div>
+    <div className="max-w-4xl mx-auto space-y-6">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-sm text-muted-foreground">
+          Track viral content on Instagram and TikTok profiles
+        </p>
         <Button
           variant="outline"
           size="sm"
-          className="h-8"
+          className="h-8 shrink-0"
           onClick={() => fetchItems(viewTab)}
         >
           <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Refresh
@@ -520,5 +516,47 @@ export default function DiscoveryPage() {
         )}
       </div>
     </div>
+  )
+}
+
+// ─── Main Page ──────────────────────────────────────────────────────
+
+const TAB_LABELS = ['Viral Feed', 'IG Downloader'] as const
+type PageTab = typeof TAB_LABELS[number]
+
+function DiscoveryPageInner() {
+  const params = useSearchParams()
+  const initialTab: PageTab = params.get('tab') === 'downloader' ? 'IG Downloader' : 'Viral Feed'
+  const [tab, setTab] = useState<PageTab>(initialTab)
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="flex items-center gap-2 px-6 pt-5">
+        <Telescope className="w-5 h-5 text-primary" />
+        <h1 className="text-lg font-bold">Discovery</h1>
+      </div>
+
+      <div className="flex border-b border-border shrink-0 px-6 pt-3 gap-1 bg-background">
+        {TAB_LABELS.map(t => (
+          <button key={t} onClick={() => setTab(t)}
+            className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${tab === t ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`}>
+            {t}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-6">
+        {tab === 'Viral Feed' && <ViralFeedTab />}
+        {tab === 'IG Downloader' && <IgDownloaderTab />}
+      </div>
+    </div>
+  )
+}
+
+export default function DiscoveryPage() {
+  return (
+    <Suspense fallback={null}>
+      <DiscoveryPageInner />
+    </Suspense>
   )
 }

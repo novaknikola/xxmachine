@@ -17,7 +17,6 @@ import {
   Captions,
   Server,
   RefreshCw,
-  Download,
   Telescope,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -33,7 +32,6 @@ const NAV_ITEMS: Array<{
 }> = [
   { href: '/bulk', label: 'Image Studio', icon: ImageIcon, module: 'generator' },
   { href: '/repurpose', label: 'Repurpose', icon: RefreshCw },
-  { href: '/ig-downloader', label: 'IG Downloader', icon: Download },
   { href: '/captions', label: 'Captions', icon: Captions },
   { href: '/socials', label: 'Schedule', icon: Clapperboard, module: 'socials' },
   { href: '/discovery', label: 'Discovery', icon: Telescope },

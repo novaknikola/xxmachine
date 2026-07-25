@@ -1,19 +1,16 @@
 'use client'
 
-import { Download } from 'lucide-react'
-import { IgDownloaderTab } from './ig-downloader-tab'
+import { useEffect } from 'react'
+import { useRouter } from 'next/navigation'
 
-export default function IgDownloaderPage() {
-  return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center gap-2 px-6 pt-5">
-        <Download className="w-5 h-5 text-primary" />
-        <h1 className="text-lg font-bold">IG Downloader</h1>
-      </div>
+// The downloader now lives as a tab inside Discovery — keep this route so old
+// links and bookmarks still land in the right place.
+export default function IgDownloaderRedirectPage() {
+  const router = useRouter()
 
-      <div className="flex-1 overflow-y-auto p-6">
-        <IgDownloaderTab />
-      </div>
-    </div>
-  )
+  useEffect(() => {
+    router.replace('/discovery?tab=downloader')
+  }, [router])
+
+  return null
 }
