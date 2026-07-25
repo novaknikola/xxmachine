@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { rows, one, query } from '@/lib/db'
-import { requireAdmin } from '@/lib/session'
+import { requireAdmin, requireUser } from '@/lib/session'
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const auth = await requireUser(req)
+  if (auth instanceof NextResponse) return auth
+
   try {
     const chars = await rows(
       `SELECT
@@ -14,6 +17,7 @@ export async function GET() {
         COALESCE(story, '') AS story,
         COALESCE(start_date, '') AS "startDate",
         COALESCE(default_mode, 'SFW') AS "defaultMode",
+        COALESCE(trigger_word, '') AS "triggerWord",
         instagram_user_id,
         instagram_username,
         instagram_access_token,

@@ -6,13 +6,19 @@ import { Server } from 'lucide-react'
 import { TemplatesTab } from './templates-tab'
 import { GenerateTab } from './generate-tab'
 import { QueueTab } from './queue-tab'
+import { ReplicateTab } from './replicate-tab'
 
-const TAB_LABELS = ['Templates', 'Bulk Generate', 'Queue'] as const
+const TAB_LABELS = ['Replicate', 'Templates', 'Bulk Generate', 'Queue'] as const
 type Tab = typeof TAB_LABELS[number]
 
 function ComfyUIPageInner() {
   const params = useSearchParams()
-  const initialTab: Tab = params.get('tab') === 'queue' ? 'Queue' : 'Templates'
+  const tabParam = params.get('tab')
+  const initialTab: Tab =
+    tabParam === 'queue' ? 'Queue'
+    : tabParam === 'templates' ? 'Templates'
+    : tabParam === 'generate' ? 'Bulk Generate'
+    : 'Replicate'
   const [tab, setTab] = useState<Tab>(initialTab)
 
   return (
@@ -32,6 +38,7 @@ function ComfyUIPageInner() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-6">
+        {tab === 'Replicate' && <ReplicateTab />}
         {tab === 'Templates' && <TemplatesTab />}
         {tab === 'Bulk Generate' && <GenerateTab />}
         {tab === 'Queue' && <QueueTab />}

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { rows, one, query } from '@/lib/db'
 import { fetchAllStats } from '@/lib/stats'
+import { runDueProfileScans } from '@/lib/monitor/process-item'
 
 const CRON_SECRET = process.env.CRON_SECRET
 const QUEUE_CONCURRENCY = 2
@@ -159,10 +160,19 @@ export async function GET(req: NextRequest) {
     console.error('[cron/tick] comfyui queue processing error:', err)
   }
 
+  // ── Daily IG profile monitor (Copy-Paste pipeline) ────────────
+  let monitorScans: Awaited<ReturnType<typeof runDueProfileScans>> = []
+  try {
+    monitorScans = await runDueProfileScans(base, CRON_SECRET)
+  } catch (err) {
+    console.error('[cron/tick] monitor scan error:', err)
+  }
+
   return NextResponse.json({
     posts: { processed: due.length, results: postResults.map(r => r.status) },
     reels: { processed: dueReels.length, results: reelResults.map(r => r.status) },
     stats: statsResult,
     queue: { started: queueStarted, comfyuiStarted: comfyStarted },
+    monitor: monitorScans,
   })
 }

@@ -30,7 +30,12 @@ export async function PATCH(req: NextRequest) {
 
   const row = await one(
     `update discovery_items
-        set admin_status = $3, notes = coalesce($4, notes)
+        set admin_status = $3,
+            notes = coalesce($4, notes),
+            replicate_status = case
+              when $3 = 'APPROVED' and replicate_status = 'none' then 'pending_classify'
+              else replicate_status
+            end
       where user_id = $1 and id = $2
       returning *`,
     [user.id, id, admin_status, notes ?? null],

@@ -34,6 +34,7 @@ interface Profile {
   max_age_days: number
   status: 'ACTIVE' | 'PAUSED'
   autopilot: boolean
+  character_id: string | null
   reels_found: number
   last_scanned_at: string | null
 }
@@ -232,13 +233,26 @@ function DiscoveryCard({
 function AddProfilePanel({ onAdd }: { onAdd: (p: Profile) => void }) {
   const [platform, setPlatform] = useState<'Instagram' | 'TikTok'>('Instagram')
   const [username, setUsername]  = useState('')
-  const [minScore, setMinScore]  = useState('10')
-  const [maxAge, setMaxAge]      = useState('14')
-  const [autopilot, setAutopilot]= useState(false)
+  const [minScore, setMinScore]  = useState('5')
+  const [maxAge, setMaxAge]      = useState('7')
+  const [autopilot, setAutopilot]= useState(true)
+  const [characterId, setCharacterId] = useState('')
+  const [characters, setCharacters] = useState<{ id: string; name: string; loraUrl?: string }[]>([])
   const [saving, setSaving]      = useState(false)
+
+  useEffect(() => {
+    fetch('/api/characters')
+      .then(r => r.ok ? r.json() : [])
+      .then(data => setCharacters(Array.isArray(data) ? data : []))
+      .catch(() => {})
+  }, [])
 
   async function submit() {
     if (!username.trim()) return
+    if (autopilot && !characterId) {
+      toast.error('Pick your character for autopilot replication')
+      return
+    }
     setSaving(true)
     try {
       const res = await fetch('/api/runpod/profiles', {
@@ -247,16 +261,17 @@ function AddProfilePanel({ onAdd }: { onAdd: (p: Profile) => void }) {
         body: JSON.stringify({
           platform,
           username: username.trim().replace('@', ''),
-          min_score: parseFloat(minScore) || 10,
-          max_age_days: parseInt(maxAge) || 14,
+          min_score: parseFloat(minScore) || 5,
+          max_age_days: parseInt(maxAge) || 7,
           autopilot,
+          character_id: characterId || null,
         }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
       onAdd(data.profile)
       setUsername('')
-      toast.success(`@${username} dodan`)
+      toast.success(`@${username.trim().replace('@', '')} added`)
     } catch (e) {
       toast.error(String(e))
     } finally {
@@ -297,6 +312,19 @@ function AddProfilePanel({ onAdd }: { onAdd: (p: Profile) => void }) {
           <label className="text-xs text-muted-foreground">Max starost (dana)</label>
           <Input value={maxAge} onChange={e => setMaxAge(e.target.value)} className="bg-secondary/50" type="number" min="1" />
         </div>
+        <div className="space-y-1 col-span-2">
+          <label className="text-xs text-muted-foreground">Your character (LoRA for replication)</label>
+          <select
+            value={characterId}
+            onChange={e => setCharacterId(e.target.value)}
+            className="w-full h-9 rounded-md border border-border bg-secondary/50 text-sm px-3"
+          >
+            <option value="">— select character —</option>
+            {characters.map(c => (
+              <option key={c.id} value={c.id}>{c.name}{c.loraUrl ? '' : ' (no LoRA)'}</option>
+            ))}
+          </select>
+        </div>
       </div>
       <div className="flex items-center justify-between">
         <label className="flex items-center gap-2 text-sm cursor-pointer">
@@ -306,7 +334,7 @@ function AddProfilePanel({ onAdd }: { onAdd: (p: Profile) => void }) {
             onChange={e => setAutopilot(e.target.checked)}
             className="accent-primary"
           />
-          <span>Autopilot (auto-approve)</span>
+          <span>Autopilot (scan → classify → replicate)</span>
           <Badge className="text-[10px] px-1.5 py-0 bg-primary/15 text-primary border-primary/20"><Zap className="w-2.5 h-2.5 mr-0.5" />Pro</Badge>
         </label>
         <Button size="sm" className="h-8" onClick={submit} disabled={saving || !username.trim()}>
@@ -354,14 +382,14 @@ function ViralFeedTab() {
   async function scanProfile(profileId: string) {
     setScanning(profileId)
     try {
-      const res = await fetch('/api/runpod/scan', {
+      const res = await fetch('/api/monitor/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profile_id: profileId }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
-      toast.success(`Scan complete: ${data.added} new viral reels`)
+      toast.success(`Scan complete: ${data.added} new posts${data.processed ? `, ${data.processed} replicated` : ''}`)
       fetchProfiles()
       if (viewTab === 'pending') fetchItems('pending')
     } catch (e) {

@@ -17,21 +17,22 @@ export async function POST(req: NextRequest) {
   const user = await requireUser(req)
   if (user instanceof NextResponse) return user
 
-  const { platform, username, min_score, max_age_days, autopilot, autopilot_min_score } = await req.json()
+  const { platform, username, min_score, max_age_days, autopilot, autopilot_min_score, character_id } = await req.json()
   if (!platform || !username) return NextResponse.json({ error: 'platform and username required' }, { status: 400 })
 
   const row = await one(
     `insert into tracked_profiles
-       (user_id, platform, username, min_score, max_age_days, autopilot, autopilot_min_score)
-     values ($1,$2,$3,$4,$5,$6,$7)
+       (user_id, platform, username, min_score, max_age_days, autopilot, autopilot_min_score, character_id)
+     values ($1,$2,$3,$4,$5,$6,$7,$8)
      on conflict (user_id, platform, username) do update
        set min_score = excluded.min_score,
            max_age_days = excluded.max_age_days,
            autopilot = excluded.autopilot,
            autopilot_min_score = excluded.autopilot_min_score,
+           character_id = coalesce(excluded.character_id, tracked_profiles.character_id),
            status = 'ACTIVE'
      returning *`,
-    [user.id, platform, username.replace('@',''), min_score ?? 10, max_age_days ?? 14, autopilot ?? false, autopilot_min_score ?? 25],
+    [user.id, platform, username.replace('@',''), min_score ?? 10, max_age_days ?? 14, autopilot ?? false, autopilot_min_score ?? 25, character_id ?? null],
   )
   return NextResponse.json({ profile: row })
 }
@@ -43,7 +44,7 @@ export async function PATCH(req: NextRequest) {
   const { id, ...fields } = await req.json()
   if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 })
 
-  const allowed = ['status', 'autopilot', 'autopilot_min_score', 'min_score', 'max_age_days']
+  const allowed = ['status', 'autopilot', 'autopilot_min_score', 'min_score', 'max_age_days', 'character_id']
   const sets: string[] = []
   const params: unknown[] = [user.id, id]
 
