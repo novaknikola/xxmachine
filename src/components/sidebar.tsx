@@ -1,5 +1,5 @@
 'use client'
-
+import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { useAuth } from '@/contexts/auth-context'
@@ -51,7 +51,24 @@ export function Sidebar({ onMobileClose }: SidebarProps) {
   const pathname = usePathname()
   const router = useRouter()
   const { user, logout } = useAuth()
+  const [permissions, setPermissions] = useState<Record<string, boolean>>({})
 
+useEffect(() => {
+  if (!user || user.role === 'admin') return
+
+  fetch(`/api/admin/permissions?userId=${user.id}`)
+    .then(res => (res.ok ? res.json() : null))
+    .then(data => {
+      const map: Record<string, boolean> = {}
+
+      for (const p of data?.permissions ?? []) {
+        map[p.module_name] = p.enabled
+      }
+
+      setPermissions(map)
+    })
+    .catch(() => {})
+}, [user])
   async function handleLogout() {
     onMobileClose?.()
     await logout()
@@ -73,7 +90,9 @@ export function Sidebar({ onMobileClose }: SidebarProps) {
         <p className="px-2 text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3">
           Tools
         </p>
-        {NAV_ITEMS.map(item => {
+        {NAV_ITEMS
+  .filter(item => user?.role === 'admin' || permissions[item.module] !== false)
+  .map(item => {
           const Icon = item.icon
           const active = pathname.startsWith(item.href)
           return (

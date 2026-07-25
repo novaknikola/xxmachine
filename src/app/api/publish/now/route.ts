@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { one, query } from '@/lib/db'
 import { sendPhoto, sendText, editMessageReplyMarkup, editMessageCaption } from '@/lib/telegram'
-import { charactersStore } from '@/lib/store'
 
 const ADMIN_GROUP = process.env.TELEGRAM_ADMIN_GROUP_ID!
 
@@ -23,8 +22,11 @@ export async function POST(req: NextRequest) {
 
   // ── Telegram channel ────────────────────────────────────────────
   if (post.platforms.includes('telegram')) {
-    const char = charactersStore.getAll().find(c => c.id === post.character_id)
-    const channelId = char?.telegramChannelId
+    const char = await one<{ telegram_channel_id: string | null }>(
+  'SELECT telegram_channel_id FROM characters WHERE id=$1',
+  [post.character_id]
+)
+const channelId = char?.telegram_channel_id
     if (channelId) {
       try {
         await sendPhoto(channelId, post.image_url, post.caption)

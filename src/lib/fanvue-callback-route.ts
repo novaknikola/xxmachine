@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { cookies } from 'next/headers'
-import { exchangeCode, saveTokens } from '@/lib/fanvue'
+import { exchangeCode } from '@/lib/fanvue'
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url)
@@ -26,14 +26,17 @@ export async function GET(req: NextRequest) {
 
   try {
     const tokens = await exchangeCode(code, storedVerifier)
-    saveTokens(tokens)
 
-    // Clear PKCE cookies
+    const secure = process.env.NODE_ENV === 'production'
+    const maxAge = 60 * 60 * 24 * 30
+
+    cookieStore.set('fanvue_access_token', tokens.access_token, { httpOnly: true, secure, maxAge })
+    cookieStore.set('fanvue_refresh_token', tokens.refresh_token, { httpOnly: true, secure, maxAge })
+    cookieStore.set('fanvue_expires_at', String(tokens.expires_at), { httpOnly: true, secure, maxAge })
+
     cookieStore.delete('fanvue_code_verifier')
     cookieStore.delete('fanvue_state')
-
-    // Set connected flag cookie for client
-    cookieStore.set('fanvue_connected', '1', { maxAge: 60 * 60 * 24 * 30 })
+    cookieStore.set('fanvue_connected', '1', { maxAge })
 
     return NextResponse.redirect(new URL('/fans?connected=1', req.url))
   } catch (err) {

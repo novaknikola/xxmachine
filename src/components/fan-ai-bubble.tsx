@@ -1,7 +1,6 @@
 'use client'
 
 import { useState } from 'react'
-import { fansStore } from '@/lib/store'
 import { paydayRuleFromSummary } from '@/lib/fans'
 import type { Fan, AiSummary } from '@/lib/types'
 import { Button } from '@/components/ui/button'
@@ -92,13 +91,21 @@ export function FanAiBubble({ fan, onUpdated }: Props) {
         if (rule) patch.payday = rule
       }
 
-      fansStore.update(fan.id, patch)
+      await fetch(`/api/fans/${fan.id}`, {
+  method: 'PATCH',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(patch),
+})
       onUpdated()
       toast.success(`AI summary generated (${messages.length} msgs)`)
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'unknown'
       setError(msg)
-      fansStore.update(fan.id, { aiSummaryError: msg })
+      await fetch(`/api/fans/${fan.id}`, {
+  method: 'PATCH',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ aiSummaryError: msg }),
+})
       onUpdated()
       toast.error(`AI summary failed: ${msg}`)
     } finally {

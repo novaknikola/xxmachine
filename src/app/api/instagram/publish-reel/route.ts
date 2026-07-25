@@ -7,13 +7,15 @@ import { promisify } from 'util'
 import path from 'path'
 import os from 'os'
 import fs from 'fs'
+import { createClient } from '@supabase/supabase-js'
 
 const execFileAsync = promisify(execFile)
+const FFMPEG_BIN = process.env.FFMPEG_PATH || 'C:\\Users\\naeem\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.1.1-full_build\\bin\\ffmpeg.exe'
 const IG_API = 'https://graph.instagram.com/v22.0'
 const RUPLOAD = 'https://rupload.facebook.com/ig-api-upload/v22.0'
 
 async function extractCoverFrame(videoPath: string, outputPath: string): Promise<void> {
-  await execFileAsync('ffmpeg', ['-y', '-i', videoPath, '-vframes', '1', '-q:v', '2', outputPath])
+  await execFileAsync(FFMPEG_BIN, ['-y', '-i', videoPath, '-vframes', '1', '-q:v', '2', outputPath])
 }
 
 async function publishViaPrivateApi(
@@ -24,21 +26,15 @@ async function publishViaPrivateApi(
   const ig = await getIgClient(accountId)
   const videoBuffer = fs.readFileSync(videoPath)
 
-  const coverPath = videoPath.replace('.mp4', '_cover.jpg')
-  try { await extractCoverFrame(videoPath, coverPath) } catch {}
-  const coverBuffer = fs.existsSync(coverPath) ? fs.readFileSync(coverPath) : Buffer.alloc(0)
-  if (fs.existsSync(coverPath)) fs.unlinkSync(coverPath)
-
-  const result = await ig.publish.video({
-    video: videoBuffer,
-    coverImage: coverBuffer.length > 0 ? coverBuffer : undefined,
-    caption,
-  })
+ const result = await ig.publish.video({
+  video: videoBuffer,
+  caption,
+})
   return result.media.id_str ?? String(result.media.id)
 }
 
 async function transcodeForInstagram(inputPath: string, outputPath: string): Promise<void> {
-  await execFileAsync('ffmpeg', [
+  await execFileAsync(FFMPEG_BIN, [
     '-y',
     '-i', inputPath,
     '-map', '0:v:0',
@@ -69,19 +65,59 @@ async function uploadVideoToMeta(videoBuffer: Buffer, token: string, igUserId: s
       'Offset': '0',
       'Content-Type': 'application/octet-stream',
     },
-    body: videoBuffer,
+    body: new Uint8Array(videoBuffer),
   })
-  const data = await res.json()
-  if (!res.ok || !data.video_id) {
+ const data = await res.json()
+
+console.log(
+  '[META UPLOAD]',
+  JSON.stringify(data, null, 2)
+)
+
+if (!res.ok || !data.video_id) {
     throw new Error(`Upload failed (${res.status}): ${JSON.stringify(data)}`)
   }
   return data.video_id as string
 }
 
-async function createReelContainer(
+async function uploadToSupabasePublic(videoBuffer: Buffer, queueItemId: string): Promise<string> {
+  const supabaseUrl = process.env.SUPABASE_URL
+  const supabaseKey = process.env.SUPABASE_SERVICE_KEY
+
+  if (!supabaseUrl || !supabaseKey) {
+    throw new Error('SUPABASE_URL or SUPABASE_SERVICE_KEY missing')
+  }
+
+  const supabase = createClient(supabaseUrl, supabaseKey)
+  const filePath = `instagram/${queueItemId}-${Date.now()}.mp4`
+
+  const { error } = await supabase.storage
+    .from('ig-temp-videos')
+    .upload(filePath, videoBuffer, {
+      contentType: 'video/mp4',
+      upsert: true,
+    })
+
+  if (error) {
+    throw new Error(`Supabase upload failed: ${error.message}`)
+  }
+
+  const { data } = supabase.storage
+    .from('ig-temp-videos')
+    .getPublicUrl(filePath)
+
+  if (!data.publicUrl) {
+    throw new Error('Supabase public URL missing')
+  }
+
+  console.log(`[publish-reel] public video_url: ${data.publicUrl}`)
+  return data.publicUrl
+}
+
+async function createReelContainerFromUrl(
   igUserId: string,
   token: string,
-  videoId: string,
+  videoUrl: string,
   caption: string
 ): Promise<string> {
   const res = await fetch(`${IG_API}/${igUserId}/media`, {
@@ -89,18 +125,23 @@ async function createReelContainer(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       media_type: 'REELS',
-      upload_id: videoId,
+      video_url: videoUrl,
       caption,
       access_token: token,
     }),
   })
+
   const data = await res.json()
+  console.log('[META CONTAINER]', JSON.stringify(data, null, 2))
+
   if (!res.ok || !data.id) {
-    throw new Error(data.error?.message ?? `Container creation failed (${res.status})`)
+    throw new Error(
+      data.error?.message ?? `Container creation failed (${res.status}): ${JSON.stringify(data)}`
+    )
   }
+
   return data.id as string
 }
-
 async function waitForContainer(
   containerId: string,
   token: string,
@@ -182,11 +223,6 @@ export async function POST(req: NextRequest) {
       if (!driveRes.ok) throw new Error(`Drive download failed: ${driveRes.status}`)
       const videoBuffer = Buffer.from(await driveRes.arrayBuffer())
 
-      fetch(`https://www.googleapis.com/drive/v3/files/${item.drive_file_id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${accessToken}` },
-      }).catch(() => {})
-
       tempVideoPath = path.join(os.tmpdir(), `ig_src_${queueItemId}.mp4`)
       tempTranscodedPath = path.join(os.tmpdir(), `ig_out_${queueItemId}.mp4`)
       fs.writeFileSync(tempVideoPath, videoBuffer)
@@ -199,13 +235,17 @@ export async function POST(req: NextRequest) {
       let mediaId: string
 
       if (useGraphApi) {
-        console.log('[publish-reel] Publishing via Graph API...')
-        const videoId = await uploadVideoToMeta(transcodedBuffer, item.ig_access_token!, item.ig_user_id!)
-        console.log(`[publish-reel] video_id: ${videoId}`)
-        const containerId = await createReelContainer(item.ig_user_id!, item.ig_access_token!, videoId, item.caption ?? '')
-        console.log(`[publish-reel] container_id: ${containerId}`)
-        await waitForContainer(containerId, item.ig_access_token!)
-        mediaId = await publishContainer(item.ig_user_id!, containerId, item.ig_access_token!)
+  console.log('[publish-reel] Publishing via Graph API...')
+  const publicVideoUrl = await uploadToSupabasePublic(transcodedBuffer, queueItemId)
+  const containerId = await createReelContainerFromUrl(
+    item.ig_user_id!,
+    item.ig_access_token!,
+    publicVideoUrl,
+    item.caption ?? ''
+  )
+  console.log(`[publish-reel] container_id: ${containerId}`)
+  await waitForContainer(containerId, item.ig_access_token!)
+  mediaId = await publishContainer(item.ig_user_id!, containerId, item.ig_access_token!)
       } else {
         console.log('[publish-reel] Publishing via Private API (ig_session)...')
         mediaId = await publishViaPrivateApi(item.account_id, tempTranscodedPath!, item.caption ?? '')

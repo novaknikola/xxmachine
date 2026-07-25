@@ -90,7 +90,7 @@ interface DayCardProps {
 }
 
 function DayCard({ day, onOpen, onGenerate, generating, onSchedule }: DayCardProps) {
-  const hasContent = day.status === 'generated'
+  const hasContent = day.status === 'full'
   return (
     <div
       className={`relative rounded-xl border p-3 transition-all cursor-pointer group ${
@@ -444,7 +444,7 @@ export default function CalendarPage() {
         keywords: data.keywords ?? '',
         description: data.description ?? '',
         fanvueDescription: data.fanvue_description ?? '',
-        status: 'generated',
+        status: 'full',
         createdAt: new Date().toISOString(),
       }
       calendarStore.upsert(updated)
@@ -495,7 +495,7 @@ export default function CalendarPage() {
             keywords: data.keywords ?? '',
             description: data.description ?? '',
             fanvueDescription: data.fanvue_description ?? '',
-            status: 'generated' as const,
+            status: 'full' as const,
             createdAt: new Date().toISOString(),
           })
         }
@@ -525,12 +525,12 @@ export default function CalendarPage() {
   }
 
   function saveDay(updated: CalendarDay) {
-    calendarStore.upsert({ ...updated, status: updated.topic ? 'generated' : updated.status })
+    calendarStore.upsert({ ...updated, status: updated.topic ? 'full' : updated.status })
     refreshDays()
     toast.success('Saved')
   }
 
-  const generatedCount = days.filter(d => d.status === 'generated').length
+  const generatedCount = days.filter(d => d.status === 'full').length
   const weeks = [0, 1, 2, 3].map(w => days.slice(w * 7, w * 7 + 7))
   const activeChar = characters.find(c => c.id === characterId)
   const charConfig = activeChar

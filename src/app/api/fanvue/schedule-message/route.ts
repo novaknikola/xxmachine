@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { rows, query } from '@/lib/db'
 import {
   FANVUE_API_BASE,
   getFanvueAccessToken,
@@ -7,6 +8,7 @@ import {
 } from '@/lib/fanvue-server'
 
 interface ScheduleBody {
+  fanId?: string
   userUuid?: string
   text?: string
   mediaUuids?: string[]
@@ -16,6 +18,7 @@ interface ScheduleBody {
 }
 
 interface DeleteBody {
+  id?: string
   massMessageUuid?: string
   customListUuid?: string
 }
@@ -110,6 +113,23 @@ export async function POST(req: NextRequest) {
 
   const massMessageUuid = (massData as { uuid?: string; messageUuid?: string })?.uuid
     ?? (massData as { messageUuid?: string })?.messageUuid
+    if (body.fanId) {
+  await query(
+    `INSERT INTO scheduled_messages
+      (fan_id, fanvue_user_uuid, text, price, scheduled_at, status, custom_list_uuid, mass_message_uuid)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [
+      body.fanId,
+      body.userUuid,
+      body.text ?? '',
+      body.price ?? 0,
+      body.scheduledAt,
+      'pending',
+      customListUuid,
+      massMessageUuid ?? null,
+    ]
+  )
+}
 
   const res = NextResponse.json({ ok: true, customListUuid, massMessageUuid, raw: massData })
   applyCookies(res, cookieDeltas)
@@ -123,6 +143,14 @@ export async function DELETE(req: NextRequest) {
   }
   const body = await req.json().catch(() => null) as DeleteBody | null
   const errors: string[] = []
+  if (body?.id) {
+  await query(
+    `UPDATE scheduled_messages
+     SET status='cancelled', updated_at=now()
+     WHERE id=$1`,
+    [body.id]
+  )
+}
   if (body?.massMessageUuid) {
     const r = await fanvueFetch(`${FANVUE_API_BASE}/chats/mass-messages/${body.massMessageUuid}`, accessToken, { method: 'DELETE' })
     if (!r.ok && r.status !== 404) errors.push(`mass:${r.status}`)
@@ -134,4 +162,33 @@ export async function DELETE(req: NextRequest) {
   const res = NextResponse.json(errors.length ? { ok: false, errors } : { ok: true })
   applyCookies(res, cookieDeltas)
   return res
+}
+
+export async function GET(req: NextRequest) {
+  const fanId = req.nextUrl.searchParams.get('fanId')
+
+  if (!fanId) {
+    return NextResponse.json({ error: 'fanId required' }, { status: 400 })
+  }
+
+  const items = await rows(
+    `SELECT
+      id,
+      fan_id AS "fanId",
+      fanvue_user_uuid AS "fanvueUserUuid",
+      text,
+      price,
+      scheduled_at AS "scheduledAt",
+      status,
+      custom_list_uuid AS "customListUuid",
+      mass_message_uuid AS "massMessageUuid",
+      error,
+      created_at AS "createdAt"
+     FROM scheduled_messages
+     WHERE fan_id=$1
+     ORDER BY scheduled_at ASC`,
+    [fanId]
+  )
+
+  return NextResponse.json(items)
 }

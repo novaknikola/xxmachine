@@ -97,10 +97,19 @@ export function VideoReproduceTab() {
 
       try {
         const res = await fetch('/api/video-reproduce', { method: 'POST', body: fd })
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error ?? 'Failed')
+        const contentType = res.headers.get('content-type') || ''
+        const data = contentType.includes('application/json')
+          ? await res.json()
+          : { error: (await res.text()).slice(0, 500) || `Non-JSON response (${res.status})` }
 
-        for (const r of (data.results ?? [])) {
+        if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`)
+
+        const results = Array.isArray(data.results) ? data.results : []
+        if (results.length === 0) {
+          throw new Error(data.error ?? 'No video variations were generated.')
+        }
+
+        for (const r of results) {
           setVariants(prev => [...prev, {
             id: r.id,
             sourceName: src.name,
@@ -118,7 +127,11 @@ export function VideoReproduceTab() {
     }
 
     setRunning(false)
-    if (!abortRef.current && done > 0) toast.success(`${done} video variations ready`)
+    if (!abortRef.current && done > 0) {
+      toast.success(`${done} video variations ready`)
+    } else if (!abortRef.current && done === 0) {
+      toast.error('No video variations were generated. Please check the errors above.')
+    }
   }
 
   // Queue mode: upload to storage, submit background job(s)
@@ -126,16 +139,13 @@ export function VideoReproduceTab() {
     if (!sources.length) { toast.error('Upload at least one video'); return }
     setQueueing(true)
     let submitted = 0
-    let failed = 0
 
     for (const src of sources) {
       try {
-        // 1. Upload video to Supabase Storage
         toast.loading(`Uploading ${src.name}…`, { id: `upload-${src.id}` })
         const { videoUrl, videoName } = await uploadQueueInput(src.file)
         toast.dismiss(`upload-${src.id}`)
 
-        // 2. Submit queue job
         const res = await fetch('/api/queue/submit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -156,7 +166,6 @@ export function VideoReproduceTab() {
         }
         submitted++
       } catch (err) {
-        failed++
         toast.dismiss(`upload-${src.id}`)
         toast.error(`${src.name}: ${err instanceof Error ? err.message : 'error'}`)
       }

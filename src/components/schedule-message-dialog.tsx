@@ -1,7 +1,6 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { scheduledMessagesStore } from '@/lib/store'
 import type { Fan, ScheduledMessage } from '@/lib/types'
 import {
   Dialog,
@@ -47,13 +46,21 @@ export function ScheduleMessageDialog({ fan, open, onClose }: Props) {
     setText('')
     setPrice('')
     setMode('now')
-    setPending(scheduledMessagesStore.getByFan(fan.id))
+    loadPending()
   }, [open, fan])
 
   if (!fan) return null
+  async function loadPending() {
+  if (!fan) return
 
+  const res = await fetch(`/api/fanvue/schedule-message?fanId=${fan.id}`)
+  if (!res.ok) return
+
+  const data = await res.json()
+  setPending(data)
+}
   function refreshPending() {
-    if (fan) setPending(scheduledMessagesStore.getByFan(fan.id))
+    if (fan) loadPending()
   }
 
   async function sendNow() {
@@ -95,6 +102,7 @@ export function ScheduleMessageDialog({ fan, open, onClose }: Props) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          fanId: fan.id,
           userUuid: fan.fanvueUserUuid,
           text: text.trim() || undefined,
           price: price ? Number(price) : undefined,
@@ -105,21 +113,7 @@ export function ScheduleMessageDialog({ fan, open, onClose }: Props) {
       const data = await res.json()
       if (!res.ok) throw new Error(typeof data?.detail === 'string' ? data.detail : data?.error || 'schedule failed')
 
-      const item: ScheduledMessage = {
-        id: crypto.randomUUID(),
-        fanId: fan.id,
-        fanvueUserUuid: fan.fanvueUserUuid!,
-        fanDisplayName: fan.displayName,
-        text: text.trim(),
-        price: price ? Number(price) : undefined,
-        scheduledAt: at.toISOString(),
-        massMessageUuid: data.massMessageUuid,
-        customListUuid: data.customListUuid,
-        status: 'pending',
-        createdAt: new Date().toISOString(),
-      }
-      scheduledMessagesStore.add(item)
-      refreshPending()
+     await loadPending()
       toast.success(`Scheduled for ${at.toLocaleString()}`)
       setText('')
       setPrice('')
@@ -137,22 +131,27 @@ export function ScheduleMessageDialog({ fan, open, onClose }: Props) {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          id: item.id,
           massMessageUuid: item.massMessageUuid,
           customListUuid: item.customListUuid,
         }),
       })
-      scheduledMessagesStore.update(item.id, { status: 'cancelled' })
-      refreshPending()
+      await loadPending()
       toast.success('Cancelled')
     } catch {
       toast.error('Cancel failed')
     }
   }
 
-  function forget(item: ScheduledMessage) {
-    scheduledMessagesStore.remove(item.id)
-    refreshPending()
-  }
+  async function forget(item: ScheduledMessage) {
+  await fetch('/api/fanvue/schedule-message', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: item.id }),
+  })
+
+  await loadPending()
+}
 
   return (
     <Dialog open={open} onOpenChange={v => !v && onClose()}>

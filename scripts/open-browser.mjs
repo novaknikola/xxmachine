@@ -199,23 +199,48 @@ try {
   fs.mkdirSync(userDataDir, { recursive: true })
 
   const SYSTEM_BROWSERS = [
+    process.env.CHROME_EXECUTABLE_PATH,
+    process.env.PUPPETEER_EXECUTABLE_PATH,
+
+    // Windows Chrome / Edge
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe`,
+    process.env.LOCALAPPDATA ? `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe` : null,
     'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
     'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-  ]
+
+    // Linux Chrome / Chromium
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+  ].filter(Boolean)
+
   let executablePath = SYSTEM_BROWSERS.find(p => fs.existsSync(p))
+
   if (!executablePath) {
-    try { executablePath = playwrightChromium.executablePath() } catch {}
+    try {
+      const pp = puppeteer.executablePath()
+      if (pp && fs.existsSync(pp)) executablePath = pp
+    } catch {}
   }
+
+  if (!executablePath) {
+    try {
+      const pw = playwrightChromium.executablePath()
+      if (pw && fs.existsSync(pw)) executablePath = pw
+    } catch {}
+  }
+
   if (!executablePath || !fs.existsSync(executablePath)) {
-    throw new Error('No Chrome/Edge browser found. Install Google Chrome.')
+    throw new Error('No Chrome/Chromium browser found. Install Chrome/Chromium or set CHROME_EXECUTABLE_PATH.')
   }
+
   console.log(`[open-browser] Using browser: ${executablePath}`)
 
   const args = [
     '--no-sandbox',
+    '--disable-dev-shm-usage',
     '--disable-blink-features=AutomationControlled',
     '--window-size=1280,900',
     '--lang=en-US',
@@ -235,8 +260,12 @@ try {
     }
   }
 
+  const hasDisplay = Boolean(process.env.DISPLAY)
+  const launchHeadless = process.env.PUPPETEER_HEADLESS === 'true' || (process.platform !== 'win32' && !hasDisplay)
+  console.log(`[open-browser] Launch mode: ${launchHeadless ? 'headless' : 'headful'}${hasDisplay ? ' (DISPLAY available)' : ''}`)
+
   browser = await puppeteer.launch({
-    headless: false,
+    headless: launchHeadless ? 'new' : false,
     executablePath,
     userDataDir,
     args,

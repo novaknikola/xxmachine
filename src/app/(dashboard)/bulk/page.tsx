@@ -1045,7 +1045,7 @@ export default function BulkPage() {
                       <Label className="text-xs text-muted-foreground">LoRA from library</Label>
                       <Select value={bulkLoraUrl}
                         onValueChange={v => {
-                          setBulkLoraUrl(v === '__none__' ? '' : v)
+                          setBulkLoraUrl(v === '__none__' || v === null ? '' : v)
                           if (v !== '__none__') setSelectedCharIds([])
                         }}>
                         <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Select LoRA..." /></SelectTrigger>
@@ -1106,7 +1106,7 @@ export default function BulkPage() {
                   <Separator />
                   <div className="space-y-1.5">
                     <Label className="text-xs text-muted-foreground">Dimension</Label>
-                    <Select value={dimension} onValueChange={setDimension}>
+                    <Select value={dimension} onValueChange={(v) => setDimension(v ?? '')}>
                       <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
                         {Object.entries(DIMENSIONS).map(([ratio, px]) => (

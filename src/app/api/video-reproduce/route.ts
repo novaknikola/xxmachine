@@ -53,6 +53,7 @@ export async function POST(req: NextRequest) {
 
     const fadeDuration = opts.fade ? (await getVideoDuration(inputPath) ?? undefined) : undefined
     const results: Array<{ id: string; seed: number }> = []
+    const failures: string[] = []
 
     for (let i = 0; i < count; i++) {
       const seed = baseSeed + i * 1337
@@ -67,11 +68,22 @@ export async function POST(req: NextRequest) {
           results.push({ id, seed })
         } catch {
           try { unlinkSync(outputPath) } catch {}
+          failures.push(`Variant ${i + 1}: failed to store output`)
         }
+      } else {
+        failures.push(`Variant ${i + 1}: ffmpeg produced no output`)
       }
     }
 
     try { unlinkSync(inputPath) } catch {}
+
+    if (results.length === 0) {
+      return NextResponse.json({
+        error: failures[0] || 'No video variants generated. Please verify FFmpeg is installed and the uploaded file is a valid video.',
+        failures,
+      }, { status: 500 })
+    }
+
     return NextResponse.json({ results })
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : 'Unknown error' }, { status: 500 })
@@ -103,3 +115,4 @@ export async function GET(req: NextRequest) {
     },
   })
 }
+
