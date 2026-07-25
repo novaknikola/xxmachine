@@ -4,6 +4,7 @@ import {
   answerCallbackQuery,
   editMessageCaption,
   editMessageReplyMarkup,
+  sendText,
 } from '@/lib/telegram'
 
 const CRON_SECRET = process.env.CRON_SECRET
@@ -20,6 +21,38 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json()
+
+    // ── /start — link Telegram chat to XXmachine user ─────────
+    const message = body.message
+    if (message?.text?.startsWith('/start')) {
+      const chatId = message.chat?.id as number | undefined
+      const tgUsername = message.from?.username as string | undefined
+
+      if (chatId) {
+        let linked = false
+        if (tgUsername) {
+          const r = await query(
+            `UPDATE users
+                SET telegram_chat_id = $1
+              WHERE lower(replace(coalesce(telegram, ''), '@', '')) = lower($2)
+              RETURNING id`,
+            [chatId, tgUsername],
+          )
+          linked = (r.rowCount ?? 0) > 0
+        }
+
+        const linkHint = linked
+          ? 'Your account is linked — you will receive monitor alerts here.'
+          : 'Set your Telegram @username in Settings → Profile, then send /start again to link alerts.'
+
+        await sendText(
+          chatId,
+          `👋 <b>XXmachine Monitor Bot</b>\n\nChat ID: <code>${chatId}</code>\n${linkHint}\n\nAlerts: new IG posts, replication done/failed.`,
+        )
+      }
+      return NextResponse.json({ ok: true })
+    }
+
     const callbackQuery = body.callback_query
 
     if (!callbackQuery) {
@@ -28,7 +61,7 @@ export async function POST(req: NextRequest) {
 
     const callbackId = callbackQuery.id
     const data = callbackQuery.data as string | undefined
-    const message = callbackQuery.message
+    const cbMessage = callbackQuery.message
 
     if (!data) {
       await answerCallbackQuery(callbackId, 'Missing action')
@@ -65,13 +98,13 @@ export async function POST(req: NextRequest) {
 
       await answerCallbackQuery(callbackId, 'Rejected')
 
-      if (message?.chat?.id && message?.message_id) {
+      if (cbMessage?.chat?.id && cbMessage?.message_id) {
         await editMessageCaption(
-          message.chat.id,
-          message.message_id,
+          cbMessage.chat.id,
+          cbMessage.message_id,
           `❌ Rejected\n\n${post.caption ?? ''}`,
         )
-        await editMessageReplyMarkup(message.chat.id, message.message_id, {})
+        await editMessageReplyMarkup(cbMessage.chat.id, cbMessage.message_id, {})
       }
 
       return NextResponse.json({ ok: true, status: 'rejected' })
@@ -84,13 +117,13 @@ export async function POST(req: NextRequest) {
 
     await answerCallbackQuery(callbackId, 'Approved')
 
-    if (message?.chat?.id && message?.message_id) {
+    if (cbMessage?.chat?.id && cbMessage?.message_id) {
       await editMessageCaption(
-        message.chat.id,
-        message.message_id,
+        cbMessage.chat.id,
+        cbMessage.message_id,
         `✅ Approved\n\n${post.caption ?? ''}`,
       )
-      await editMessageReplyMarkup(message.chat.id, message.message_id, {})
+      await editMessageReplyMarkup(cbMessage.chat.id, cbMessage.message_id, {})
     }
 
     return NextResponse.json({ ok: true, status: 'approved' })

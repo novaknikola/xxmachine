@@ -2,6 +2,7 @@ import { one, query, rows } from '@/lib/db'
 import { classifyContentImage } from './classify'
 import { extractScenePrompt, getFrameBase64 } from './analyze'
 import { generateReplicaImage, generateReplicaVideo } from './replicate'
+import { notifyReplicationDone, notifyReplicationFailed } from './notify'
 import type { CharacterLora, DiscoveryItemRow, TrackedProfileRow } from './types'
 
 export async function loadCharacter(characterId: string | null): Promise<CharacterLora | null> {
@@ -134,6 +135,14 @@ export async function replicateDiscoveryItem(
         `UPDATE discovery_items SET kling_video_url = $2, replicate_status = 'done', replicate_error = NULL WHERE id = $1`,
         [itemId, videoUrl],
       )
+      await notifyReplicationDone({
+        userId,
+        profile: item.profile,
+        contentUrl: item.content_url,
+        contentType,
+        imageUrl: item.generated_image_url,
+        videoUrl,
+      }).catch(() => {})
       return { ok: true, imageUrl: item.generated_image_url, videoUrl }
     }
 
@@ -141,6 +150,14 @@ export async function replicateDiscoveryItem(
       `UPDATE discovery_items SET replicate_status = 'done', replicate_error = NULL WHERE id = $1`,
       [itemId],
     )
+    await notifyReplicationDone({
+      userId,
+      profile: item.profile,
+      contentUrl: item.content_url,
+      contentType,
+      imageUrl: item.generated_image_url,
+      videoUrl: item.kling_video_url,
+    }).catch(() => {})
     return { ok: true, imageUrl: item.generated_image_url, videoUrl: item.kling_video_url }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -148,6 +165,7 @@ export async function replicateDiscoveryItem(
       `UPDATE discovery_items SET replicate_status = 'failed', replicate_error = $2 WHERE id = $1`,
       [itemId, msg],
     )
+    await notifyReplicationFailed(userId, item.profile, msg).catch(() => {})
     throw err
   }
 }

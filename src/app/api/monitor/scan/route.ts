@@ -3,6 +3,7 @@ import { requireUser } from '@/lib/session'
 import { one, query } from '@/lib/db'
 import { scanTrackedProfile } from '@/lib/monitor/scan'
 import { processNewItems } from '@/lib/monitor/process-item'
+import { notifyNewPosts } from '@/lib/monitor/notify'
 import type { TrackedProfileRow } from '@/lib/monitor/types'
 
 const CRON_SECRET = process.env.CRON_SECRET
@@ -38,6 +39,10 @@ export async function POST(req: NextRequest) {
 
   try {
     const { added, newItemIds, scanned } = await scanTrackedProfile(userId, profile)
+
+    if (added > 0) {
+      await notifyNewPosts(userId, profile.username, added).catch(() => {})
+    }
 
     let processed = 0
     if (newItemIds.length > 0 && profile.autopilot) {

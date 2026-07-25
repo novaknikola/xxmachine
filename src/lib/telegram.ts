@@ -35,6 +35,20 @@ export async function sendText(chatId: string | number, text: string) {
     chat_id: chatId,
     text,
     parse_mode: 'HTML',
+    disable_web_page_preview: false,
+  })
+}
+
+export async function sendVideo(
+  chatId: string | number,
+  videoUrl: string,
+  caption: string,
+) {
+  return call('sendVideo', {
+    chat_id: chatId,
+    video: videoUrl,
+    caption,
+    parse_mode: 'HTML',
   })
 }
 
