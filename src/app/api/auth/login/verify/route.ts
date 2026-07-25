@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { one } from '@/lib/db'
 import { decrypt } from '@/lib/crypto'
 import { createSession, setSessionCookie } from '@/lib/session'
+import { clearTwoFactorCookie, readTwoFactorTicket } from '@/lib/two-factor-ticket'
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { authenticator } = require('otplib')
@@ -25,6 +26,11 @@ export async function POST(req: NextRequest) {
 
     if (!userId || !code) {
       return NextResponse.json({ error: 'missing_fields' }, { status: 400 })
+    }
+
+    const ticketUserId = readTwoFactorTicket(req.cookies.get('xm_2fa')?.value)
+    if (!ticketUserId || ticketUserId !== userId) {
+      return NextResponse.json({ error: 'invalid_request' }, { status: 401 })
     }
 
     const user = await one<UserRow>(
@@ -59,6 +65,7 @@ export async function POST(req: NextRequest) {
       },
     })
     setSessionCookie(res, signed)
+    clearTwoFactorCookie(res)
     return res
   } catch (err) {
     console.error('[auth/login/verify]', err)

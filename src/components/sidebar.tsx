@@ -25,16 +25,21 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 
-const NAV_ITEMS = [
-  { href: '/bulk', label: 'Image Studio', icon: ImageIcon },
+const NAV_ITEMS: Array<{
+  href: string
+  label: string
+  icon: typeof ImageIcon
+  module?: string
+}> = [
+  { href: '/bulk', label: 'Image Studio', icon: ImageIcon, module: 'generator' },
   { href: '/repurpose', label: 'Repurpose', icon: RefreshCw },
   { href: '/ig-downloader', label: 'IG Downloader', icon: Download },
   { href: '/captions', label: 'Captions', icon: Captions },
-  { href: '/socials', label: 'Schedule', icon: Clapperboard },
+  { href: '/socials', label: 'Schedule', icon: Clapperboard, module: 'socials' },
   { href: '/discovery', label: 'Discovery', icon: Telescope },
   { href: '/comfyui', label: 'ComfyUI Pods', icon: Server },
   { href: '/analytics', label: 'Analytics', icon: BarChart2 },
-  { href: '/history', label: 'History', icon: History },
+  { href: '/history', label: 'History', icon: History, module: 'history' },
   { href: '/settings', label: 'Settings', icon: Settings },
 ]
 
@@ -91,8 +96,8 @@ useEffect(() => {
           Tools
         </p>
         {NAV_ITEMS
-  .filter(item => user?.role === 'admin' || permissions[item.module] !== false)
-  .map(item => {
+          .filter(item => user?.role === 'admin' || !item.module || permissions[item.module] !== false)
+          .map(item => {
           const Icon = item.icon
           const active = pathname.startsWith(item.href)
           return (

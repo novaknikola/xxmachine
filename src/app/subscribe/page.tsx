@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { Suspense, useState, useEffect } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import { useAuth } from '@/contexts/auth-context'
 import { Button } from '@/components/ui/button'
@@ -50,6 +50,14 @@ const PLANS: { key: Plan; name: string; price: number; highlight?: boolean; feat
 ]
 
 export default function SubscribePage() {
+  return (
+    <Suspense fallback={null}>
+      <SubscribePageContent />
+    </Suspense>
+  )
+}
+
+function SubscribePageContent() {
   const { user } = useAuth()
   const router = useRouter()
   const searchParams = useSearchParams()

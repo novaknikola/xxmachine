@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import bcrypt from 'bcryptjs'
 import { one } from '@/lib/db'
 import { createSession, setSessionCookie } from '@/lib/session'
+import { setTwoFactorCookie } from '@/lib/two-factor-ticket'
 
 interface UserRow {
   id: string

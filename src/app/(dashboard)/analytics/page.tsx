@@ -345,7 +345,7 @@ function AccountModal({
                 <YAxis tick={{ fontSize: 10, fill: '#71717a' }} tickFormatter={fmtShort} width={48} />
                 <Tooltip
                   contentStyle={{ background: '#18181b', border: '1px solid #27272a', borderRadius: 8, fontSize: 12 }}
-                  formatter={(v: number) => fmt(v)}
+                  formatter={(v) => fmt(Number(v ?? 0))}
                 />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
                 <Line type="monotone" dataKey="Followers" stroke={m?.chartColor ?? '#818cf8'} dot={false} strokeWidth={2} />
@@ -451,7 +451,7 @@ function GrowthChart({ trendsData, loading }: { trendsData: TrendsData | null; l
             <YAxis tick={{ fontSize: 10, fill: '#71717a' }} tickFormatter={fmtShort} width={48} />
             <Tooltip
               contentStyle={{ background: '#18181b', border: '1px solid #27272a', borderRadius: 8, fontSize: 12 }}
-              formatter={(v: number) => fmt(v)}
+              formatter={(v) => fmt(Number(v ?? 0))}
             />
             <Legend wrapperStyle={{ fontSize: 11 }} />
             {mode === 'total' ? (
