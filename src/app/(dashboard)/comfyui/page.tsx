@@ -19,7 +19,7 @@ function ComfyUIPageInner() {
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-2 px-6 pt-5">
         <Server className="w-5 h-5 text-primary" />
-        <h1 className="text-lg font-bold">ComfyUI Pods</h1>
+        <h1 className="text-lg font-bold">Copy-Paste</h1>
       </div>
 
       <div className="flex border-b border-border shrink-0 px-6 pt-3 gap-1 bg-background">

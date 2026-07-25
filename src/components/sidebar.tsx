@@ -14,8 +14,8 @@ import {
   History,
   BarChart2,
   Settings,
-  Captions,
-  Server,
+  Copy,
+  Share2,
   RefreshCw,
   Telescope,
 } from 'lucide-react'
@@ -24,22 +24,71 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 
-const NAV_ITEMS: Array<{
+interface NavItem {
   href: string
   label: string
   icon: typeof ImageIcon
   module?: string
-}> = [
+  children?: NavItem[]
+}
+
+// Six top-level sections. Variants, Discovery and Analytics are still separate
+// pages, so they sit under the section that will absorb them as tabs.
+const NAV_ITEMS: NavItem[] = [
   { href: '/bulk', label: 'Image Studio', icon: ImageIcon, module: 'generator' },
-  { href: '/repurpose', label: 'Repurpose', icon: RefreshCw },
-  { href: '/captions', label: 'Captions', icon: Captions },
-  { href: '/socials', label: 'Schedule', icon: Clapperboard, module: 'socials' },
-  { href: '/discovery', label: 'Discovery', icon: Telescope },
-  { href: '/comfyui', label: 'ComfyUI Pods', icon: Server },
-  { href: '/analytics', label: 'Analytics', icon: BarChart2 },
+  {
+    href: '/captions',
+    label: 'Video Studio',
+    icon: Clapperboard,
+    children: [
+      { href: '/repurpose', label: 'Variants', icon: RefreshCw },
+    ],
+  },
+  {
+    href: '/socials',
+    label: 'Social Media',
+    icon: Share2,
+    module: 'socials',
+    children: [
+      { href: '/discovery', label: 'Discovery', icon: Telescope },
+      { href: '/analytics', label: 'Analytics', icon: BarChart2 },
+    ],
+  },
+  { href: '/comfyui', label: 'Copy-Paste', icon: Copy },
   { href: '/history', label: 'History', icon: History, module: 'history' },
   { href: '/settings', label: 'Settings', icon: Settings },
 ]
+
+function NavLink({
+  item,
+  active,
+  nested = false,
+  onNavigate,
+}: {
+  item: NavItem
+  active: boolean
+  nested?: boolean
+  onNavigate?: () => void
+}) {
+  const Icon = item.icon
+  return (
+    <Link
+      href={item.href}
+      onClick={onNavigate}
+      className={cn(
+        'flex items-center gap-3 rounded-lg font-medium transition-colors',
+        nested ? 'ml-3 px-3 py-1.5 text-xs' : 'px-3 py-2 text-sm',
+        active
+          ? 'bg-primary/10 text-primary'
+          : 'text-muted-foreground hover:text-foreground hover:bg-secondary'
+      )}
+    >
+      <Icon className={cn('shrink-0', nested ? 'w-3.5 h-3.5' : 'w-4 h-4')} />
+      {item.label}
+      {active && <ChevronRight className="w-3 h-3 ml-auto text-primary/60" />}
+    </Link>
+  )
+}
 
 const ADMIN_ITEMS = [
   { href: '/admin', label: 'Users', icon: Users },
@@ -72,6 +121,10 @@ useEffect(() => {
     })
     .catch(() => {})
 }, [user])
+  function allowed(item: NavItem) {
+    return user?.role === 'admin' || !item.module || permissions[item.module] !== false
+  }
+
   async function handleLogout() {
     onMobileClose?.()
     await logout()
@@ -93,29 +146,24 @@ useEffect(() => {
         <p className="px-2 text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3">
           Tools
         </p>
-        {NAV_ITEMS
-          .filter(item => user?.role === 'admin' || !item.module || permissions[item.module] !== false)
-          .map(item => {
-          const Icon = item.icon
-          const active = pathname.startsWith(item.href)
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              onClick={onMobileClose}
-              className={cn(
-                'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors',
-                active
-                  ? 'bg-primary/10 text-primary'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-secondary'
-              )}
-            >
-              <Icon className="w-4 h-4 shrink-0" />
-              {item.label}
-              {active && <ChevronRight className="w-3 h-3 ml-auto text-primary/60" />}
-            </Link>
-          )
-        })}
+        {NAV_ITEMS.filter(allowed).map(item => (
+          <div key={item.href} className="space-y-1">
+            <NavLink
+              item={item}
+              active={pathname.startsWith(item.href)}
+              onNavigate={onMobileClose}
+            />
+            {item.children?.filter(allowed).map(child => (
+              <NavLink
+                key={child.href}
+                item={child}
+                active={pathname.startsWith(child.href)}
+                nested
+                onNavigate={onMobileClose}
+              />
+            ))}
+          </div>
+        ))}
 
         {user?.role === 'admin' && (
           <>
