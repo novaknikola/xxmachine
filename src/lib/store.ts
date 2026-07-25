@@ -37,16 +37,6 @@ const DEFAULT_CHARACTERS: Character[] = [
   },
 ]
 
-const DEFAULT_ADMIN: User = {
-  id: 'admin-1',
-  email: 'admin@xmachine.ai',
-  name: 'Admin',
-  role: 'admin',
-  password: 'xmachine2026',
-  createdAt: new Date().toISOString(),
-  active: true,
-}
-
 function get<T>(key: string, fallback: T): T {
   if (typeof window === 'undefined') return fallback
   try {
@@ -63,15 +53,11 @@ function set<T>(key: string, value: T): void {
 }
 
 // ── USERS ──────────────────────────────────────────────────────
+// Legacy browser-only list. Real accounts live in Postgres behind /api/auth/* —
+// no seeded credentials here, they would ship inside the client bundle.
 export const usersStore = {
   getAll(): User[] {
-    const users = get<User[]>('xm_users', [])
-    if (!users.find(u => u.id === DEFAULT_ADMIN.id)) {
-      const all = [DEFAULT_ADMIN, ...users]
-      set('xm_users', all)
-      return all
-    }
-    return users
+    return get<User[]>('xm_users', [])
   },
   save(users: User[]) {
     set('xm_users', users)

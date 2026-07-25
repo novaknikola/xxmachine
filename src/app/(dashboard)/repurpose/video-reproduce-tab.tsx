@@ -1,17 +1,21 @@
 'use client'
 
 import { useState, useRef } from 'react'
+import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { toast } from 'sonner'
-import { Play, Square, Loader2, Download, Trash2, FolderDown, Upload, X } from 'lucide-react'
+import {
+  Play, Square, Loader2, Download, Trash2, FolderDown,
+  Upload, X, ListTodo,
+} from 'lucide-react'
+import { uploadQueueInput } from '@/lib/upload-queue-input'
 
 interface VideoVariant {
   id: string
   sourceName: string
   seed: number
-  streamUrl: string  // /api/video-reproduce?id=...
+  streamUrl: string
 }
 
 interface VideoEffects {
@@ -22,6 +26,7 @@ interface VideoEffects {
   speed: boolean
   flipH: boolean
   crop: boolean
+  fade: boolean
 }
 
 const DEFAULT_EFFECTS: VideoEffects = {
@@ -32,14 +37,30 @@ const DEFAULT_EFFECTS: VideoEffects = {
   speed: false,
   flipH: false,
   crop: true,
+  fade: false,
 }
 
+const EFFECT_LABELS: Record<keyof VideoEffects, string> = {
+  brightness: 'Brightness',
+  contrast: 'Contrast',
+  saturation: 'Saturation',
+  hue: 'Hue shift',
+  speed: 'Speed ±3%',
+  flipH: 'Random flip',
+  crop: 'Slight crop',
+  fade: 'Fade in/out',
+}
+
+const PRESETS = [10, 20, 50, 100] as const
+
 export function VideoReproduceTab() {
+  const router = useRouter()
   const [sources, setSources] = useState<Array<{ id: string; file: File; name: string }>>([])
   const [effects, setEffects] = useState<VideoEffects>(DEFAULT_EFFECTS)
-  const [count, setCount] = useState(3)
+  const [count, setCount] = useState(10)
   const [variants, setVariants] = useState<VideoVariant[]>([])
   const [running, setRunning] = useState(false)
+  const [queueing, setQueueing] = useState(false)
   const [progress, setProgress] = useState({ done: 0, total: 0 })
   const fileRef = useRef<HTMLInputElement>(null)
   const abortRef = useRef(false)
@@ -55,8 +76,10 @@ export function VideoReproduceTab() {
     setEffects(prev => ({ ...prev, [key]: !prev[key] }))
   }
 
-  async function run() {
+  // Immediate mode: max 10, blocking, results shown inline
+  async function runImmediate() {
     if (!sources.length) { toast.error('Upload at least one video'); return }
+    if (count > 10) { toast.error('Immediate mode supports max 10 variants — use Queue for more'); return }
     abortRef.current = false
     const total = sources.length * count
     setRunning(true)
@@ -69,7 +92,7 @@ export function VideoReproduceTab() {
       const fd = new FormData()
       fd.append('file', src.file)
       fd.append('count', String(count))
-      fd.append('seed', String(Math.floor(Math.random() * 0xffffffff)))
+      fd.append('seed', String(Math.floor(Math.random() * 0xffffff)))
       Object.entries(effects).forEach(([k, v]) => fd.append(k, String(v)))
 
       try {
@@ -95,7 +118,58 @@ export function VideoReproduceTab() {
     }
 
     setRunning(false)
-    if (!abortRef.current) toast.success(`${done} video variations ready`)
+    if (!abortRef.current && done > 0) toast.success(`${done} video variations ready`)
+  }
+
+  // Queue mode: upload to storage, submit background job(s)
+  async function submitToQueue() {
+    if (!sources.length) { toast.error('Upload at least one video'); return }
+    setQueueing(true)
+    let submitted = 0
+    let failed = 0
+
+    for (const src of sources) {
+      try {
+        // 1. Upload video to Supabase Storage
+        toast.loading(`Uploading ${src.name}…`, { id: `upload-${src.id}` })
+        const { videoUrl, videoName } = await uploadQueueInput(src.file)
+        toast.dismiss(`upload-${src.id}`)
+
+        // 2. Submit queue job
+        const res = await fetch('/api/queue/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            job_type: 'video_repurpose',
+            input: {
+              videoUrl,
+              videoName,
+              count,
+              baseSeed: Math.floor(Math.random() * 0xffffff),
+              effects,
+            },
+          }),
+        })
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}))
+          throw new Error((e as { error?: string }).error ?? 'Submit failed')
+        }
+        submitted++
+      } catch (err) {
+        failed++
+        toast.dismiss(`upload-${src.id}`)
+        toast.error(`${src.name}: ${err instanceof Error ? err.message : 'error'}`)
+      }
+    }
+
+    setQueueing(false)
+    if (submitted > 0) {
+      setSources([])
+      toast.success(`${submitted} job${submitted > 1 ? 's' : ''} queued — processing in background`, {
+        action: { label: 'Open Queue', onClick: () => router.push('/captions?tab=queue') },
+        duration: 6000,
+      })
+    }
   }
 
   async function downloadAll() {
@@ -117,20 +191,13 @@ export function VideoReproduceTab() {
     toast.success('ZIP downloaded')
   }
 
-  const EFFECT_LABELS: Record<keyof VideoEffects, string> = {
-    brightness: 'Brightness',
-    contrast: 'Contrast',
-    saturation: 'Saturation',
-    hue: 'Hue shift',
-    speed: 'Speed ±3%',
-    flipH: 'Random flip',
-    crop: 'Slight crop',
-  }
+  const canRunImmediate = count <= 10 && !running && !queueing && sources.length > 0
+  const totalVariants = sources.length * count
 
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-6">
-        {/* Left */}
+        {/* Left panel */}
         <div className="space-y-4">
 
           {/* Upload */}
@@ -161,26 +228,52 @@ export function VideoReproduceTab() {
                     ))}
                   </div>
                   <div className="flex justify-between items-center">
-                    <p className="text-xs text-muted-foreground">{sources.length} video(s) · {sources.length * count} total</p>
-                    <button className="text-xs text-muted-foreground hover:text-destructive" onClick={() => setSources([])}>Clear all</button>
+                    <p className="text-xs text-muted-foreground">{sources.length} file(s) · {totalVariants} total</p>
+                    <button className="text-xs text-muted-foreground hover:text-destructive" onClick={() => setSources([])}>
+                      Clear all
+                    </button>
                   </div>
                 </>
               )}
             </CardContent>
           </Card>
 
-          {/* Count */}
+          {/* Variations count */}
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">Variations per video</CardTitle>
             </CardHeader>
-            <CardContent>
-              <div className="flex items-center gap-3">
-                <input type="range" min={1} max={10} value={count}
-                  onChange={e => setCount(Number(e.target.value))}
-                  className="flex-1 accent-primary" />
-                <span className="text-sm font-mono w-4 text-center">{count}</span>
+            <CardContent className="space-y-3">
+              {/* Presets */}
+              <div className="flex gap-1.5">
+                {PRESETS.map(preset => (
+                  <button
+                    key={preset}
+                    onClick={() => setCount(preset)}
+                    className={`flex-1 text-xs font-semibold py-1.5 rounded-lg border transition-colors ${
+                      count === preset
+                        ? 'border-primary bg-primary/10 text-primary'
+                        : 'border-border text-muted-foreground hover:border-primary/50 hover:text-foreground'
+                    }`}
+                  >
+                    {preset}x
+                  </button>
+                ))}
               </div>
+              {/* Slider */}
+              <div className="flex items-center gap-3">
+                <input
+                  type="range" min={1} max={100} value={count}
+                  onChange={e => setCount(Number(e.target.value))}
+                  className="flex-1 accent-primary"
+                />
+                <span className="text-sm font-mono w-8 text-center">{count}</span>
+              </div>
+              {count > 10 && (
+                <p className="text-[10px] text-amber-400/80">
+                  &gt;10 variants — use Queue (background processing)
+                </p>
+              )}
             </CardContent>
           </Card>
 
@@ -199,19 +292,35 @@ export function VideoReproduceTab() {
                 </label>
               ))}
               <p className="text-[10px] text-muted-foreground pt-1">
-                Processed server-side with FFmpeg. Each variant is unique.
+                FFmpeg processes each variant with unique randomized parameters.
               </p>
             </CardContent>
           </Card>
 
           {/* Actions */}
           <div className="space-y-2">
-            {!running ? (
-              <Button className="w-full" onClick={run} disabled={!sources.length}>
-                <Play className="w-4 h-4 mr-2" />
-                Generate {sources.length * count || ''} variations
-              </Button>
-            ) : (
+            {!running && !queueing ? (
+              <div className="flex gap-2">
+                <Button
+                  className="flex-1"
+                  onClick={runImmediate}
+                  disabled={!sources.length || count > 10}
+                  title={count > 10 ? 'Max 10 for immediate run — use Queue' : undefined}
+                >
+                  <Play className="w-4 h-4 mr-2" />
+                  Run {count <= 10 ? `${totalVariants}` : '(≤10 only)'}
+                </Button>
+                <Button
+                  variant="secondary"
+                  className="flex-1"
+                  onClick={submitToQueue}
+                  disabled={!sources.length}
+                >
+                  <ListTodo className="w-4 h-4 mr-2" />
+                  Queue {totalVariants > 0 ? `${totalVariants}` : ''}
+                </Button>
+              </div>
+            ) : running ? (
               <div className="flex gap-2">
                 <Button className="flex-1" disabled>
                   <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -221,8 +330,14 @@ export function VideoReproduceTab() {
                   <Square className="w-4 h-4" />
                 </Button>
               </div>
+            ) : (
+              <Button className="w-full" disabled>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Uploading to queue…
+              </Button>
             )}
-            {variants.length > 0 && !running && (
+
+            {variants.length > 0 && !running && !queueing && (
               <Button variant="outline" className="w-full" onClick={downloadAll}>
                 <FolderDown className="w-4 h-4 mr-2" />Download all ZIP ({variants.length})
               </Button>
@@ -236,7 +351,7 @@ export function VideoReproduceTab() {
           </div>
         </div>
 
-        {/* Right — results */}
+        {/* Right — inline results (quick mode only) */}
         <div>
           {running && (
             <div className="mb-4 space-y-1">
@@ -252,7 +367,7 @@ export function VideoReproduceTab() {
             <div className="flex flex-col items-center justify-center h-64 text-muted-foreground">
               <Upload className="w-10 h-10 mb-3 opacity-20" />
               <p className="text-sm">Upload videos and generate variations</p>
-              <p className="text-xs opacity-60 mt-1">FFmpeg applies random filters server-side</p>
+              <p className="text-xs opacity-60 mt-1">Run ≤10 inline · Queue up to 100 in background</p>
             </div>
           )}
 

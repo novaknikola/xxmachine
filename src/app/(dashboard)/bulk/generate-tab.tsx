@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAuth } from '@/contexts/auth-context'
 import { charactersStore, generationsStore } from '@/lib/store'
 import { Character, GenerationRow, DIMENSIONS } from '@/lib/types'
+import { buildStyledScenePrompt, withTriggerWord } from '@/lib/character-prompt'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
@@ -458,10 +459,11 @@ export function GenerateTab() {
     setLoading(true)
 
     try {
+      const fullPrompt = withTriggerWord(buildStyledScenePrompt(character, prompt.trim()), character.triggerWord)
       const res = await fetch('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: prompt.trim(), dimension, batch, loraUrl: character.loraUrl, loraScale: character.loraScale, characterId, characterName: character.name, userId: user?.id }),
+        body: JSON.stringify({ prompt: fullPrompt, dimension, batch, loraUrl: character.loraUrl, loraScale: character.loraScale, characterId, characterName: character.name, userId: user?.id }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'API error')

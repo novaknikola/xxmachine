@@ -1,9 +1,14 @@
 import { createServer as createHttpServer } from 'http'
 import { createServer as createHttpsServer } from 'https'
 import { parse } from 'url'
+import { fileURLToPath } from 'url'
+import { dirname } from 'path'
 import next from 'next'
 import cron from 'node-cron'
 import { readFileSync, existsSync } from 'fs'
+
+// In .mjs (ES module), __dirname is not defined — derive it from import.meta.url
+const __dirname = dirname(fileURLToPath(import.meta.url))
 
 // Load .env.local
 if (!existsSync('.env.local')) {
@@ -41,7 +46,7 @@ const protocol = hasCerts ? 'https' : 'http'
 const host = hasCerts && existsSync('xmachine.local.pem') ? 'xmachine.local' : 'localhost'
 const base = `${protocol}://${host}:${port}`
 
-const app = next({ dev, turbopack: dev })
+const app = next({ dev, dir: __dirname })
 const handle = app.getRequestHandler()
 
 await app.prepare()
@@ -71,14 +76,21 @@ async function warmRoutes(base) {
 }
 
 // ── Background scheduler (every minute) ─────────────────────────
-cron.schedule('* * * * *', async () => {
-  try {
-    await fetch(`${base}/api/cron/tick`, {
-      headers: { 'x-cron-secret': process.env.CRON_SECRET ?? '' },
-    })
-  } catch (err) {
-    console.error('[cron] tick failed:', err)
-  }
-})
+if (!process.env.CRON_SECRET) {
+  console.error(
+    '[cron] CRON_SECRET is not set — scheduler disabled. Queue jobs, scheduled posts and\n' +
+    '       analytics refresh will NOT run. Add CRON_SECRET to .env.local to enable them.',
+  )
+} else {
+  cron.schedule('* * * * *', async () => {
+    try {
+      await fetch(`${base}/api/cron/tick`, {
+        headers: { 'x-cron-secret': process.env.CRON_SECRET },
+      })
+    } catch (err) {
+      console.error('[cron] tick failed:', err)
+    }
+  })
 
-console.log('> Scheduler running (every minute)')
+  console.log('> Scheduler running (every minute)')
+}

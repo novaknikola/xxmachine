@@ -1,0 +1,520 @@
+XXmachine — Freelancer Onboarding & Setup Guide
+
+Project: XXmachine
+Platform: Content creation & fan engagement platform for AI-generated creator personas
+Stack: Next.js 16.2 · React 19 · TypeScript 5 · PostgreSQL (Supabase) · Tailwind CSS 4
+Prepared by: Project owner
+Date: 2026-06-03
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+ 1. Project Overview
+ 2. GitHub Repository Access
+ 3. Environment Variables
+ 4. Database Access
+ 5. Hostinger VPS Access
+ 6. Local Development Setup
+ 7. User Roles & Permissions
+ 8. Social Platform Credentials
+ 9. Messaging Platform (Telegram)
+10. Creator Platform (Fanvue)
+11. Scheduling Workflow
+12. Domain, SSL & Production Deployment
+13. Architecture Overview
+14. Checklist for Freelancer
+
+================================================================================
+1. PROJECT OVERVIEW
+================================================================================
+
+XXmachine is an internal back-office platform for managing AI-generated creator
+personas (called "characters"). It handles:
+
+- Bulk AI image generation — text-to-image with custom LoRA models per character,
+  batch processing, dataset export for LoRA training, image editing (WAN edit)
+- Social media management — Instagram (private API + browser automation),
+  Threads (OAuth), scheduled posting with approval workflow
+- Fan management — Fanvue fan list sync, spending analytics, payday tracking,
+  AI-powered fan summaries (Gemini), scheduled PPV messages
+- Content calendar — day-by-day content planning with topics, keywords, and
+  prompt generation
+- Viral reels tracker — scrape trending Instagram reels, analyze covers with
+  Gemini, auto-generate matching images and videos (Kling)
+- Motion/video generation — Kling AI integration for video creation from images
+- Admin panel — user management, system status, debug tools
+
+CHARACTERS (PERSONAS)
+There are currently 3 active characters: Tiana, Diana, Miyanna — each has their own:
+- LoRA model URL + scale
+- Instagram account (private API credentials + TOTP secret)
+- Fanvue account (OAuth token)
+- Google Drive folder for content storage
+- Telegram channel for content distribution
+- Base prompt style and story/backstory
+
+================================================================================
+2. GITHUB REPOSITORY ACCESS
+================================================================================
+
+
+- Repository URL: https://github.com/novaknikola/xxmachine  (private repo)
+- Access: The owner will send you a GitHub collaborator invite to your GitHub
+  account. Accept the invite before cloning.
+- Branch: "main" is the primary branch. Work on feature branches
+  (feature/your-feature-name) and open PRs to main.
+
+Clone:
+  git clone https://github.com/novaknikola/xxmachine.git
+  cd xmachine
+  npm install
+
+================================================================================
+3. ENVIRONMENT VARIABLES
+================================================================================
+
+The app requires a .env.local file in the project root. The server reads it
+manually on startup — do NOT rename it.
+
+Copy the template below and fill in the values provided separately:
+
+----
+# Database
+DATABASE_URL=postgresql://postgres:[PASSWORD]@[HOST]:5432/postgres
+
+# App
+NEXT_PUBLIC_BASE_URL=https://xmachine.local:3000
+CRON_SECRET=[RANDOM_STRING]
+
+# Image generation (Replicate / custom AI provider)
+# [PLACEHOLDER — confirm which provider: Replicate, RunPod, or other]
+REPLICATE_API_TOKEN=
+AI_GENERATION_ENDPOINT=
+AI_GENERATION_API_KEY=
+
+# LoRA training
+# [PLACEHOLDER — confirm provider]
+LORA_TRAIN_API_KEY=
+LORA_TRAIN_ENDPOINT=
+
+# Video generation (Kling AI)
+KLING_API_KEY=
+KLING_API_SECRET=
+
+# Google / Drive
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_REDIRECT_URI=https://xmachine.local:3000/api/google/callback
+
+# Instagram (Graph API — legacy/optional)
+INSTAGRAM_APP_ID=
+INSTAGRAM_APP_SECRET=
+
+# Threads (Meta)
+THREADS_APP_ID=
+THREADS_APP_SECRET=
+THREADS_REDIRECT_URI=https://xmachine.local:3000/api/threads/oauth/callback
+
+# Telegram Bot
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_ADMIN_GROUP_ID=
+
+# Session signing
+FANVUE_SESSION_SECRET=[RANDOM_SECRET_MIN_32_CHARS]
+
+# Fanvue
+FANVUE_API_BASE=https://api.fanvue.com
+FANVUE_CLIENT_ID=
+FANVUE_CLIENT_SECRET=
+FANVUE_REDIRECT_URI=https://xmachine.local:3000/api/fanvue/callback
+
+# AI / LLM
+GEMINI_API_KEY=
+GROK_API_KEY=
+
+# Proxy (browser automation) — per-character proxies stored in DB
+# PROXY_URL=http://user:pass@host:port
+----
+
+IMPORTANT: The .env.local file is gitignored and must never be committed.
+The owner will share the actual values via a secure channel.
+
+================================================================================
+4. DATABASE ACCESS
+================================================================================
+
+Provider: Supabase (PostgreSQL)
+
+  Host:     [PLACEHOLDER — Supabase project host]
+  Port:     5432
+  Database: postgres
+  User:     postgres
+  Password: [PLACEHOLDER — share via secure channel]
+  SSL:      Required (auto-detected if host contains supabase.com)
+
+SCHEMA / MIGRATIONS
+Migrations live in src/db/migrations/ and are run with:
+
+  npm run db:migrate              # core schema
+  npm run db:migrate-schedule     # scheduled posts table
+  npm run db:migrate-fans         # fans + fan spend snapshots
+  npm run db:migrate-instagram    # instagram queue + characters extension
+
+TABLES
+
+  users              Admin and chatter accounts
+  sessions           Session tokens (cookie-based auth)
+  characters         Creator personas (Instagram, Fanvue, Google Drive credentials)
+  instagram_queue    Posts queued for Instagram publication
+  viral_reels        Tracked trending reels + generated content
+  generations        AI image generation history
+  prompt_library     Saved reusable prompts
+  schema_migrations  Applied migration tracking
+  (fans, scheduled_posts, calendar_days — see migration scripts)
+
+DATABASE DUMP
+[PLACEHOLDER] — Owner to provide a sanitized dump (no real fan PII, no credentials):
+  pg_dump $DATABASE_URL --no-owner --no-acl -f xmachine_dump.sql
+
+================================================================================
+5. HOSTINGER VPS ACCESS
+================================================================================
+
+[Please advise on Hostinger VPS that is suitable for this project]
+
+  VPS IP:           [IP ADDRESS]
+  SSH User:         [USERNAME] (probably root or ubuntu)
+  SSH Port:         22
+  SSH Auth:         SSH key (owner will add your public key)
+  OS:               [Ubuntu 22.04 / Debian — confirm]
+  App location:     /var/www/xmachine or ~/xmachine — confirm with owner
+  Node version:     [PLACEHOLDER — check with: node -v on server]
+  Process manager:  [PLACEHOLDER — PM2 / systemd — confirm]
+
+Deployment flow (estimated — confirm with owner):
+  cd /var/www/xmachine
+  git pull origin main
+  npm install
+  npm run build
+  pm2 restart xmachine    # or: systemctl restart xmachine
+
+NOTE: The app runs a custom HTTPS server (server.mjs), not the standard
+"next start". Ensure the process manager points to "node server.mjs".
+
+================================================================================
+6. LOCAL DEVELOPMENT SETUP
+================================================================================
+
+PREREQUISITES
+- Node.js 20+
+- PostgreSQL client (optional, for direct DB access)
+- mkcert (https://github.com/FiloSottile/mkcert) — for local HTTPS
+
+STEPS
+
+  # 1. Clone and install
+  git clone https://github.com/novaknikolaa/xxmachine.git
+  cd xmachine
+  npm install
+
+  # 2. Set up local HTTPS (required)
+  mkcert -install
+  mkcert xxmachine.local
+  # Generates: xxmachine.local-key.pem + xxmachine.local.pem
+  # Place both files in the project root
+
+  # 3. Add xmachine.local to hosts file
+  # Windows: C:\Windows\System32\drivers\etc\hosts
+  # Linux/Mac: /etc/hosts
+  # Add line: 127.0.0.1  xxmachine.local
+
+  # 4. Create .env.local (see Section 3)
+
+  # 5. Run database migrations
+  npm run db:migrate
+  npm run db:migrate-schedule
+  npm run db:migrate-fans
+  npm run db:migrate-instagram
+
+  # 6. Start dev server
+  npm run dev
+  # App available at: https://xmachine.local:3000
+
+PLAYWRIGHT / BROWSER AUTOMATION
+  npx playwright install chromium
+
+FIRST LOGIN
+On fresh DB, navigate to /auth/signup to create the first admin account.
+(Bootstrap mode available if no users exist — see /api/auth/bootstrap-status)
+
+================================================================================
+7. USER ROLES & PERMISSIONS
+================================================================================
+
+The system has 2 roles:
+
+  admin    Full access — user management, all characters, all features,
+           admin panel, debug tools
+
+  chatter  Restricted — fan management, messaging, content scheduling
+           (no admin panel, no character settings, no user management)
+
+AUTH IMPLEMENTATION
+- Session-based (cookie name: xm_sid, HMAC-SHA256 signed)
+- Sessions stored in DB (sessions table), expire after 30 days
+- Passwords hashed with bcryptjs
+- TOTP (2FA) supported for Instagram accounts (per character, not per user)
+
+TEST ACCOUNTS
+
+  Admin test account:   admin@xmachine.local / [password]
+  Chatter test account: chatter@xmachine.local / [password]
+
+================================================================================
+8. SOCIAL PLATFORM CREDENTIALS
+================================================================================
+
+INSTAGRAM
+The platform uses the Instagram Private API (not official Graph API) for most
+operations, plus Playwright browser automation for unsupported actions.
+
+Per-character credentials stored in the characters table:
+
+  ig_username      Instagram username
+  ig_password      Instagram password
+  ig_totp_secret   TOTP secret for 2FA (OTPLib format)
+  ig_session       Cached session JSON (auto-refreshed)
+  proxy_url        Per-character proxy (recommended to avoid IP bans)
+
+Test account for development:
+[PLACEHOLDER] — Owner to provide a throwaway Instagram account for dev/testing.
+DO NOT use production accounts during development.
+
+THREADS
+OAuth-based via Meta's Threads API. Credentials per character:
+- THREADS_APP_ID + THREADS_APP_SECRET in .env.local
+- OAuth flow: /api/threads/oauth → /api/threads/oauth/callback
+- Tokens stored in DB, auto-refreshed via /api/threads/refresh-token
+
+Test account:
+[PLACEHOLDER] — Owner to provide a test Threads account (or confirm using the
+same Instagram test account — Threads and Instagram share Meta login).
+
+================================================================================
+9. MESSAGING PLATFORM (TELEGRAM)
+================================================================================
+
+The platform uses a Telegram bot for:
+1. Scheduled post previews — preview with image + caption sent to admin group
+   for approval/rejection before publishing
+2. Content distribution — approved posts sent to character-specific channels
+
+Bot credentials (from .env.local):
+  TELEGRAM_BOT_TOKEN       BotFather token
+  TELEGRAM_ADMIN_GROUP_ID  Group chat ID for approval messages
+
+Webhook endpoint: /api/telegram/webhook
+[PLACEHOLDER] — On production, webhook URL must be registered:
+  https://xxmachine.com/api/telegram/webhook
+
+Test channels:
+[PLACEHOLDER] — Owner to provide:
+  - Test bot token (or share prod bot in dev mode)
+  - Test admin group ID for approvals
+  - Test channel IDs for at least one character
+
+================================================================================
+10. CREATOR PLATFORM (FANVUE)
+================================================================================
+
+Fanvue is the primary creator/fan monetization platform. The app integrates via:
+- Fanvue OAuth — per-character auth: /api/fanvue/auth → /api/fanvue/callback
+- Fan sync — /api/fanvue/sync pulls fan list, spend data, subscription status
+- Chat messages — /api/fanvue/chat-messages fetches conversation history per fan
+- Send message — /api/fanvue/send-message sends manual messages
+- Schedule message — /api/fanvue/schedule-message uses Fanvue's mass-message
+  feature with a single-fan custom list ("mass-of-one" trick) for scheduled PPV
+
+Credentials:
+  FANVUE_CLIENT_ID + FANVUE_CLIENT_SECRET in .env.local
+  Per-character OAuth tokens stored in DB
+
+Test account:
+[PLACEHOLDER] — Owner to provide a Fanvue test creator account.
+
+WARNING: The send-message API endpoints interact with REAL fans. During
+development, use a test account or add safeguards to prevent accidental messages.
+
+================================================================================
+11. SCHEDULING WORKFLOW
+================================================================================
+
+HOW IT WORKS
+
+1. Chatter or admin creates a scheduled post via /schedule page
+   (image URLs + caption + platforms + datetime)
+2. Post saved to DB with status: pending_approval
+3. Telegram preview (image + caption) sent to admin group
+4. Admin approves (/approve) or rejects (/reject) via Telegram
+5. Status changes to: approved or rejected
+6. Background cron job (runs every minute via node-cron in server.mjs)
+   calls /api/cron/tick
+7. Cron tick finds approved posts whose scheduled_at has passed
+   → publishes to selected platforms
+8. Status updated to: published or failed
+
+PLATFORMS SUPPORTED
+
+  Telegram   Posts to character's Telegram channel
+  Fanvue     Posts as a standard feed post via Fanvue API
+  Instagram  Separate queue (instagram_queue table), separate flow
+
+SAMPLE SCHEDULING SPREADSHEET
+[PLACEHOLDER] — Owner to share the Google Sheets template used for planning
+content batches before entering them into the platform.
+
+INSTAGRAM BULK IMPORT (CSV FORMAT)
+Handled by /api/instagram/import-csv. Accepted columns (lowercase headers):
+
+  Column           Aliases accepted                  Required
+  -------          ----------------                  --------
+  name             account_name                      No (falls back to ig_username)
+  ig_username      username, instagram_username      YES
+  ig_password      password, instagram_password      No (kept if already in DB)
+  ig_totp_secret   totp_secret                       No
+  proxy_url        proxy                             No
+  drive_folder_id  google_drive_folder_id            No
+
+Proxy format accepted:
+  ip:port:user:pass
+  http://user:pass@host:port
+  host:port
+
+If a row with the same ig_username or name already exists → UPDATED
+(empty fields ignored, existing values kept). New rows → INSERTED.
+
+================================================================================
+12. DOMAIN, SSL & PRODUCTION DEPLOYMENT
+================================================================================
+
+DOMAIN
+  Production domain:  xxmachine.com
+  DNS:                [PLACEHOLDER — Hostinger / Cloudflare — confirm]
+  DNS A record:       points to Hostinger VPS IP
+
+SSL (PRODUCTION)
+[PLACEHOLDER — confirm one of:]
+  - Let's Encrypt / Certbot — certs at /etc/letsencrypt/live/[domain]/
+  - Cloudflare proxy — SSL terminated at Cloudflare edge (app runs HTTP internally)
+
+The app's server.mjs auto-detects cert files in the project root and switches
+between HTTPS and HTTP. For Cloudflare proxy, run HTTP internally on port 3000.
+
+SSL (LOCAL DEVELOPMENT)
+Uses mkcert self-signed certs. See Section 6. Dev hostname: xmachine.local
+
+PRODUCTION PROCESS MANAGER
+[PLACEHOLDER — confirm. Recommended: PM2]
+
+  npm install -g pm2
+  cd /var/www/xmachine
+  npm run build
+  pm2 start "node server.mjs" --name xmachine --env production
+  pm2 save
+  pm2 startup
+
+Or if using systemd — owner to share the .service file.
+
+ENVIRONMENT ON VPS
+  NODE_ENV=production  (set by npm run start automatically)
+  PORT=3000            (default, configurable)
+  nginx reverse proxy: 443 → 3000
+
+[PLACEHOLDER] — Owner to share nginx config if it exists.
+
+================================================================================
+13. ARCHITECTURE OVERVIEW
+================================================================================
+
+xmachine/
+├── src/
+│   ├── app/
+│   │   ├── (dashboard)/        All protected pages
+│   │   │                       (bulk, fans, socials, schedule, calendar,
+│   │   │                        reels, motion, history, admin)
+│   │   ├── api/                ~72 API route handlers
+│   │   │   ├── auth/           Login, logout, signup, session
+│   │   │   ├── characters/     Character CRUD
+│   │   │   ├── generate/       AI image generation
+│   │   │   ├── wan-edit/       Image editing (WAN model)
+│   │   │   ├── loras/          LoRA model management + training
+│   │   │   ├── fans/           Fan CRUD + messages + AI summary
+│   │   │   ├── fanvue/         Fanvue OAuth + sync + messaging
+│   │   │   ├── schedule/       Scheduled posts CRUD
+│   │   │   ├── instagram/      Instagram connect + queue + publish
+│   │   │   ├── threads/        Threads OAuth + publish
+│   │   │   ├── telegram/       Telegram webhook
+│   │   │   ├── motion/         Viral reels + Kling video generation
+│   │   │   ├── calendar/       Calendar day generation
+│   │   │   ├── google/         Google Drive OAuth + file listing
+│   │   │   ├── cron/tick       Background job trigger (every minute)
+│   │   │   └── ai/             AI utilities (fan summary, caption gen)
+│   │   └── auth/               Login/signup pages
+│   ├── components/             Shared React components
+│   ├── contexts/               AuthContext (current user state)
+│   ├── db/migrations/          SQL migration files
+│   └── lib/
+│       ├── db.ts               PostgreSQL connection pool
+│       ├── types.ts            All TypeScript types
+│       ├── store.ts            LocalStorage state (characters, user prefs)
+│       ├── fans.ts             Fan analytics (payday calc, spend tracking)
+│       └── fanvue.ts           Fanvue API client
+├── scripts/                    DB migration runner scripts
+├── server.mjs                  Custom HTTPS server + cron scheduler
+├── next.config.ts
+└── .env.local                  NOT committed — share separately
+
+KEY ARCHITECTURAL NOTES
+
+1. Custom server — The app does NOT use "next start". It uses server.mjs which
+   starts Next.js AND runs the cron scheduler in the same process.
+   Always use: npm run dev (dev) or npm run start (prod).
+
+2. No ORM — Raw SQL via the pg library. The src/lib/db.ts exports
+   query(), rows(), one() helpers.
+
+3. Session auth — Cookie-based sessions stored in PostgreSQL.
+   No JWT, no NextAuth. See src/app/api/auth/ for implementation.
+
+4. Browser automation — Playwright + stealth plugin for Instagram actions
+   that can't be done via private API. Some routes open a real browser on the
+   server — the VPS may need xvfb for headless display.
+
+5. No state management library — React Context for auth, localStorage
+   (store.ts) for characters and UI state. No Redux/Zustand.
+
+6. Tailwind CSS v4 — Uses new v4 API (not v3). PostCSS config at
+   @tailwindcss/postcss. Class syntax is the same but config format differs.
+
+================================================================================
+14. CHECKLIST FOR FREELANCER
+================================================================================
+
+Before starting work, confirm you have:
+
+  [ ] GitHub repo access + cloned locally
+  [ ] .env.local file with all values filled in
+  [ ] Database connected (npm run db:migrate completes without errors)
+  [ ] mkcert installed + xmachine.local cert generated
+  [ ] xmachine.local added to hosts file
+  [ ] npm run dev runs and app loads at https://xmachine.local:3000
+  [ ] Can log in with the provided test admin account
+  [ ] Playwright browsers installed (npx playwright install chromium)
+  [ ] VPS SSH access working (if working on deployment tasks)
+  [ ] Telegram test bot token + admin group configured
+  [ ] Fanvue test account connected to at least one character
+  [ ] Instagram test account connected to at least one character
+
+================================================================================
+

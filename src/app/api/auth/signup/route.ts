@@ -1,14 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import bcrypt from 'bcryptjs'
+import QRCode from 'qrcode'
 import { one } from '@/lib/db'
-import { createSession, getSessionUser, setSessionCookie } from '@/lib/session'
+import { encrypt } from '@/lib/crypto'
+import { createSession, setSessionCookie } from '@/lib/session'
 
-interface CreatedUser {
-  id: string
-  email: string
-  display_name: string
-  role: 'admin' | 'chatter'
-}
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { authenticator } = require('otplib')
 
 interface CountRow { count: string }
 
@@ -18,12 +16,14 @@ export async function POST(req: NextRequest) {
       email?: string
       password?: string
       display_name?: string
-      role?: 'admin' | 'chatter'
+      telegram?: string
     } | null
 
     const email = body?.email?.trim().toLowerCase()
     const password = body?.password
     const display_name = body?.display_name?.trim()
+    const telegram = body?.telegram?.trim() || null
+
     if (!email || !password || !display_name) {
       return NextResponse.json({ error: 'missing_fields' }, { status: 400 })
     }
@@ -31,50 +31,43 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'password_too_short' }, { status: 400 })
     }
 
-    // Bootstrap rule: when there are zero users, the first signup becomes admin.
-    // Otherwise creating accounts requires an existing admin (handled by separate /api/admin/users route, not here).
-    const countRow = await one<CountRow>('select count(*)::text as count from users')
-    const total = Number(countRow?.count ?? 0)
-
-    let role: 'admin' | 'chatter'
-    let isBootstrap = false
-    if (total === 0) {
-      role = 'admin'
-      isBootstrap = true
-    } else {
-      // Require requester to be an admin
-      const requester = await getSessionUser(req)
-      if (!requester || requester.role !== 'admin') {
-        return NextResponse.json({ error: 'forbidden' }, { status: 403 })
-      }
-      role = body?.role === 'admin' ? 'admin' : 'chatter'
-    }
-
-    // Check email uniqueness
-    const existing = await one(`select 1 from users where lower(email) = $1`, [email])
+    // Email uniqueness check
+    const existing = await one(`SELECT 1 FROM users WHERE lower(email) = $1`, [email])
     if (existing) {
       return NextResponse.json({ error: 'email_taken' }, { status: 409 })
     }
 
+    // Bootstrap: first user becomes admin
+    const countRow = await one<CountRow>('SELECT count(*)::text AS count FROM users')
+    const total = Number(countRow?.count ?? 0)
+    const role = total === 0 ? 'admin' : 'user'
+
+    // Generate TOTP secret and encrypt it
+    const totpSecret: string = authenticator.generateSecret()
+    const encryptedSecret = encrypt(totpSecret)
+
     const hash = await bcrypt.hash(password, 11)
-    const created = await one<CreatedUser>(
-      `insert into users (email, display_name, role, password_hash)
-       values ($1, $2, $3, $4)
-       returning id, email, display_name, role`,
-      [email, display_name, role, hash],
+    const created = await one<{ id: string }>(
+      `INSERT INTO users (email, display_name, role, password_hash, telegram, totp_secret, totp_enabled)
+       VALUES ($1, $2, $3, $4, $5, $6, false)
+       RETURNING id`,
+      [email, display_name, role, hash, telegram, encryptedSecret],
     )
     if (!created) throw new Error('user_insert_failed')
 
-    // For the bootstrap signup, also start a session so the new admin is logged in.
-    const res = NextResponse.json({ ok: true, user: created, bootstrap: isBootstrap })
-    if (isBootstrap) {
-      const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null
-      const ua = req.headers.get('user-agent')
-      const signed = await createSession(created.id, ip ?? undefined, ua ?? undefined)
-      setSessionCookie(res, signed)
-    }
-    return res
+    // Build otpauth URL for QR code
+    const otpauthUrl = authenticator.keyuri(email, 'XXmachine', totpSecret)
+    const qrDataUrl: string = await QRCode.toDataURL(otpauthUrl)
+
+    return NextResponse.json({
+      ok: true,
+      userId: created.id,
+      qrDataUrl,
+      otpauthUrl,
+      isFirstUser: role === 'admin',
+    })
   } catch (err) {
+    console.error('[auth/signup]', err)
     return NextResponse.json(
       { error: err instanceof Error ? err.message : 'signup_failed' },
       { status: 500 },

@@ -4,6 +4,15 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAuth } from '@/contexts/auth-context'
 import { charactersStore, generationsStore } from '@/lib/store'
 import { Character, GenerationRow, DIMENSIONS } from '@/lib/types'
+import {
+  CAROUSEL_PRESETS,
+  DEFAULT_CAROUSEL_PRESET_ID,
+  buildCarouselBasePrompt,
+  getCarouselGrokHint,
+  getCarouselGrokStyle,
+  recommendedCarouselExtras,
+  getCarouselVariantPrompts,
+} from '@/lib/carousel-presets'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
@@ -23,19 +32,30 @@ import {
   Layers, Play, Square, CheckCircle2, XCircle, Loader2,
   Download, Trash2, RotateCcw, Info, ChevronDown, ExternalLink,
   FolderDown, Upload, Cpu, Database, Plus, X, RefreshCw, HelpCircle,
+  ListTodo,
 } from 'lucide-react'
-import { PromptHelpDialog } from './prompt-library'
-import { ReproduceTab } from './reproduce-tab'
+import { PromptHelpDialog, InstagramBundleDialog } from './prompt-library'
+import { buildStyledScenePrompt, withTriggerWord } from '@/lib/character-prompt'
+import { SEEDREAM_MAX_IMAGES, type SeedreamResolution } from '@/lib/wavespeed'
 import { GenerateTab } from './generate-tab'
-import { VideoReproduceTab } from './video-reproduce-tab'
+import { CarouselTab } from './carousel-tab'
 
 // ─── Types ────────────────────────────────────────────────────
 
 type JobStatus = 'pending' | 'processing' | 'done' | 'error' | 'skipped'
 
+interface RefImageItem {
+  id: string
+  file: File
+  url: string
+}
+
+const MAX_CAROUSEL_REF_IMAGES = SEEDREAM_MAX_IMAGES
+
 interface BulkJob {
   id: string; characterId: string; characterName: string; prompt: string
   dimension: string; status: JobStatus; outputUrls: string[]
+  sentPrompt?: string; sentLoraUrl?: string
   error?: string; startedAt?: string; finishedAt?: string
 }
 
@@ -52,7 +72,7 @@ interface LoraRow {
 }
 
 const CONCURRENCY = 2
-const TAB_LABELS = ['Image Generate', 'Dataset', 'Train LoRA', 'Bulk Generate', 'Img Reproduce', 'Video Reproduce'] as const
+const TAB_LABELS = ['Image Generate', 'Dataset', 'Train LoRA', 'Bulk Generate', 'Carousel'] as const
 type Tab = typeof TAB_LABELS[number]
 
 // ─── Helpers ─────────────────────────────────────────────────
@@ -82,6 +102,19 @@ function StatusBadge({ status }: { status: JobStatus }) {
   )
 }
 
+/**
+ * Splits a pasted prompt list into clean lines, stripping markdown noise that
+ * commonly comes along when copying prompts out of a chat response — code-fence
+ * markers (```text, ```) and separator lines (---, ===, ***) — so only real
+ * prompt text is counted and sent to generation.
+ */
+function cleanPromptLines(raw: string): string[] {
+  return raw
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l.length > 0 && !/^```/.test(l) && !/^[-=*_~]{3,}$/.test(l))
+}
+
 // ─── Main Page ────────────────────────────────────────────────
 
 export default function BulkPage() {
@@ -91,6 +124,7 @@ export default function BulkPage() {
   const [loras, setLoras] = useState<LoraRow[]>([])
 
   const [showPromptHelp, setShowPromptHelp] = useState(false)
+  const [showBundleDialog, setShowBundleDialog] = useState(false)
 
   // ── Dataset state ────────────────────────────────────────────
   const [refImages, setRefImages] = useState<Array<{ id: string; file: File; url: string }>>([])
@@ -101,6 +135,7 @@ export default function BulkPage() {
   const [datasetProgress, setDatasetProgress] = useState({ done: 0, total: 0 })
   const [datasetHistory, setDatasetHistory] = useState<GenerationRow[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const carouselRefInputRef = useRef<HTMLInputElement>(null)
   const datasetAbortRef = useRef(false)
 
   // ── Train state ──────────────────────────────────────────────
@@ -124,6 +159,13 @@ export default function BulkPage() {
   const [zipping, setZipping] = useState<string | null>(null)
   const [bulkLoraUrl, setBulkLoraUrl] = useState('')
   const [bulkLoraScale, setBulkLoraScale] = useState(0.8)
+  const [carouselMode, setCarouselMode] = useState(false)
+  const [carouselExtra, setCarouselExtra] = useState<1 | 2 | 3 | 4>(1)
+  const [carouselPresetId, setCarouselPresetId] = useState(DEFAULT_CAROUSEL_PRESET_ID)
+  const [carouselGrokSmart, setCarouselGrokSmart] = useState(false)
+  const [carouselRefImages, setCarouselRefImages] = useState<RefImageItem[]>([])
+  const [seedreamResolution, setSeedreamResolution] = useState<SeedreamResolution>('1k')
+  const carouselRefUrlsRef = useRef<string[]>([])
 
   const loadLoras = useCallback(async () => {
     const res = await fetch('/api/loras').catch(() => null)
@@ -140,10 +182,22 @@ export default function BulkPage() {
   }
 
   useEffect(() => {
-    setCharacters(charactersStore.getAll())
-    loadLoras()
-    loadDatasetHistory()
+    const t = setTimeout(() => {
+      setCharacters(charactersStore.getAll())
+      loadLoras()
+      loadDatasetHistory()
+    }, 0)
+    return () => clearTimeout(t)
   }, [loadLoras])
+
+  useEffect(() => {
+    if (!carouselMode) return
+    setCarouselExtra(recommendedCarouselExtras(carouselPresetId))
+  }, [carouselMode, carouselPresetId])
+
+  useEffect(() => {
+    carouselRefUrlsRef.current = []
+  }, [carouselRefImages])
 
   // ─────────────────────────────────────────────────────────────
   // REPRODUCE TAB
@@ -162,7 +216,7 @@ export default function BulkPage() {
   }
 
   async function generateDataset() {
-    const prompts = datasetPrompts.split('\n').map(l => l.trim()).filter(Boolean)
+    const prompts = cleanPromptLines(datasetPrompts)
     if (prompts.length === 0) { toast.error('Add at least one prompt'); return }
     if (refImages.length === 0) { toast.error('Upload at least one reference image'); return }
 
@@ -184,7 +238,7 @@ export default function BulkPage() {
         fd.append('file', ref.file)
         fd.append('prompt', prompt)
         fd.append('size', datasetSize)
-        const res = await fetch('/api/wan-edit', { method: 'POST', body: fd })
+        const res = await fetch('/api/edit-image', { method: 'POST', body: fd })
         const data = await res.json()
         if (!res.ok || !data.urls?.length) throw new Error(data.error ?? 'Failed')
         const rowId = crypto.randomUUID()
@@ -316,10 +370,75 @@ export default function BulkPage() {
     } finally { setZipping(null) }
   }
 
+  async function ensureCarouselRefUrls(): Promise<string[]> {
+    if (carouselRefUrlsRef.current.length > 0) return carouselRefUrlsRef.current
+    if (!carouselRefImages.length) return []
+    carouselRefUrlsRef.current = await uploadCarouselRefImages()
+    return carouselRefUrlsRef.current
+  }
+
+  async function callSeedreamEdit(prompt: string, size: string, imageUrls: string[]): Promise<string[]> {
+    const res = await fetch('/api/edit-image', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, size, resolution: seedreamResolution, imageUrls }),
+    })
+    const data = await res.json()
+    if (!res.ok || !data.urls?.length) throw new Error(data.error ?? 'Seedream edit failed')
+    return data.urls as string[]
+  }
+
+  function addCarouselRefImages(files: FileList | null) {
+    if (!files?.length) return
+    const room = MAX_CAROUSEL_REF_IMAGES - carouselRefImages.length
+    if (room <= 0) {
+      toast.error(`Max ${MAX_CAROUSEL_REF_IMAGES} reference images`)
+      return
+    }
+    const newImgs = Array.from(files).slice(0, room).map(file => ({
+      id: crypto.randomUUID(),
+      file,
+      url: URL.createObjectURL(file),
+    }))
+    setCarouselRefImages(prev => [...prev, ...newImgs])
+    if (files.length > room) {
+      toast.message(`Only ${room} more reference image(s) added (max ${MAX_CAROUSEL_REF_IMAGES})`)
+    }
+  }
+
+  async function uploadCarouselRefImages(): Promise<string[]> {
+    const urls: string[] = []
+    for (const ref of carouselRefImages) {
+      const res = await fetch('/api/queue/upload-input', {
+        method: 'POST',
+        headers: {
+          'content-type': ref.file.type || 'image/jpeg',
+          'x-file-name': encodeURIComponent(ref.file.name),
+        },
+        body: ref.file,
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Reference upload failed')
+      urls.push(data.url as string)
+    }
+    return urls
+  }
+
+  function isSeedreamRefOnlyMode(): boolean {
+    return carouselMode
+      && carouselRefImages.length > 0
+      && !bulkLoraUrl
+      && selectedCharIds.length === 0
+  }
+
   function buildJobs() {
-    const lines = promptsRaw.split('\n').map(l => l.trim()).filter(Boolean)
+    const lines = cleanPromptLines(promptsRaw)
     if (!lines.length) { toast.error('Add at least one prompt'); return }
-    if (!selectedCharIds.length && !bulkLoraUrl) { toast.error('Select a character or enter a LoRA URL'); return }
+    const refOnly = isSeedreamRefOnlyMode()
+    if (!selectedCharIds.length && !bulkLoraUrl && !refOnly) {
+      toast.error('Select a character, LoRA, or upload reference images (carousel)')
+      return
+    }
 
     const newJobs: BulkJob[] = []
     if (selectedCharIds.length > 0) {
@@ -329,6 +448,10 @@ export default function BulkPage() {
         for (const prompt of lines) {
           newJobs.push({ id: crypto.randomUUID(), characterId: charId, characterName: char.name, prompt, dimension, status: 'pending', outputUrls: [] })
         }
+      }
+    } else if (refOnly) {
+      for (const prompt of lines) {
+        newJobs.push({ id: crypto.randomUUID(), characterId: '', characterName: 'Seedream refs', prompt, dimension, status: 'pending', outputUrls: [] })
       }
     } else {
       for (const prompt of lines) {
@@ -344,23 +467,97 @@ export default function BulkPage() {
   }
 
   async function generateOne(job: BulkJob) {
-    const char = characters.find(c => c.id === job.characterId)
+    const char = charactersStore.getAll().find(c => c.id === job.characterId)
     const loraUrl = bulkLoraUrl || char?.loraUrl
     const loraScale = bulkLoraScale || char?.loraScale || 0.8
-    const basePrompt = char?.basePromptStyle ? `${char.basePromptStyle}, ${job.prompt}` : job.prompt
+    const styledPrompt = buildStyledScenePrompt(char, job.prompt)
+    const basePrompt = withTriggerWord(styledPrompt, selectedLora?.trigger_word || char?.triggerWord)
+    const generationPrompt = carouselMode
+      ? buildCarouselBasePrompt(basePrompt, carouselPresetId)
+      : basePrompt
 
-    updateJob(job.id, { status: 'processing', startedAt: new Date().toISOString() })
+    const refOnly = isSeedreamRefOnlyMode()
+    if (refOnly && carouselRefImages.length === 0) {
+      toast.error('Upload reference images for Seedream-only mode')
+      return
+    }
+
+    updateJob(job.id, { status: 'processing', startedAt: new Date().toISOString(), sentPrompt: generationPrompt, sentLoraUrl: loraUrl ?? undefined })
     try {
-      const res = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: basePrompt, dimension: job.dimension, batch: 1, loraUrl, loraScale, characterId: job.characterId, characterName: job.characterName, userId: user?.id }),
+      let baseUrls: string[]
+      if (refOnly) {
+        const refUrls = await ensureCarouselRefUrls()
+        baseUrls = await callSeedreamEdit(generationPrompt, job.dimension, refUrls)
+      } else {
+        const res = await fetch('/api/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: generationPrompt, dimension: job.dimension, batch: 1, loraUrl, loraScale, characterId: job.characterId, characterName: job.characterName, userId: user?.id }),
+        })
+        const data = await res.json()
+        if (!res.ok || data.error) throw new Error(data.error ?? 'API error')
+        baseUrls = data.urls ?? []
+      }
+
+      let outputUrls = baseUrls
+      if (carouselMode && baseUrls.length) {
+        let variantPrompts: string[] = []
+
+        if (carouselGrokSmart) {
+          try {
+            const imgRes = await fetch(baseUrls[0])
+            const blob = await imgRes.blob()
+            const fd = new FormData()
+            fd.append('file', blob, 'base.jpg')
+            fd.append('count', String(carouselExtra))
+            fd.append('mode', 'carousel')
+            fd.append('style', getCarouselGrokStyle(carouselPresetId))
+            fd.append('hint', getCarouselGrokHint(carouselPresetId))
+            const poseRes = await fetch('/api/grok/analyze-poses', { method: 'POST', body: fd })
+            const poseData = await poseRes.json()
+            if (poseRes.ok) {
+              variantPrompts = (poseData.prompts as string[] ?? []).map(p => p.trim()).filter(Boolean).slice(0, carouselExtra)
+            }
+          } catch {
+            // fall through to preset
+          }
+        }
+
+        if (!variantPrompts.length) {
+          variantPrompts = getCarouselVariantPrompts(carouselPresetId, carouselExtra, generationPrompt)
+        }
+
+        // The base slide occupies one of Seedream's image slots, so refs are capped one below the max.
+        const refUrls = carouselRefImages.length
+          ? (await ensureCarouselRefUrls()).slice(0, SEEDREAM_MAX_IMAGES - 1)
+          : []
+
+        const results = await Promise.allSettled(variantPrompts.map(async variantPrompt => {
+          const editUrls = await callSeedreamEdit(
+            variantPrompt,
+            job.dimension,
+            [baseUrls[0], ...refUrls],
+          )
+          return editUrls[0]
+        }))
+        const variantUrls = results.filter((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled').map(r => r.value)
+        outputUrls = [...baseUrls, ...variantUrls]
+      }
+
+      updateJob(job.id, { status: 'done', outputUrls, finishedAt: new Date().toISOString() })
+      generationsStore.add({
+        id: job.id,
+        kind: refOnly ? 'wan_edit' : 'text2img',
+        characterId: job.characterId,
+        characterName: job.characterName,
+        prompt: generationPrompt,
+        dimension: job.dimension,
+        batch: 1,
+        status: 'done',
+        outputUrls,
+        createdAt: job.startedAt ?? new Date().toISOString(),
+        userId: user?.id ?? '',
       })
-      const data = await res.json()
-      if (!res.ok || data.error) throw new Error(data.error ?? 'API error')
-      const urls: string[] = data.urls ?? []
-      updateJob(job.id, { status: 'done', outputUrls: urls, finishedAt: new Date().toISOString() })
-      generationsStore.add({ id: job.id, kind: 'text2img', characterId: job.characterId, characterName: job.characterName, prompt: basePrompt, dimension: job.dimension, batch: 1, status: 'done', outputUrls: urls, createdAt: job.startedAt ?? new Date().toISOString(), userId: user?.id ?? '' })
     } catch (err) {
       updateJob(job.id, { status: 'error', error: err instanceof Error ? err.message : 'error', finishedAt: new Date().toISOString() })
     }
@@ -383,9 +580,68 @@ export default function BulkPage() {
     if (!abortRef.current) toast.success('Bulk generation complete!')
   }
 
+  async function submitToQueue() {
+    if (!jobs.length) { toast.error('No tasks to submit'); return }
+    try {
+      const refOnly = isSeedreamRefOnlyMode()
+      let referenceImageUrls: string[] | undefined
+      if (carouselMode && carouselRefImages.length) {
+        referenceImageUrls = await uploadCarouselRefImages()
+      }
+      if (refOnly && !referenceImageUrls?.length) {
+        toast.error('Upload reference images for Seedream-only mode')
+        return
+      }
+
+      const freshCharacters = charactersStore.getAll()
+      const queueJobs = jobs.map(job => {
+        const char = freshCharacters.find(c => c.id === job.characterId)
+        const loraUrl = bulkLoraUrl || char?.loraUrl || null
+        const loraScale = bulkLoraScale ?? char?.loraScale ?? 0.8
+        const styledPrompt = buildStyledScenePrompt(char, job.prompt)
+        const prompt = withTriggerWord(styledPrompt, selectedLora?.trigger_word || char?.triggerWord)
+        return { prompt, dimension: job.dimension, loraUrl, loraScale, characterId: job.characterId, characterName: job.characterName }
+      })
+
+      const body = carouselMode
+        ? {
+            job_type: 'bulk_carousel',
+            input: {
+              items: queueJobs,
+              variantsExtra: carouselExtra,
+              presetId: carouselPresetId,
+              grokSmart: carouselGrokSmart,
+              referenceImageUrls,
+              seedreamOnly: refOnly,
+              seedreamResolution,
+            },
+          }
+        : { job_type: 'bulk_image', input: { jobs: queueJobs } }
+
+      const res = await fetch('/api/queue/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+
+      toast.success(`${jobs.length} ${jobs.length === 1 ? (carouselMode ? 'carousel' : 'image') : (carouselMode ? 'carousels' : 'images')} sent to queue`, {
+        description: 'Processing continues in the background — you can leave the page',
+        action: { label: 'Open Queue', onClick: () => { window.location.href = '/captions?tab=queue' } },
+      })
+      setJobs([])
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Queue submit failed')
+    }
+  }
+
   const stats = { total: jobs.length, done: jobs.filter(j => j.status === 'done').length, error: jobs.filter(j => j.status === 'error').length, processing: jobs.filter(j => j.status === 'processing').length, images: jobs.reduce((acc, j) => acc + j.outputUrls.length, 0) }
-  const promptCount = promptsRaw.split('\n').filter(l => l.trim()).length
+  const promptCount = cleanPromptLines(promptsRaw).length
   const readyLoras = loras.filter(l => l.status === 'ready')
+  const selectedLora = readyLoras.find(l => l.lora_url === bulkLoraUrl)
+  const seedreamRefOnly = isSeedreamRefOnlyMode()
+  const bulkModelCount = bulkLoraUrl ? 1 : selectedCharIds.length || (seedreamRefOnly ? 1 : 0)
 
   // ─────────────────────────────────────────────────────────────
   // RENDER
@@ -413,8 +669,15 @@ export default function BulkPage() {
         </div>
       )}
 
+      {/* Carousel — full height, no padding wrapper */}
+      {tab === 'Carousel' && (
+        <div className="flex-1 min-h-0">
+          <CarouselTab />
+        </div>
+      )}
+
       {/* All other tabs — padded scrollable container */}
-      {tab !== 'Image Generate' && (
+      {tab !== 'Image Generate' && tab !== 'Carousel' && (
         <div className="flex-1 overflow-y-auto">
           <div className="p-6 max-w-5xl mx-auto space-y-6">
 
@@ -488,8 +751,8 @@ export default function BulkPage() {
                 <div className="flex items-center gap-2 p-3 rounded-lg bg-secondary/50 border border-border text-xs text-muted-foreground">
                   <Info className="w-3.5 h-3.5 shrink-0" />
                   <span>
-                    <strong className="text-foreground">{datasetPrompts.split('\n').filter(l => l.trim()).length}</strong> prompts →{' '}
-                    <strong className="text-primary">{datasetPrompts.split('\n').filter(l => l.trim()).length}</strong> dataset images
+                    <strong className="text-foreground">{cleanPromptLines(datasetPrompts).length}</strong> prompts →{' '}
+                    <strong className="text-primary">{cleanPromptLines(datasetPrompts).length}</strong> dataset images
                     {refImages.length > 1 && <span className="text-muted-foreground/60"> (cycling {refImages.length} refs)</span>}
                   </span>
                 </div>
@@ -638,19 +901,6 @@ export default function BulkPage() {
               </CardContent>
             </Card>
           )}
-
-          <PromptHelpDialog
-            open={showPromptHelp}
-            onClose={() => setShowPromptHelp(false)}
-            onAdd={prompts => {
-              setDatasetPrompts(prev => {
-                const existing = prev.trim()
-                return existing ? existing + '\n' + prompts.join('\n') : prompts.join('\n')
-              })
-              setShowPromptHelp(false)
-              toast.success(`Added ${prompts.length} prompt${prompts.length > 1 ? 's' : ''}`)
-            }}
-          />
         </div>
       )}
 
@@ -817,6 +1067,11 @@ export default function BulkPage() {
                         onChange={e => setBulkLoraScale(Number(e.target.value))} className="h-8 text-xs w-24" />
                     </div>
                   )}
+                  {selectedLora?.trigger_word && (
+                    <p className="text-[10px] text-muted-foreground/70">
+                      Trigger word <span className="font-mono text-primary">{selectedLora.trigger_word}</span> will be added to every prompt automatically.
+                    </p>
+                  )}
                   {!bulkLoraUrl && (
                     <>
                       <Separator />
@@ -831,11 +1086,21 @@ export default function BulkPage() {
                                 {selected && <CheckCircle2 className="w-3 h-3 text-primary-foreground" />}
                               </div>
                               <p className="font-medium text-sm">{char.name}</p>
+                              {char.triggerWord && (
+                                <span className="text-[10px] font-mono text-primary/70">{char.triggerWord}</span>
+                              )}
                               {selected && <Badge variant="secondary" className="text-xs ml-auto">Selected</Badge>}
                             </button>
                           )
                         })}
                       </div>
+                      {selectedCharIds.length > 0 && (
+                        <p className="text-[10px] text-muted-foreground/70">
+                          {selectedCharIds.every(id => characters.find(c => c.id === id)?.triggerWord)
+                            ? 'Each selected character\'s trigger word will be added to its prompts automatically.'
+                            : 'One or more selected characters have no trigger word set — add one in Admin → Characters so their LoRA fires reliably.'}
+                        </p>
+                      )}
                     </>
                   )}
                   <Separator />
@@ -850,13 +1115,93 @@ export default function BulkPage() {
                       </SelectContent>
                     </Select>
                   </div>
+                  <Separator />
+                  <div className="space-y-1.5">
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
+                      <input type="checkbox" checked={carouselMode} onChange={e => setCarouselMode(e.target.checked)} className="accent-primary" />
+                      Generate carousel
+                    </label>
+                    {carouselMode && (
+                      <div className="space-y-2 pl-6">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-muted-foreground shrink-0">Extra images:</span>
+                          <Select value={String(carouselExtra)} onValueChange={v => { if (v) setCarouselExtra(Number(v) as 1 | 2 | 3 | 4) }}>
+                            <SelectTrigger className="h-8 w-16 text-xs"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="1">1</SelectItem>
+                              <SelectItem value="2">2</SelectItem>
+                              <SelectItem value="3">3</SelectItem>
+                              <SelectItem value="4">4</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={carouselGrokSmart}
+                            onChange={e => setCarouselGrokSmart(e.target.checked)}
+                            className="accent-primary"
+                          />
+                          Grok smart mode (catchy hook carousel)
+                        </label>
+                        {!carouselGrokSmart && (
+                          <div className="space-y-1">
+                            <Label className="text-xs text-muted-foreground">Pose preset</Label>
+                            <Select value={carouselPresetId} onValueChange={v => { if (v) setCarouselPresetId(v) }}>
+                              <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                              <SelectContent>
+                                {CAROUSEL_PRESETS.map(p => (
+                                  <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        )}
+                        <div className="flex items-center gap-2">
+                          <Label className="text-xs text-muted-foreground shrink-0">Seedream:</Label>
+                          <Select value={seedreamResolution} onValueChange={v => { if (v) setSeedreamResolution(v as SeedreamResolution) }}>
+                            <SelectTrigger className="h-8 w-20 text-xs"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="1k">1k</SelectItem>
+                              <SelectItem value="2k">2k</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+                    )}
+                    {carouselMode && (
+                      <p className="text-[10px] text-muted-foreground/60 pl-6 leading-relaxed">
+                        1 base + {carouselExtra} variant{carouselExtra === 1 ? '' : 's'} per prompt ({1 + carouselExtra} total).
+                        {carouselGrokSmart
+                          ? ' Grok designs variant slides 2+ from the base (hook face or outfit hero).'
+                          : carouselPresetId === 'hook-tease'
+                            ? ' Slide 1 = face hook. Variants tease with body/mirror — never another face close-up.'
+                            : carouselPresetId === 'outfit-tour'
+                              ? ' Slide 1 = full outfit. Variants crop legs, boots, waist-up — same look, different zones.'
+                              : ' Preset picks varied angles for editorial-style carousels.'}
+                        {' '}For large batches, use Queue.
+                      </p>
+                    )}
+                  </div>
                 </CardContent>
               </Card>
 
               {/* Right: Prompts */}
               <Card>
                 <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">2. Prompts (1 per line)</CardTitle>
+                  <div className="flex items-center justify-between">
+                    <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">2. Prompts (1 per line)</CardTitle>
+                    <div className="flex items-center gap-1">
+                      <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+                        title="Instagram Bundles" onClick={() => setShowBundleDialog(true)}>
+                        <Layers className="w-4 h-4" />
+                      </Button>
+                      <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+                        title="Browse prompt library" onClick={() => setShowPromptHelp(true)}>
+                        <HelpCircle className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <Textarea
@@ -864,20 +1209,91 @@ export default function BulkPage() {
                     value={promptsRaw}
                     onChange={e => setPromptsRaw(e.target.value)}
                     rows={12}
-                    className="resize-none font-mono text-sm"
+                    className="resize-none font-mono text-sm field-sizing-fixed max-h-[320px] overflow-y-auto"
                   />
                   <div className="flex items-start gap-2 p-3 rounded-lg bg-secondary/50 border border-border text-sm">
                     <Info className="w-4 h-4 text-muted-foreground mt-0.5 shrink-0" />
                     <span className="text-muted-foreground text-xs">
                       <strong className="text-foreground">{promptCount}</strong> prompts ×{' '}
-                      <strong className="text-foreground">{bulkLoraUrl ? 1 : selectedCharIds.length}</strong> model(s) ={' '}
-                      <strong className="text-primary">{promptCount * (bulkLoraUrl ? 1 : selectedCharIds.length)} images</strong>
+                      <strong className="text-foreground">{bulkModelCount}</strong> model(s) ={' '}
+                      <strong className="text-primary">{promptCount * bulkModelCount} images</strong>
+                      {seedreamRefOnly && (
+                        <span className="block mt-1 text-primary/80">Seedream-only pipeline — Z-image skipped</span>
+                      )}
                     </span>
                   </div>
+                  {carouselMode && !bulkLoraUrl && selectedCharIds.length === 0 && carouselRefImages.length === 0 && (
+                    <p className="text-[10px] text-muted-foreground/70">
+                      No LoRA selected — upload reference images above to run carousel via Seedream only.
+                    </p>
+                  )}
+                  {carouselMode && (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Label className="text-xs text-muted-foreground">Seedream reference images</Label>
+                        {seedreamRefOnly && (
+                          <Badge variant="secondary" className="text-[10px] h-5">Seedream-only — no Z-image</Badge>
+                        )}
+                      </div>
+                      <p className="text-[10px] text-muted-foreground/70 leading-relaxed">
+                        {seedreamRefOnly
+                          ? 'Without LoRA, references drive identity — base slide and all variants use Seedream only (consistent hair, skin, outfit).'
+                          : 'Optional extras sent with each variant edit alongside the Z-image base — improves detail consistency.'}
+                      </p>
+                      <input
+                        ref={carouselRefInputRef}
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        multiple
+                        className="hidden"
+                        onChange={e => { addCarouselRefImages(e.target.files); e.target.value = '' }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => carouselRefInputRef.current?.click()}
+                        disabled={carouselRefImages.length >= MAX_CAROUSEL_REF_IMAGES}
+                        className="w-full border-2 border-dashed border-border rounded-xl p-4 flex flex-col items-center gap-1.5 hover:border-primary/50 hover:bg-primary/5 transition-colors text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:pointer-events-none"
+                      >
+                        <Upload className="w-5 h-5" />
+                        <span className="text-xs">Upload reference photos</span>
+                        <span className="text-[10px] opacity-60">Up to {MAX_CAROUSEL_REF_IMAGES} — face, hair, outfit detail</span>
+                      </button>
+                      {carouselRefImages.length > 0 && (
+                        <div className="grid grid-cols-5 gap-2">
+                          {carouselRefImages.map(img => (
+                            <div key={img.id} className="relative group aspect-square rounded-lg overflow-hidden border border-border">
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img src={img.url} alt="" className="w-full h-full object-cover" />
+                              <button
+                                type="button"
+                                onClick={() => setCarouselRefImages(prev => prev.filter(i => i.id !== img.id))}
+                                className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+                              >
+                                <X className="w-2.5 h-2.5" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {carouselRefImages.length > 0 && (
+                        <p className="text-[10px] text-muted-foreground text-center">
+                          {carouselRefImages.length} reference image{carouselRefImages.length === 1 ? '' : 's'}
+                          {seedreamRefOnly
+                            ? ' — all slides via Seedream edit'
+                            : ' — base slide + refs on each variant'}
+                          {!seedreamRefOnly && carouselRefImages.length > SEEDREAM_MAX_IMAGES - 1 && (
+                            <span className="block text-amber-400/80">
+                              Variants use the first {SEEDREAM_MAX_IMAGES - 1} — the base slide takes one slot of {SEEDREAM_MAX_IMAGES}.
+                            </span>
+                          )}
+                        </p>
+                      )}
+                    </div>
+                  )}
                   <Button className="w-full" onClick={buildJobs}
-                    disabled={promptCount === 0 || (!bulkLoraUrl && selectedCharIds.length === 0)}>
+                    disabled={promptCount === 0 || bulkModelCount === 0}>
                     <Layers className="w-4 h-4 mr-2" />
-                    Create {promptCount * (bulkLoraUrl ? 1 : selectedCharIds.length)} tasks
+                    Create {promptCount * bulkModelCount} tasks
                   </Button>
                 </CardContent>
               </Card>
@@ -899,6 +1315,9 @@ export default function BulkPage() {
                       </div>
                     </div>
                     <div className="flex gap-2 ml-auto">
+                      <Button onClick={submitToQueue} variant="secondary" size="sm" disabled={running} title="Submit to background queue — you can leave the page">
+                        <ListTodo className="w-3.5 h-3.5 mr-1.5" />Queue
+                      </Button>
                       {!running ? (
                         <Button onClick={startBulk} size="sm">
                           <Play className="w-3.5 h-3.5 mr-1.5" />Run
@@ -930,6 +1349,15 @@ export default function BulkPage() {
                       <StatusBadge status={job.status} />
                       {expandedJobs.has(job.id) ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground rotate-180" /> : <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />}
                     </button>
+                    {expandedJobs.has(job.id) && job.sentPrompt && (
+                      <div className="px-4 pb-3 space-y-1">
+                        <p className="text-[10px] text-muted-foreground/60 uppercase tracking-wide">Actual prompt sent to API</p>
+                        <p className="text-xs font-mono bg-secondary/40 rounded-lg p-2 break-all">{job.sentPrompt}</p>
+                        {job.sentLoraUrl && (
+                          <p className="text-[10px] text-muted-foreground/60 break-all">LoRA: {job.sentLoraUrl}</p>
+                        )}
+                      </div>
+                    )}
                     {expandedJobs.has(job.id) && job.outputUrls.length > 0 && (
                       <div className="px-4 pb-4 grid grid-cols-4 gap-2">
                         {job.outputUrls.map((url, i) => (
@@ -951,14 +1379,43 @@ export default function BulkPage() {
         </div>
       )}
 
-          {/* ── REPRODUCE TAB ─────────────────────────────────────── */}
-          {tab === 'Img Reproduce' && <ReproduceTab />}
-
-          {/* ── VIDEO REPRODUCE TAB ───────────────────────────────── */}
-          {tab === 'Video Reproduce' && <VideoReproduceTab />}
           </div>
         </div>
       )}
+
+      <PromptHelpDialog
+        open={showPromptHelp}
+        onClose={() => setShowPromptHelp(false)}
+        onAdd={prompts => {
+          if (tab === 'Bulk Generate') {
+            setPromptsRaw(prev => {
+              const existing = prev.trim()
+              return existing ? existing + '\n' + prompts.join('\n') : prompts.join('\n')
+            })
+          } else {
+            setDatasetPrompts(prev => {
+              const existing = prev.trim()
+              return existing ? existing + '\n' + prompts.join('\n') : prompts.join('\n')
+            })
+          }
+          setShowPromptHelp(false)
+          toast.success(`Added ${prompts.length} prompt${prompts.length > 1 ? 's' : ''}`)
+        }}
+      />
+
+      <InstagramBundleDialog
+        open={showBundleDialog}
+        onClose={() => setShowBundleDialog(false)}
+        highlightNicheId={selectedCharIds.length === 1 ? characters.find(c => c.id === selectedCharIds[0])?.recommendedNicheId : undefined}
+        onApply={(prompts, replace) => {
+          setPromptsRaw(prev => {
+            if (replace) return prompts.join('\n')
+            const existing = prev.trim()
+            return existing ? existing + '\n' + prompts.join('\n') : prompts.join('\n')
+          })
+          toast.success(`Applied ${prompts.length} prompts`)
+        }}
+      />
     </div>
   )
 }

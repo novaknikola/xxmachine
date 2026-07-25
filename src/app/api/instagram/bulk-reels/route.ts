@@ -1,0 +1,216 @@
+import { NextRequest, NextResponse } from 'next/server'
+import { requireUser } from '@/lib/session'
+import { resolveKey } from '@/lib/user-keys'
+import { one, query, rows } from '@/lib/db'
+import {
+  runApifyActorForUser, resolveVideoUrlViaRapidApi,
+  type ApifyReel, type BulkReelItem,
+} from '@/lib/instagram-scrape'
+
+export type { BulkReelItem } from '@/lib/instagram-scrape'
+
+const ENRICH_CONCURRENCY = 4
+const CACHE_TTL_HOURS = 12
+
+interface CachedProfileRow {
+  last_scanned_at: string
+}
+
+interface CachedReelRow {
+  shortcode: string
+  permalink: string
+  video_url: string
+  thumbnail_url: string | null
+  views: string | number
+  likes: string | number
+  comments: string | number
+  posted_at: string | null
+  source: 'apify' | 'rapidapi'
+}
+
+function rowToItem(r: CachedReelRow): BulkReelItem {
+  return {
+    id: r.shortcode,
+    permalink: r.permalink,
+    videoUrl: r.video_url,
+    thumbnailUrl: r.thumbnail_url,
+    views: Number(r.views),
+    likes: Number(r.likes),
+    comments: Number(r.comments),
+    postedAt: r.posted_at,
+    source: r.source,
+  }
+}
+
+async function loadCachedReels(userId: string, username: string): Promise<BulkReelItem[]> {
+  const cachedRows = await rows<CachedReelRow>(
+    `select shortcode, permalink, video_url, thumbnail_url, views, likes, comments, posted_at, source
+       from ig_downloader_reels where user_id = $1 and username = $2
+      order by posted_at desc nulls last, scraped_at desc`,
+    [userId, username],
+  )
+  return cachedRows.map(rowToItem)
+}
+
+export async function POST(req: NextRequest) {
+  const user = await requireUser(req)
+  if (user instanceof NextResponse) return user
+
+  if (!process.env.APIFY_API_KEY) {
+    return NextResponse.json({ error: 'APIFY_API_KEY not configured on server' }, { status: 500 })
+  }
+
+  const { username, amount, force } = await req.json().catch(() => ({})) as { username?: string; amount?: number; force?: boolean }
+  if (!username?.trim()) return NextResponse.json({ error: 'username required' }, { status: 400 })
+
+  const target = Math.min(Math.max(amount ?? 24, 1), 200)
+  const cleanUsername = username.trim()
+    .replace(/^@/, '')
+    .replace(/^https?:\/\/(www\.)?instagram\.com\//i, '')
+    .replace(/\/.*$/, '')
+  if (!cleanUsername) return NextResponse.json({ error: 'username required' }, { status: 400 })
+
+  // ── Serve from cache if scanned recently and not forcing a fresh scan ──
+  if (!force) {
+    const profile = await one<CachedProfileRow>(
+      `select last_scanned_at from ig_downloader_profiles where user_id = $1 and username = $2`,
+      [user.id, cleanUsername],
+    )
+    if (profile) {
+      const ageHours = (Date.now() - new Date(profile.last_scanned_at).getTime()) / 3_600_000
+      if (ageHours < CACHE_TTL_HOURS) {
+        const reels = await loadCachedReels(user.id, cleanUsername)
+        // Only serve from cache if it already covers what was asked for — otherwise fall
+        // through to a fresh scan so asking for more reels actually fetches more.
+        if (reels.length >= target) {
+          return NextResponse.json({
+            ok: true, username: cleanUsername, reels, skipped: [],
+            fromCache: true, scannedAt: profile.last_scanned_at,
+          })
+        }
+      }
+    }
+  }
+
+  // ── Fresh scan via Apify (+ RapidAPI fallback) ──────────────────
+  const rapidApiKey = await resolveKey(user.id, 'RAPIDAPI_KEY')
+
+  let apifyReels: ApifyReel[]
+  try {
+    apifyReels = await runApifyActorForUser(cleanUsername, target)
+  } catch (err) {
+    return NextResponse.json({ error: `Apify: ${err instanceof Error ? err.message : 'failed'}` }, { status: 500 })
+  }
+
+  if (apifyReels.length === 0) {
+    return NextResponse.json({
+      error: 'Apify found no posts for this profile — check whether the account is private or the username is correct.',
+    }, { status: 404 })
+  }
+
+  // Build the ordered work list, dedup by id, skip anything without a usable permalink
+  const entries: { id: string; permalink: string; reel: ApifyReel }[] = []
+  const seen = new Set<string>()
+  for (const reel of apifyReels) {
+    const id = reel.shortCode ?? reel.url
+    if (!id || seen.has(id)) continue
+    const permalink = reel.url ?? (reel.shortCode ? `https://www.instagram.com/reel/${reel.shortCode}/` : null)
+    if (!permalink) continue
+    seen.add(id)
+    entries.push({ id, permalink, reel })
+  }
+
+  const results: (BulkReelItem | null)[] = new Array(entries.length).fill(null)
+  const skipped: { permalink: string; reason: string }[] = []
+  const enrichQueue: number[] = []
+
+  entries.forEach((entry, i) => {
+    const { reel, id, permalink } = entry
+    if (reel.videoUrl) {
+      results[i] = {
+        id,
+        permalink,
+        videoUrl: reel.videoUrl,
+        thumbnailUrl: reel.displayUrl ?? reel.images?.[0] ?? null,
+        views: reel.videoViewCount ?? reel.videoPlayCount ?? reel.playCount ?? 0,
+        likes: reel.likesCount ?? 0,
+        comments: reel.commentsCount ?? 0,
+        postedAt: reel.timestamp ?? null,
+        source: 'apify',
+      }
+    } else if (rapidApiKey) {
+      enrichQueue.push(i)
+    }
+  })
+
+  if (enrichQueue.length > 0 && rapidApiKey) {
+    let qi = 0
+    async function worker() {
+      while (qi < enrichQueue.length) {
+        const i = enrichQueue[qi++]
+        const { reel, id, permalink } = entries[i]
+        try {
+          const enriched = await resolveVideoUrlViaRapidApi(permalink, rapidApiKey!)
+          if (enriched) {
+            results[i] = {
+              id,
+              permalink,
+              videoUrl: enriched.videoUrl,
+              thumbnailUrl: enriched.thumbnail ?? reel.displayUrl ?? null,
+              views: enriched.views ?? reel.videoViewCount ?? reel.videoPlayCount ?? reel.playCount ?? 0,
+              likes: enriched.likes ?? reel.likesCount ?? 0,
+              comments: reel.commentsCount ?? 0,
+              postedAt: reel.timestamp ?? null,
+              source: 'rapidapi',
+            }
+          }
+        } catch (err) {
+          skipped.push({ permalink, reason: err instanceof Error ? err.message : 'unknown error' })
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: ENRICH_CONCURRENCY }, worker))
+  } else if (!rapidApiKey) {
+    for (const i of enrichQueue) skipped.push({ permalink: entries[i].permalink, reason: 'No RapidAPI key for fallback' })
+  }
+
+  const freshReels = results.filter((r): r is BulkReelItem => r !== null).slice(0, target)
+
+  if (freshReels.length === 0) {
+    return NextResponse.json({
+      error: rapidApiKey
+        ? 'Apify found posts, but neither Apify nor RapidAPI could extract a video link (they might just be images, not reels).'
+        : 'Apify found posts without a direct video link. Add a RapidAPI key in Settings so I can try fallback extraction per link.',
+      skipped,
+    }, { status: 404 })
+  }
+
+  // ── Persist: upsert reels + profile scan timestamp ──────────────
+  for (const r of freshReels) {
+    await query(
+      `insert into ig_downloader_reels
+         (user_id, username, shortcode, permalink, video_url, thumbnail_url, views, likes, comments, posted_at, source, scraped_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
+       on conflict (user_id, shortcode) do update set
+         permalink = excluded.permalink, video_url = excluded.video_url, thumbnail_url = excluded.thumbnail_url,
+         views = excluded.views, likes = excluded.likes, comments = excluded.comments,
+         posted_at = excluded.posted_at, source = excluded.source, scraped_at = now()`,
+      [user.id, cleanUsername, r.id, r.permalink, r.videoUrl, r.thumbnailUrl, r.views, r.likes, r.comments, r.postedAt, r.source],
+    )
+  }
+
+  // Return the full accumulated library for this username, not just this scan's batch
+  const reels = await loadCachedReels(user.id, cleanUsername)
+
+  await query(
+    `insert into ig_downloader_profiles (user_id, username, last_scanned_at, reels_found)
+     values ($1, $2, now(), $3)
+     on conflict (user_id, username) do update set
+       last_scanned_at = now(), reels_found = excluded.reels_found`,
+    [user.id, cleanUsername, reels.length],
+  )
+
+  return NextResponse.json({
+    ok: true, username: cleanUsername, reels, skipped, fromCache: false, scannedAt: new Date().toISOString(),
+  })
+}

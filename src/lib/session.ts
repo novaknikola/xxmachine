@@ -1,44 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { cookies } from 'next/headers'
-import { createHmac, timingSafeEqual } from 'node:crypto'
 import { one, query } from './db'
+import { SESSION_COOKIE_NAME, packSessionCookie, unpackSessionCookie } from './session-cookie'
 
-const COOKIE_NAME = 'xm_sid'
+const COOKIE_NAME = SESSION_COOKIE_NAME
 const SESSION_DAYS = 30
 
 const PROD = process.env.NODE_ENV === 'production'
 
-function secret(): string {
-  const s = process.env.FANVUE_SESSION_SECRET // reuse the existing session secret env
-  if (!s) throw new Error('FANVUE_SESSION_SECRET is not set')
-  return s
-}
-
-function sign(value: string): string {
-  return createHmac('sha256', secret()).update(value).digest('base64url')
-}
-
-export function packSessionCookie(sessionId: string): string {
-  return `${sessionId}.${sign(sessionId)}`
-}
-
-export function unpackSessionCookie(raw: string | undefined): string | null {
-  if (!raw) return null
-  const [id, sig] = raw.split('.')
-  if (!id || !sig) return null
-  const expected = sign(id)
-  const a = Buffer.from(sig)
-  const b = Buffer.from(expected)
-  if (a.length !== b.length) return null
-  if (!timingSafeEqual(a, b)) return null
-  return id
-}
+export { packSessionCookie, unpackSessionCookie }
 
 export interface SessionUser {
   id: string
   email: string
   display_name: string
-  role: 'admin' | 'chatter'
+  role: 'admin' | 'user'
 }
 
 interface SessionRow {
@@ -46,7 +22,7 @@ interface SessionRow {
   expires_at: Date
   email: string
   display_name: string
-  role: 'admin' | 'chatter'
+  role: 'admin' | 'user'
   active: boolean
 }
 

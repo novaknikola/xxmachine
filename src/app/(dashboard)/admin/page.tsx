@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { useAuth } from '@/contexts/auth-context'
 import { usersStore, charactersStore } from '@/lib/store'
 import { User, Character } from '@/lib/types'
+import { NICHE_DEFINITIONS, getNicheHairDefault } from '@/lib/niche-prompts'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -52,7 +53,7 @@ function UsersTab() {
   const [users, setUsers] = useState<User[]>([])
   const [deleteTarget, setDeleteTarget] = useState<User | null>(null)
   const [editTarget, setEditTarget] = useState<string | null>(null)
-  const [form, setForm] = useState({ name: '', email: '', password: '', role: 'chatter' as 'admin' | 'chatter' })
+  const [form, setForm] = useState({ name: '', email: '', password: '', role: 'user' as 'admin' | 'user' })
   const [editForm, setEditForm] = useState<Partial<User & { password: string }>>({})
 
   useEffect(() => { setUsers(usersStore.getAll()) }, [])
@@ -77,7 +78,7 @@ function UsersTab() {
       createdAt: new Date().toISOString(),
       active: true,
     })
-    setForm({ name: '', email: '', password: '', role: 'chatter' })
+    setForm({ name: '', email: '', password: '', role: 'user' })
     refresh()
     toast.success('User added')
   }
@@ -156,12 +157,12 @@ function UsersTab() {
             </div>
             <div className="space-y-1.5">
               <Label className="text-xs text-muted-foreground">Role</Label>
-              <Select value={form.role} onValueChange={(v: string | null) => { if (v) setForm(p => ({ ...p, role: v as 'admin' | 'chatter' })) }}>
+              <Select value={form.role} onValueChange={(v: string | null) => { if (v) setForm(p => ({ ...p, role: v as 'admin' | 'user' })) }}>
                 <SelectTrigger className="bg-[rgba(255,255,255,0.08)] border-[rgba(255,255,255,0.12)] h-8 text-sm">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="chatter">Chatter</SelectItem>
+                  <SelectItem value="user">User</SelectItem>
                   <SelectItem value="admin">Admin</SelectItem>
                 </SelectContent>
               </Select>
@@ -204,12 +205,12 @@ function UsersTab() {
                       className="bg-[rgba(255,255,255,0.08)] border-[rgba(255,255,255,0.12)] h-8 text-sm"
                       placeholder="New password (optional)"
                     />
-                    <Select value={editForm.role} onValueChange={(v: string | null) => { if (v) setEditForm(p => ({ ...p, role: v as 'admin' | 'chatter' })) }}>
+                    <Select value={editForm.role} onValueChange={(v: string | null) => { if (v) setEditForm(p => ({ ...p, role: v as 'admin' | 'user' })) }}>
                       <SelectTrigger className="bg-[rgba(255,255,255,0.08)] border-[rgba(255,255,255,0.12)] h-8 text-sm">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="chatter">Chatter</SelectItem>
+                        <SelectItem value="user">User</SelectItem>
                         <SelectItem value="admin">Admin</SelectItem>
                       </SelectContent>
                     </Select>
@@ -307,6 +308,16 @@ function UsersTab() {
 // ─────────────────────────────────────────────
 // CHARACTER FORM (module-level to preserve focus)
 // ─────────────────────────────────────────────
+function applyNicheDefaults(form: Partial<Character>, nicheId: string): Partial<Character> {
+  const niche = NICHE_DEFINITIONS.find(n => n.id === nicheId)
+  const hair = niche?.defaultHairLock ?? getNicheHairDefault(nicheId)
+  return {
+    ...form,
+    recommendedNicheId: nicheId,
+    hairLock: form.hairLock?.trim() ? form.hairLock : hair,
+  }
+}
+
 function CharacterForm({ form, onChange }: { form: Partial<Character>; onChange: (f: Partial<Character>) => void }) {
   return (
     <div className="space-y-3">
@@ -334,8 +345,43 @@ function CharacterForm({ form, onChange }: { form: Partial<Character>; onChange:
           <Input type="number" step="0.1" min="0" max="1" value={form.loraScale ?? 0.8} onChange={e => onChange({ ...form, loraScale: parseFloat(e.target.value) })} className="bg-[rgba(255,255,255,0.08)] border-[rgba(255,255,255,0.12)] h-8 text-sm" />
         </div>
         <div className="space-y-1.5">
+          <Label className="text-xs text-muted-foreground">Trigger Word</Label>
+          <Input value={form.triggerWord ?? ''} onChange={e => onChange({ ...form, triggerWord: e.target.value })} className="bg-[rgba(255,255,255,0.08)] border-[rgba(255,255,255,0.12)] h-8 text-sm font-mono" placeholder="e.g. ohwx woman" />
+        </div>
+        <div className="space-y-1.5">
           <Label className="text-xs text-muted-foreground">Start Date</Label>
           <Input type="date" value={form.startDate ?? ''} onChange={e => onChange({ ...form, startDate: e.target.value })} className="bg-[rgba(255,255,255,0.08)] border-[rgba(255,255,255,0.12)] h-8 text-sm" />
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1.5">
+          <Label className="text-xs text-muted-foreground">Brand Niche (1 account = 1 niche)</Label>
+          <Select
+            value={form.recommendedNicheId ?? '__none__'}
+            onValueChange={(v: string | null) => {
+              if (!v || v === '__none__') onChange({ ...form, recommendedNicheId: undefined })
+              else onChange(applyNicheDefaults(form, v))
+            }}
+          >
+            <SelectTrigger className="bg-[rgba(255,255,255,0.08)] border-[rgba(255,255,255,0.12)] h-8 text-sm"><SelectValue placeholder="Select niche..." /></SelectTrigger>
+            <SelectContent className="max-h-64">
+              <SelectItem value="__none__">— None —</SelectItem>
+              {NICHE_DEFINITIONS.map(n => (
+                <SelectItem key={n.id} value={n.id}>
+                  {n.label}{n.rotatable ? ' (rotatable)' : ''}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label className="text-xs text-muted-foreground">Hair Lock (brand consistency)</Label>
+          <Input
+            value={form.hairLock ?? ''}
+            onChange={e => onChange({ ...form, hairLock: e.target.value })}
+            className="bg-[rgba(255,255,255,0.08)] border-[rgba(255,255,255,0.12)] h-8 text-sm"
+            placeholder="e.g. vivid split-dye pink and black"
+          />
         </div>
       </div>
       <div className="space-y-1.5">
@@ -359,7 +405,8 @@ function CharactersTab() {
   const [editForm, setEditForm] = useState<Partial<Character>>({})
   const [adding, setAdding] = useState(false)
   const [newForm, setNewForm] = useState<Partial<Character>>({
-    name: '', loraUrl: '', loraScale: 0.8, basePromptStyle: '', story: '', startDate: '', defaultMode: 'SFW',
+    name: '', loraUrl: '', loraScale: 0.8, triggerWord: '', basePromptStyle: '', story: '', startDate: '', defaultMode: 'SFW',
+    recommendedNicheId: undefined, hairLock: '',
   })
 
   useEffect(() => { setCharacters(charactersStore.getAll()) }, [])
@@ -372,13 +419,16 @@ function CharactersTab() {
       name: newForm.name!.trim(),
       loraUrl: newForm.loraUrl ?? '',
       loraScale: newForm.loraScale ?? 0.8,
+      triggerWord: newForm.triggerWord ?? '',
       basePromptStyle: newForm.basePromptStyle ?? '',
       story: newForm.story ?? '',
       startDate: newForm.startDate ?? '',
       defaultMode: newForm.defaultMode ?? 'SFW',
+      recommendedNicheId: newForm.recommendedNicheId,
+      hairLock: newForm.hairLock ?? '',
     })
     setAdding(false)
-    setNewForm({ name: '', loraUrl: '', loraScale: 0.8, basePromptStyle: '', story: '', startDate: '', defaultMode: 'SFW' })
+    setNewForm({ name: '', loraUrl: '', loraScale: 0.8, triggerWord: '', basePromptStyle: '', story: '', startDate: '', defaultMode: 'SFW', recommendedNicheId: undefined, hairLock: '' })
     refresh()
     toast.success('Character added')
   }
@@ -449,15 +499,26 @@ function CharactersTab() {
                   <ImageIcon className="w-4 h-4 text-primary" />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-0.5">
+                  <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                     <span className="font-semibold text-sm">{char.name}</span>
                     <Badge variant={char.defaultMode === 'NSFW' ? 'destructive' : 'secondary'} className="text-xs h-4 px-1.5">
                       {char.defaultMode}
                     </Badge>
+                    {char.recommendedNicheId && (
+                      <Badge variant="outline" className="text-[10px] h-4 px-1.5">
+                        {NICHE_DEFINITIONS.find(n => n.id === char.recommendedNicheId)?.label ?? char.recommendedNicheId}
+                      </Badge>
+                    )}
                   </div>
                   <p className="text-xs text-muted-foreground line-clamp-2">{char.story || 'No description'}</p>
+                  {char.hairLock && (
+                    <p className="text-[10px] text-muted-foreground/80 mt-1 line-clamp-1">hair: {char.hairLock}</p>
+                  )}
                   {char.loraUrl && (
                     <p className="text-xs text-primary/70 truncate mt-1">{char.loraUrl}</p>
+                  )}
+                  {char.triggerWord && (
+                    <p className="text-xs text-muted-foreground font-mono mt-0.5">trigger: {char.triggerWord}</p>
                   )}
                 </div>
                 <div className="flex gap-1 shrink-0">

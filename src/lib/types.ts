@@ -1,4 +1,4 @@
-export type UserRole = 'admin' | 'chatter'
+export type UserRole = 'admin' | 'user'
 
 export interface User {
   id: string
@@ -15,11 +15,16 @@ export interface Character {
   name: string
   loraUrl: string
   loraScale: number
+  triggerWord?: string
   basePromptStyle: string
   story: string
   startDate: string
   defaultMode: 'SFW' | 'NSFW'
   telegramChannelId?: string
+  /** Branded niche persona — 1 niche = 1 account (GND may rotate). */
+  recommendedNicheId?: string
+  /** Locked hair description appended to every generation for brand consistency. */
+  hairLock?: string
 }
 
 export type ScheduledPostStatus =

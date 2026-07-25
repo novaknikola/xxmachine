@@ -6,16 +6,25 @@ export interface SessionUser {
   id: string
   email: string
   display_name: string
-  role: 'admin' | 'chatter'
+  role: 'admin' | 'user'
+  subscription_status?: string
+}
+
+export interface LoginResult {
+  ok: boolean
+  requires2fa?: boolean
+  userId?: string
+  error?: string
 }
 
 interface AuthContextValue {
   user: SessionUser | null
   loading: boolean
   needsBootstrap: boolean
-  login: (email: string, password: string) => Promise<boolean>
-  bootstrap: (email: string, password: string, name: string) => Promise<boolean>
+  login: (email: string, password: string) => Promise<LoginResult>
+  verify2fa: (userId: string, code: string, endpoint?: string) => Promise<boolean>
   logout: () => Promise<void>
+  setUser: (user: SessionUser | null) => void
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -50,35 +59,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => controller.abort()
   }, [])
 
-  const login = useCallback(async (email: string, password: string): Promise<boolean> => {
+  const login = useCallback(async (email: string, password: string): Promise<LoginResult> => {
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
       })
-      if (!res.ok) return false
       const data = await res.json()
+      if (!res.ok) return { ok: false, error: data.error }
+      if (data.requires2fa) return { ok: false, requires2fa: true, userId: data.userId }
       if (data.user) setUser(data.user)
-      return true
+      return { ok: true }
     } catch {
-      return false
+      return { ok: false, error: 'network_error' }
     }
   }, [])
 
-  const bootstrap = useCallback(async (email: string, password: string, name: string): Promise<boolean> => {
+  const verify2fa = useCallback(async (
+    userId: string,
+    code: string,
+    endpoint = '/api/auth/login/verify',
+  ): Promise<boolean> => {
     try {
-      const res = await fetch('/api/auth/signup', {
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, display_name: name }),
+        body: JSON.stringify({ userId, code }),
       })
-      if (!res.ok) return false
       const data = await res.json()
-      if (data.user) {
-        setUser(data.user)
-        setNeedsBootstrap(false)
-      }
+      if (!res.ok) return false
+      if (data.user) setUser(data.user)
       return true
     } catch {
       return false
@@ -90,13 +101,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const res = await fetch('/api/auth/logout', { method: 'POST' })
       if (res.ok) setUser(null)
     } catch {
-      // network failure — clear local state anyway so the user isn't stuck
       setUser(null)
     }
   }, [])
 
   return (
-    <AuthContext.Provider value={{ user, loading, needsBootstrap, login, bootstrap, logout }}>
+    <AuthContext.Provider value={{ user, loading, needsBootstrap, login, verify2fa, logout, setUser }}>
       {children}
     </AuthContext.Provider>
   )

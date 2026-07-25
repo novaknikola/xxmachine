@@ -6,9 +6,12 @@ const ADMIN_GROUP = process.env.TELEGRAM_ADMIN_GROUP_ID!
 const CRON_SECRET = process.env.CRON_SECRET
 
 export async function POST(req: NextRequest) {
-  // Verify webhook secret
-  const secret = req.nextUrl.searchParams.get('secret')
-  if (CRON_SECRET && secret !== CRON_SECRET) {
+  // Verify webhook secret — fail closed so an unset secret cannot open the webhook.
+  if (!CRON_SECRET) {
+    console.error('[telegram/webhook] CRON_SECRET is not set — refusing to run')
+    return NextResponse.json({ error: 'CRON_SECRET is not configured' }, { status: 503 })
+  }
+  if (req.nextUrl.searchParams.get('secret') !== CRON_SECRET) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 

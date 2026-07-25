@@ -3,7 +3,7 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   allowedDevOrigins: ['xmachine.local'],
   turbopack: {
-    root: __dirname,
+    root: process.cwd(),
   },
   serverExternalPackages: [
     'playwright-extra',

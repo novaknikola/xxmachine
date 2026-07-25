@@ -289,7 +289,7 @@ export default function FansPage() {
       const updatedFan: Fan = { ...selectedFan, aiSummary: data.aiSummary, aiSummaryAt: new Date().toISOString() }
       setSelectedFan(updatedFan)
       setFans(prev => prev.map(f => f.id === updatedFan.id ? updatedFan : f))
-      toast.success('AI summary generisan!')
+      toast.success('AI summary generated!')
     } catch (e: unknown) {
       toast.error('Error: ' + (e instanceof Error ? e.message : 'Unknown'))
     } finally {

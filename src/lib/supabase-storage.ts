@@ -45,6 +45,28 @@ export async function uploadImageFromUrl(
   return publicUrl(path)
 }
 
+export async function uploadBuffer(
+  buffer: Uint8Array | ArrayBuffer,
+  path: string,
+  contentType: string,
+): Promise<string> {
+  const key = process.env.SUPABASE_SERVICE_KEY
+  if (!key || !process.env.SUPABASE_URL) throw new Error('SUPABASE_SERVICE_KEY not configured')
+
+  const uploadRes = await fetch(storageUrl(path), {
+    method: 'POST',
+    headers: { ...storageHeaders(key, contentType), 'x-upsert': 'true' },
+    body: buffer as unknown as BodyInit,
+  })
+
+  if (!uploadRes.ok) {
+    const err = await uploadRes.json().catch(() => ({}))
+    throw new Error(`Storage upload failed: ${(err as { message?: string }).message ?? uploadRes.status}`)
+  }
+
+  return publicUrl(path)
+}
+
 export async function uploadImagesFromUrls(
   wavespeedUrls: string[],
   basePath: string,

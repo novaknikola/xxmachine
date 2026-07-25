@@ -144,7 +144,7 @@ export default function MotionPage() {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
-      const labels = { analyze: 'Cover analiziran', 'generate-image': 'Slika generisana', 'generate-video': 'Video kreiran' }
+      const labels = { analyze: 'Cover analyzed', 'generate-image': 'Image generated', 'generate-video': 'Video created' }
       toast.success(labels[action])
       fetchReels()
     } catch (err) {
@@ -240,13 +240,13 @@ export default function MotionPage() {
         {showScanSettings && (
           <div className="flex gap-4 p-3 rounded-lg bg-secondary/50 border border-border">
             <div className="space-y-1">
-              <p className="text-xs text-muted-foreground">Min. pregleda</p>
+              <p className="text-xs text-muted-foreground">Min. views</p>
               <Input type="number" value={minViews} min={0} step={1000}
                 onChange={e => setMinViews(Number(e.target.value))}
                 className="h-8 text-xs w-32" />
             </div>
             <div className="space-y-1">
-              <p className="text-xs text-muted-foreground">Vremenski prozor (dana)</p>
+              <p className="text-xs text-muted-foreground">Time window (days)</p>
               <Input type="number" value={daysBack} min={1} max={365}
                 onChange={e => setDaysBack(Number(e.target.value))}
                 className="h-8 text-xs w-24" />
@@ -272,7 +272,7 @@ export default function MotionPage() {
         </div>
 
         {activeProfiles.length === 0 ? (
-          <p className="text-sm text-muted-foreground">Nema aktivnih profila. Dodaj Instagram username iznad.</p>
+          <p className="text-sm text-muted-foreground">No active profiles. Add an Instagram username above.</p>
         ) : (
           <div className="flex flex-wrap gap-2">
             {activeProfiles.map(p => (
@@ -292,10 +292,10 @@ export default function MotionPage() {
       {characters.length > 0 && (
         <div className="flex items-center gap-3 p-3 rounded-xl border border-border bg-card">
           <User className="w-4 h-4 text-muted-foreground shrink-0" />
-          <p className="text-sm text-muted-foreground shrink-0">Karakter za generisanje:</p>
+          <p className="text-sm text-muted-foreground shrink-0">Character to generate:</p>
           <Select value={selectedCharId} onValueChange={v => setSelectedCharId(v ?? '')}>
             <SelectTrigger className="h-8 text-sm max-w-xs">
-              <SelectValue placeholder="Odaberi karakter..." />
+              <SelectValue placeholder="Select character..." />
             </SelectTrigger>
             <SelectContent>
               {characters.map(c => (
@@ -340,7 +340,7 @@ export default function MotionPage() {
             {selectedIds.size > 0 && (
               <>
                 <span className="text-xs text-muted-foreground">·</span>
-                <span className="text-xs font-medium">{selectedIds.size} odabrano</span>
+                <span className="text-xs font-medium">{selectedIds.size} selected</span>
                 {filterTab === 'pending' && (
                   <Button size="sm" variant="outline" className="h-7 text-xs border-green-500/40 text-green-400 hover:bg-green-500/10"
                     onClick={() => bulkAction('approve')} disabled={bulkLoading}>
@@ -373,7 +373,7 @@ export default function MotionPage() {
       <div className="border rounded-xl overflow-hidden">
         {filtered.length === 0 ? (
           <div className="px-5 py-10 text-center text-muted-foreground text-sm">
-            {filterTab === 'pending' ? 'Nema reelova za pregled. Pokreni scan.' : `Nema reelova u kategoriji "${filterTab}".`}
+            {filterTab === 'pending' ? 'No reels to review. Run a scan.' : `No reels in category "${filterTab}".`}
           </div>
         ) : (
           <div className="divide-y">
