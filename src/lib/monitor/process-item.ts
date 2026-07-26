@@ -8,7 +8,14 @@ import {
   scenePromptFromFrame,
   type SourceProbe,
 } from './analyze'
-import { generateReplicaImage, generateReplicaVideo } from './replicate'
+import {
+  generateReplicaImage,
+  generateReplicaImageSeedream,
+  generateReplicaVideo,
+  normalizeImageModel,
+  normalizeVideoBackend,
+} from './replicate'
+import { resolveVideoBackend, type VideoBackend } from './video-backends'
 import {
   enrichMotionPrompt,
   extractSceneSpec,
@@ -19,7 +26,13 @@ import {
 import { enqueueMultiShotJob } from './multi-shot'
 import { getTechnique, resolveExecutable } from './techniques'
 import { notifyReplicationDone, notifyReplicationFailed } from './notify'
-import type { CharacterLora, DiscoveryItemRow, TrackedProfileRow, VideoTechnique } from './types'
+import type {
+  CharacterLora,
+  DiscoveryItemRow,
+  ImageModel,
+  TrackedProfileRow,
+  VideoTechnique,
+} from './types'
 
 /** Frames sampled per clip — denser sampling catches background gag beats. */
 const PROBE_FRAME_COUNT = 8
@@ -143,6 +156,12 @@ export async function classifyDiscoveryItem(itemId: string, userId: string) {
 export interface ReplicateOptions {
   /** Stop once the keyframes exist, so they can be reviewed before paying for video. */
   stopAfterImage?: boolean
+  /** Keyframe backend — default z_image (LoRA). */
+  imageModel?: ImageModel
+  /** Seedream output resolution when imageModel is seedream_edit. */
+  seedreamResolution?: '1k' | '2k'
+  /** Video backend — default auto (by technique). */
+  videoBackend?: VideoBackend
 }
 
 export async function replicateDiscoveryItem(
@@ -165,9 +184,17 @@ export async function replicateDiscoveryItem(
     [userId, item.platform, item.profile],
   )
 
+  const imageModel = normalizeImageModel(options?.imageModel ?? item.image_model)
+  const videoBackendChoice = normalizeVideoBackend(options?.videoBackend)
   const character = characterOverride ?? await loadCharacter(profile?.character_id ?? null)
-  if (!character?.lora_url) {
-    throw new Error('No character with LoRA bound to this profile — set character in Discovery')
+  if (!character) {
+    throw new Error('No character bound to this profile — set character in Discovery')
+  }
+  if (imageModel === 'z_image' && !character.lora_url) {
+    throw new Error('Z-Image needs a character with LoRA — bind one in Discovery, or switch to Seedream Edit')
+  }
+  if (imageModel === 'seedream_edit' && !item.thumbnail_url) {
+    throw new Error('Seedream Edit needs a source thumbnail on the discovery item')
   }
 
   const contentType = item.content_type ?? 'video_gen'
@@ -182,13 +209,15 @@ export async function replicateDiscoveryItem(
 
   const isVideo = shouldGenerateVideo(contentType, item.video_url)
 
-  // multi_shot has its own queue pipeline — do not collapse it into a one-shot fallback.
-  const useMultiShot = item.video_technique === 'multi_shot' && Boolean(item.video_url)
-  const resolved = useMultiShot
+  // multi_shot has its own queue pipeline when Auto/Kling; other backends do one-shot I2V.
+  const detectedMultiShot = item.video_technique === 'multi_shot' && Boolean(item.video_url)
+  const resolved = detectedMultiShot
     ? { technique: 'multi_shot' as VideoTechnique, fellBack: false }
     : resolveExecutable(item.video_technique, Boolean(item.video_url))
   const technique = resolved.technique
   const fellBack = resolved.fellBack
+  const videoPlan = resolveVideoBackend(videoBackendChoice, technique)
+  const useMultiShot = Boolean(detectedMultiShot && videoPlan.useMultiShotQueue)
   // Prompt / image steps for multi_shot reuse the motion_transfer requirements.
   const spec = getTechnique(useMultiShot ? 'motion_transfer' : technique)
 
@@ -199,8 +228,8 @@ export async function replicateDiscoveryItem(
     const needsProbe = isVideo && (
       !item.scene_prompt ||
       !item.scene_spec ||
-      (spec.needsMotionPrompt && !item.motion_prompt) ||
-      (spec.needsEndImage && !item.end_scene_prompt)
+      ((spec.needsMotionPrompt || videoPlan.needsMotionPrompt) && !item.motion_prompt) ||
+      ((spec.needsEndImage || videoPlan.needsEndImage) && !item.end_scene_prompt)
     )
     if (needsProbe && item.video_url) {
       await query(`UPDATE discovery_items SET replicate_status = 'analyzing' WHERE id = $1`, [itemId])
@@ -278,47 +307,86 @@ export async function replicateDiscoveryItem(
       item.scene_prompt = scenePrompt
     }
 
-    // Step 2: motion description, for the models that are driven by it.
-    if (spec.needsMotionPrompt && !item.motion_prompt && probe) {
-      const motionPrompt = enrichMotionPrompt(await extractMotionPrompt(probe), sceneSpec)
-      await query(
-        `UPDATE discovery_items SET motion_prompt = $2 WHERE id = $1`,
-        [itemId, motionPrompt],
-      )
-      item.motion_prompt = motionPrompt
+    // Step 2: motion description — technique OR chosen video backend may need it.
+    const needsMotion = spec.needsMotionPrompt || videoPlan.needsMotionPrompt
+    if (needsMotion && !item.motion_prompt) {
+      if (!probe && item.video_url) {
+        probe = await probeSourceVideo(item.video_url, PROBE_FRAME_COUNT)
+      }
+      if (probe) {
+        const motionPrompt = enrichMotionPrompt(await extractMotionPrompt(probe), sceneSpec)
+        await query(
+          `UPDATE discovery_items SET motion_prompt = $2 WHERE id = $1`,
+          [itemId, motionPrompt],
+        )
+        item.motion_prompt = motionPrompt
+      }
     }
 
-    // Step 3: character keyframes.
+    // Step 3: character keyframes (Z-Image+LoRA or Seedream Edit from source thumb).
+    const seedreamRef = item.thumbnail_url
+    const char = character
+    async function makeKeyframe(scenePrompt: string): Promise<string> {
+      if (imageModel === 'seedream_edit') {
+        if (!seedreamRef) throw new Error('Seedream Edit needs a source thumbnail')
+        return generateReplicaImageSeedream({
+          scenePrompt,
+          referenceImageUrls: [seedreamRef],
+          triggerWord: char.trigger_word,
+          basePromptStyle: char.base_prompt_style,
+          resolution: options?.seedreamResolution ?? '1k',
+        })
+      }
+      return generateReplicaImage({
+        scenePrompt,
+        loraUrl: char.lora_url,
+        loraScale: char.lora_scale,
+        triggerWord: char.trigger_word,
+        basePromptStyle: char.base_prompt_style,
+      })
+    }
+
     if (!item.generated_image_url) {
       await query(`UPDATE discovery_items SET replicate_status = 'image_generating' WHERE id = $1`, [itemId])
-      const imageUrl = await generateReplicaImage({
-        scenePrompt: item.scene_prompt!,
-        loraUrl: character.lora_url,
-        loraScale: character.lora_scale,
-        triggerWord: character.trigger_word,
-        basePromptStyle: character.base_prompt_style,
-      })
+      const imageUrl = await makeKeyframe(item.scene_prompt!)
       await query(
-        `UPDATE discovery_items SET generated_image_url = $2, replicate_status = 'image_done' WHERE id = $1`,
-        [itemId, imageUrl],
+        `UPDATE discovery_items
+            SET generated_image_url = $2, image_model = $3, replicate_status = 'image_done'
+          WHERE id = $1`,
+        [itemId, imageUrl, imageModel],
       )
       item.generated_image_url = imageUrl
+      item.image_model = imageModel
     }
 
-    if (spec.needsEndImage && !item.generated_end_image_url) {
+    const needsEndFrame = spec.needsEndImage || videoPlan.needsEndImage
+    if (needsEndFrame && !item.generated_end_image_url) {
+      if (!item.end_scene_prompt) {
+        if (!probe && item.video_url) {
+          probe = await probeSourceVideo(item.video_url, PROBE_FRAME_COUNT)
+        }
+        if (probe) {
+          const { end } = await extractKeyframePrompts(probe)
+          await query(
+            `UPDATE discovery_items SET end_scene_prompt = $2 WHERE id = $1`,
+            [itemId, end],
+          )
+          item.end_scene_prompt = end
+        }
+      }
+      if (!item.end_scene_prompt) {
+        throw new Error('End-frame prompt missing — cannot generate last keyframe')
+      }
       await query(`UPDATE discovery_items SET replicate_status = 'image_generating' WHERE id = $1`, [itemId])
-      const endImageUrl = await generateReplicaImage({
-        scenePrompt: item.end_scene_prompt!,
-        loraUrl: character.lora_url,
-        loraScale: character.lora_scale,
-        triggerWord: character.trigger_word,
-        basePromptStyle: character.base_prompt_style,
-      })
+      const endImageUrl = await makeKeyframe(item.end_scene_prompt)
       await query(
-        `UPDATE discovery_items SET generated_end_image_url = $2, replicate_status = 'image_done' WHERE id = $1`,
-        [itemId, endImageUrl],
+        `UPDATE discovery_items
+            SET generated_end_image_url = $2, image_model = $3, replicate_status = 'image_done'
+          WHERE id = $1`,
+        [itemId, endImageUrl, imageModel],
       )
       item.generated_end_image_url = endImageUrl
+      item.image_model = imageModel
     }
 
     if (options?.stopAfterImage) {
@@ -385,14 +453,24 @@ export async function replicateDiscoveryItem(
         }
       }
 
+      if (videoPlan.needsLora && !character.lora_url) {
+        throw new Error('LTX + LoRA needs a character with LoRA URL')
+      }
       await query(`UPDATE discovery_items SET replicate_status = 'video_generating' WHERE id = $1`, [itemId])
+      // When multi_shot was detected but user picked Seedance/LTX, run one-shot I2V instead.
+      const videoTechnique: VideoTechnique = useMultiShot
+        ? 'multi_shot'
+        : (technique === 'multi_shot' ? 'image_to_video' : technique)
       const result = await generateReplicaVideo({
-        technique,
+        technique: videoTechnique,
+        videoBackend: videoBackendChoice === 'auto' ? videoPlan.backend : videoBackendChoice,
         imageUrl: item.generated_image_url!,
         endImageUrl: item.generated_end_image_url,
         sourceVideoUrl: item.video_url,
         motionPrompt: item.motion_prompt,
         duration: item.source_duration ?? probe?.duration ?? null,
+        loraUrl: character.lora_url,
+        loraScale: character.lora_scale,
       })
       await query(
         `UPDATE discovery_items

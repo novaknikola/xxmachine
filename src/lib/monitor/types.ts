@@ -26,6 +26,9 @@ export type ReplicateStatus =
   | 'skipped'
   | 'needs_review'
 
+/** Keyframe generator for Copy-Paste / monitor replicate. */
+export type ImageModel = 'z_image' | 'seedream_edit'
+
 export interface TrackedProfileRow {
   id: string
   user_id: string
@@ -68,6 +71,8 @@ export interface DiscoveryItemRow {
   generated_end_image_url: string | null
   kling_video_url: string | null
   video_model: string | null
+  /** z_image | seedream_edit — last/selected keyframe backend. */
+  image_model: ImageModel | string | null
   source_duration: number | null
   source_cut_count: number | null
   replicate_status: ReplicateStatus

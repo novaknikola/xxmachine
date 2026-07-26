@@ -1,9 +1,41 @@
-import { getTechnique } from './techniques'
-import type { VideoTechnique } from './types'
+import { editImage } from '@/lib/wavespeed'
+import {
+  VIDEO_BACKEND_LABELS,
+  normalizeVideoBackend,
+  resolveVideoBackend,
+  type VideoBackend,
+} from './video-backends'
+import type { ImageModel, VideoTechnique } from './types'
+
+export {
+  VIDEO_BACKEND_LABELS,
+  VIDEO_BACKEND_OPTIONS,
+  normalizeVideoBackend,
+  resolveVideoBackend,
+  type VideoBackend,
+} from './video-backends'
 
 const IMAGE_MODEL = 'wavespeed-ai/z-image/turbo-lora'
 const API_V2 = 'https://api.wavespeed.ai/api/v2'
 const API_V3 = 'https://api.wavespeed.ai/api/v3'
+
+export function normalizeImageModel(raw: unknown): ImageModel {
+  return raw === 'seedream_edit' ? 'seedream_edit' : 'z_image'
+}
+
+function buildImagePrompt(opts: {
+  scenePrompt: string
+  triggerWord?: string | null
+  basePromptStyle?: string | null
+}): string {
+  // Scene (body + background cast) before character style — style often says
+  // "slim/fit" and washes out bust/glute size when it comes first.
+  return [
+    opts.triggerWord?.trim(),
+    opts.scenePrompt.trim(),
+    opts.basePromptStyle?.trim(),
+  ].filter(Boolean).join(', ')
+}
 
 function wavespeedKey(): string {
   const key = process.env.WAVESPEED_API_KEY
@@ -61,18 +93,10 @@ export async function generateReplicaImage(opts: {
   basePromptStyle?: string | null
 }): Promise<string> {
   const key = wavespeedKey()
-
-  // Scene prompt (body proportions + background cast) before character style —
-  // base_prompt_style often says "slim/fit" and used to wash out bust/glute size
-  // when it came first.
-  const parts = [
-    opts.triggerWord?.trim(),
-    opts.scenePrompt.trim(),
-    opts.basePromptStyle?.trim(),
-  ].filter(Boolean)
+  const prompt = buildImagePrompt(opts)
 
   const payload: Record<string, unknown> = {
-    prompt: parts.join(', '),
+    prompt,
     size: '756*1344',
     enable_safety_checker: false,
   }
@@ -98,52 +122,94 @@ export async function generateReplicaImage(opts: {
   return pollV2(requestId, AbortSignal.timeout(130_000))
 }
 
+/**
+ * Seedream Edit — keeps source layout/wardrobe from reference frame(s), steered by
+ * the same detailed scene prompt (+ character trigger/style). No LoRA path.
+ */
+export async function generateReplicaImageSeedream(opts: {
+  scenePrompt: string
+  referenceImageUrls: string[]
+  triggerWord?: string | null
+  basePromptStyle?: string | null
+  resolution?: '1k' | '2k'
+}): Promise<string> {
+  const refs = opts.referenceImageUrls.map(u => u.trim()).filter(Boolean)
+  if (!refs.length) {
+    throw new Error('Seedream Edit needs at least one reference image (source thumbnail/frame)')
+  }
+
+  const urls = await editImage({
+    imageUrls: refs,
+    prompt: buildImagePrompt(opts),
+    size: '9:16',
+    resolution: opts.resolution ?? '1k',
+    apiKey: wavespeedKey(),
+    signal: AbortSignal.timeout(600_000),
+  })
+  if (!urls[0]) throw new Error('Seedream Edit returned no image')
+  return urls[0]
+}
+
 export interface ReplicaVideoInput {
   technique: VideoTechnique
+  videoBackend?: VideoBackend
   imageUrl: string
   endImageUrl?: string | null
   sourceVideoUrl?: string | null
   motionPrompt?: string | null
   duration?: number | null
+  loraUrl?: string | null
+  loraScale?: number
 }
 
 export interface ReplicaVideoResult {
   videoUrl: string
-  /** The endpoint that produced the clip, recorded for auditing routing decisions. */
+  /** Audit string: backend:modelPath */
   model: string
+  backend: Exclude<VideoBackend, 'auto'>
   technique: VideoTechnique
 }
 
-/** Dispatches to whichever model the detected technique calls for. */
+/** Dispatches to the chosen / auto-resolved WaveSpeed video backend. */
 export async function generateReplicaVideo(input: ReplicaVideoInput): Promise<ReplicaVideoResult> {
   const key = wavespeedKey()
+  const choice = normalizeVideoBackend(input.videoBackend)
+  const resolved = resolveVideoBackend(choice, input.technique)
+  const label = VIDEO_BACKEND_LABELS[resolved.backend]
 
-  const spec = getTechnique(input.technique)
-  if (!spec.model || !spec.buildPayload) {
-    throw new Error(spec.reviewReason ?? `Technique ${input.technique} is not executable`)
+  if (resolved.useMultiShotQueue) {
+    throw new Error('Multi-shot must run through the queue, not generateReplicaVideo')
   }
-  if (spec.needsSourceVideo && !input.sourceVideoUrl) {
-    throw new Error(`${spec.label} requires the source video, which is unavailable`)
+  if (resolved.needsSourceVideo && !input.sourceVideoUrl) {
+    throw new Error(`${label} requires the source video`)
   }
-  if (spec.needsEndImage && !input.endImageUrl) {
-    throw new Error(`${spec.label} requires a generated end frame`)
+  if (resolved.needsEndImage && !input.endImageUrl) {
+    throw new Error(`${label} requires a generated end frame`)
+  }
+  if (resolved.needsLora && !input.loraUrl) {
+    throw new Error(`${label} requires a character LoRA`)
   }
 
-  const initRes = await fetch(`${API_V3}/${spec.model}`, {
+  const initRes = await fetch(`${API_V3}/${resolved.model}`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${key}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(spec.buildPayload(input)),
+    body: JSON.stringify(resolved.buildPayload(input)),
   })
   const initData = await initRes.json()
   if (initData.code && initData.code !== 200) {
-    throw new Error(`${spec.label} failed: ${initData.message ?? JSON.stringify(initData)}`)
+    throw new Error(`${label} failed: ${initData.message ?? JSON.stringify(initData)}`)
   }
   const requestId = initData?.data?.id ?? initData?.id
-  if (!requestId) throw new Error(`No request ID from ${spec.model}`)
+  if (!requestId) throw new Error(`No request ID from ${resolved.model}`)
 
-  const videoUrl = await pollV3(requestId, AbortSignal.timeout(310_000), spec.label)
-  return { videoUrl, model: spec.model, technique: spec.id }
+  const videoUrl = await pollV3(requestId, AbortSignal.timeout(310_000), label)
+  return {
+    videoUrl,
+    model: `${resolved.backend}:${resolved.model}`,
+    backend: resolved.backend,
+    technique: input.technique,
+  }
 }

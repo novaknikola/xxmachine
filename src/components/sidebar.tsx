@@ -76,7 +76,7 @@ const NAV_ITEMS: NavItem[] = [
       { href: '/analytics', label: 'Analytics', icon: BarChart2 },
     ],
   },
-  { href: '/copy-paste', label: 'Copy-Paste', icon: Copy },
+  { href: '/copy-paste', label: 'Copy-Paste Studio', icon: Copy },
   { href: '/history', label: 'History', icon: History, module: 'history' },
   { href: '/settings', label: 'Settings', icon: Settings },
 ]

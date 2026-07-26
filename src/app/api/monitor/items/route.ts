@@ -29,7 +29,7 @@ export async function GET(req: NextRequest) {
   const items = await rows(
     `SELECT id, platform, profile, content_url, content_id, views, score,
             content_type, video_technique, technique_confidence, technique_reasoning,
-            source_duration, source_cut_count, video_model,
+            source_duration, source_cut_count, video_model, image_model,
             thumbnail_url, video_url, scene_prompt, scene_spec, end_scene_prompt, motion_prompt,
             generated_image_url, generated_end_image_url,
             kling_video_url, replicate_status, replicate_error,

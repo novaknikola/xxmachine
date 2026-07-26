@@ -7,4 +7,10 @@
 | [`security-tenancy-current-state.md`](./security-tenancy-current-state.md) | Snapshot of what is / isn’t isolated today |
 | [`security-tenancy-plan.md`](./security-tenancy-plan.md) | Target plan: BYOK, mandatory 2FA, Cloudflare, tenancy phases |
 
+## Models / pipeline
+
+| File | Purpose |
+|------|---------|
+| [`video-models-plan.md`](./video-models-plan.md) | Kling + Seedance + LTX — when to use each, phased rollout |
+
 These were saved 2026-07-26 to merge fully with a newer plan later.
