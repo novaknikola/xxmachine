@@ -24,11 +24,35 @@ interface ReplicateItem {
   replicate_status: string
   replicate_error: string | null
   scene_prompt: string | null
+  scene_spec: {
+    body?: { bust?: string; glutes?: string; build?: string; hair?: string }
+    wardrobe?: { garments?: string; coverage?: string }
+    pose?: { body_position?: string; hips_to_camera?: string }
+    hook?: { eye_catching?: string; suggestiveness?: string }
+    others?: { count?: number; actions?: string }
+    speech?: { transcript?: string; kind?: string }
+    framing?: { shot_size?: string; emphasis?: string }
+  } | null
   generated_image_url: string | null
   generated_end_image_url: string | null
   kling_video_url: string | null
   thumbnail_url: string | null
   discovered_at: string
+}
+
+function sceneSpecSummary(spec: ReplicateItem['scene_spec']): string | null {
+  if (!spec) return null
+  const bits = [
+    [spec.body?.build, spec.body?.bust && `${spec.body.bust} bust`, spec.body?.glutes && `${spec.body.glutes} glutes`]
+      .filter(Boolean).join(', '),
+    spec.wardrobe?.garments,
+    [spec.pose?.body_position, spec.pose?.hips_to_camera && `hips ${spec.pose.hips_to_camera}`]
+      .filter(Boolean).join('; '),
+    spec.hook?.eye_catching,
+    spec.speech?.transcript && `speech: "${spec.speech.transcript.slice(0, 80)}${spec.speech.transcript.length > 80 ? '…' : ''}"`,
+    (spec.others?.count ?? 0) > 0 && `${spec.others!.count} other(s)${spec.others?.actions ? ` — ${spec.others.actions}` : ''}`,
+  ].filter(Boolean)
+  return bits.length ? bits.join(' · ') : null
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -87,7 +111,13 @@ export function ReplicateTab() {
       const res = await fetch(`/api/monitor/${action}/${id}`, { method: 'POST' })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
-      toast.success(action === 'classify' ? 'Classified' : 'Replication complete')
+      if (action === 'classify') {
+        toast.success('Classified')
+      } else if (data.queued) {
+        toast.success('Multi-shot queued — stitching runs in the background')
+      } else {
+        toast.success('Replication complete')
+      }
       load()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed')
@@ -173,6 +203,12 @@ export function ReplicateTab() {
                   {item.technique_reasoning && (
                     <p className="text-[11px] text-muted-foreground/80 mt-1 italic">
                       {item.technique_reasoning}
+                    </p>
+                  )}
+
+                  {sceneSpecSummary(item.scene_spec) && (
+                    <p className="text-[11px] text-muted-foreground mt-1.5 leading-relaxed">
+                      {sceneSpecSummary(item.scene_spec)}
                     </p>
                   )}
 

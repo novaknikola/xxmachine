@@ -77,6 +77,8 @@ export interface SourceProbe {
   duration: number | null
   /** Hard cuts detected by ffmpeg scene scoring. 0 means one continuous shot. */
   cutCount: number
+  /** Where those cuts fall, in seconds. Used to split the source into shots. */
+  cutTimes: number[]
   hasAudio: boolean
 }
 
@@ -111,20 +113,27 @@ async function probeFormat(path: string): Promise<{ duration: number | null; has
 }
 
 /**
- * Counts hard cuts via ffmpeg's scene score. This is the single most decisive
- * signal for technique routing: a clip with cuts cannot be reproduced by any
- * one-shot generation call regardless of what the vision model thinks it sees.
+ * Timestamps of hard cuts via ffmpeg's scene score. The count alone is the most
+ * decisive signal for technique routing — a clip with cuts cannot be reproduced
+ * by any one-shot generation call — while the positions let the multi-shot path
+ * split the source back into its individual shots.
  */
-async function countSceneCuts(path: string): Promise<number> {
+async function detectSceneCuts(path: string): Promise<number[]> {
   try {
     const { stderr } = await execFileAsync('ffmpeg', [
       '-i', path,
       '-vf', `select='gt(scene,${SCENE_THRESHOLD})',showinfo`,
       '-f', 'null', '-',
     ], { maxBuffer: 20_000_000 })
-    return (stderr.match(/pts_time:/g) ?? []).length
+
+    const times: number[] = []
+    for (const m of stderr.matchAll(/pts_time:([0-9.]+)/g)) {
+      const t = parseFloat(m[1])
+      if (Number.isFinite(t)) times.push(t)
+    }
+    return times.sort((a, b) => a - b)
   } catch {
-    return 0
+    return []
   }
 }
 
@@ -157,7 +166,7 @@ export async function probeSourceVideo(
     await downloadVideo(videoUrl, videoPath)
 
     const { duration, hasAudio } = await probeFormat(videoPath)
-    const cutCount = await countSceneCuts(videoPath)
+    const cutTimes = await detectSceneCuts(videoPath)
 
     // Without a duration we can only trust an early frame; seeking blind risks empty output.
     const span = duration ?? 3
@@ -177,7 +186,7 @@ export async function probeSourceVideo(
       console.warn('[monitor/probe] no frames extracted from', videoUrl.slice(0, 80))
       return null
     }
-    return { frames, duration, cutCount, hasAudio }
+    return { frames, duration, cutCount: cutTimes.length, cutTimes, hasAudio }
   } catch (err) {
     // Callers fall back to thumbnail-only classification, which silently loses
     // technique detection — so make the reason visible.

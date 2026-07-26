@@ -97,11 +97,13 @@ export const TECHNIQUES: Record<VideoTechnique, TechniqueSpec> = {
   multi_shot: {
     id: 'multi_shot',
     label: 'Multi-shot sequence',
+    // Executed via generation_queue (shared keyframe + per-segment motion transfer + stitch),
+    // not a single Wavespeed endpoint — model stays null so the router does not try one-shot.
     model: null,
-    needsSourceVideo: false,
+    needsSourceVideo: true,
     needsEndImage: false,
     needsMotionPrompt: false,
-    reviewReason: 'Source has multiple cuts — needs per-segment generation and stitching',
+    reviewReason: undefined,
   },
 
   extend: {

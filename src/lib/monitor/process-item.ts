@@ -9,6 +9,14 @@ import {
   type SourceProbe,
 } from './analyze'
 import { generateReplicaImage, generateReplicaVideo } from './replicate'
+import {
+  enrichMotionPrompt,
+  extractSceneSpec,
+  normalizeSceneSpec,
+  renderScenePrompt,
+  type SceneSpec,
+} from './scene-spec'
+import { enqueueMultiShotJob } from './multi-shot'
 import { getTechnique, resolveExecutable } from './techniques'
 import { notifyReplicationDone, notifyReplicationFailed } from './notify'
 import type { CharacterLora, DiscoveryItemRow, TrackedProfileRow, VideoTechnique } from './types'
@@ -85,11 +93,12 @@ export async function classifyDiscoveryItem(itemId: string, userId: string) {
     const analysis = await analyzeVideoContent(probe)
     const spec = getTechnique(analysis.video_technique)
 
-    // Park what we can identify but cannot yet reproduce, rather than routing it
-    // to a model that would return something unrelated.
+    // multi_shot is executable via the queue (shared keyframe + stitch), even though
+    // it has no single Wavespeed endpoint. Other null-model techniques stay parked.
+    const executable = Boolean(spec.model) || analysis.video_technique === 'multi_shot'
     const status = isSkippable(analysis.content_type)
       ? 'skipped'
-      : spec.model
+      : executable
         ? 'classified'
         : 'needs_review'
 
@@ -173,11 +182,15 @@ export async function replicateDiscoveryItem(
 
   const isVideo = shouldGenerateVideo(contentType, item.video_url)
 
-  // Techniques we cannot build are parked as needs_review during classification, which
-  // keeps autopilot away from them. Reaching this function means someone asked for it
-  // explicitly, so fall back to the closest runnable approach and record what was used.
-  const { technique, fellBack } = resolveExecutable(item.video_technique, Boolean(item.video_url))
-  const spec = getTechnique(technique)
+  // multi_shot has its own queue pipeline — do not collapse it into a one-shot fallback.
+  const useMultiShot = item.video_technique === 'multi_shot' && Boolean(item.video_url)
+  const resolved = useMultiShot
+    ? { technique: 'multi_shot' as VideoTechnique, fellBack: false }
+    : resolveExecutable(item.video_technique, Boolean(item.video_url))
+  const technique = resolved.technique
+  const fellBack = resolved.fellBack
+  // Prompt / image steps for multi_shot reuse the motion_transfer requirements.
+  const spec = getTechnique(useMultiShot ? 'motion_transfer' : technique)
 
   try {
     // Probing downloads the clip and runs ffmpeg, so do it once and only when a
@@ -185,6 +198,7 @@ export async function replicateDiscoveryItem(
     let probe: SourceProbe | null = null
     const needsProbe = isVideo && (
       !item.scene_prompt ||
+      !item.scene_spec ||
       (spec.needsMotionPrompt && !item.motion_prompt) ||
       (spec.needsEndImage && !item.end_scene_prompt)
     )
@@ -193,18 +207,54 @@ export async function replicateDiscoveryItem(
       probe = await probeSourceVideo(item.video_url, PROBE_FRAME_COUNT)
     }
 
-    // Step 1: keyframe descriptions — two of them when interpolating between states.
-    if (spec.needsEndImage && (!item.scene_prompt || !item.end_scene_prompt)) {
+    let sceneSpec: SceneSpec | null = item.scene_spec
+      ? normalizeSceneSpec(item.scene_spec)
+      : null
+
+    // Step 1: structured scene capture (body/wardrobe/pose/hook/people/speech).
+    // Falls back to the old single-frame prose prompt if the structured path fails.
+    if (!item.scene_prompt || !sceneSpec) {
+      await query(`UPDATE discovery_items SET replicate_status = 'analyzing' WHERE id = $1`, [itemId])
+      try {
+        if (!probe && item.video_url) {
+          probe = await probeSourceVideo(item.video_url, PROBE_FRAME_COUNT)
+        }
+        if (probe) {
+          sceneSpec = await extractSceneSpec(probe, item.video_url)
+          const scenePrompt = renderScenePrompt(sceneSpec)
+          await query(
+            `UPDATE discovery_items SET scene_spec = $2::jsonb, scene_prompt = $3 WHERE id = $1`,
+            [itemId, JSON.stringify(sceneSpec), scenePrompt],
+          )
+          item.scene_prompt = scenePrompt
+          item.scene_spec = sceneSpec as unknown as Record<string, unknown>
+        }
+      } catch (err) {
+        console.warn(
+          '[monitor/replicate] scene_spec failed, falling back:',
+          err instanceof Error ? err.message : err,
+        )
+      }
+    }
+
+    // Step 1b: keyframe end-state for FLF2V, or legacy prose if structured failed.
+    if (spec.needsEndImage && !item.end_scene_prompt) {
       if (!probe) throw new Error('Could not read source video for keyframe analysis')
       const { start, end } = await extractKeyframePrompts(probe)
-      await query(
-        `UPDATE discovery_items SET scene_prompt = $2, end_scene_prompt = $3 WHERE id = $1`,
-        [itemId, start, end],
-      )
-      item.scene_prompt = start
+      if (!item.scene_prompt) {
+        await query(
+          `UPDATE discovery_items SET scene_prompt = $2, end_scene_prompt = $3 WHERE id = $1`,
+          [itemId, start, end],
+        )
+        item.scene_prompt = start
+      } else {
+        await query(
+          `UPDATE discovery_items SET end_scene_prompt = $2 WHERE id = $1`,
+          [itemId, end],
+        )
+      }
       item.end_scene_prompt = end
     } else if (!item.scene_prompt) {
-      await query(`UPDATE discovery_items SET replicate_status = 'analyzing' WHERE id = $1`, [itemId])
       const scenePrompt = probe
         ? await scenePromptFromFrame(probe.frames[0])
         : await scenePromptFromFrame(await getFrameBase64({
@@ -221,7 +271,7 @@ export async function replicateDiscoveryItem(
 
     // Step 2: motion description, for the models that are driven by it.
     if (spec.needsMotionPrompt && !item.motion_prompt && probe) {
-      const motionPrompt = await extractMotionPrompt(probe)
+      const motionPrompt = enrichMotionPrompt(await extractMotionPrompt(probe), sceneSpec)
       await query(
         `UPDATE discovery_items SET motion_prompt = $2 WHERE id = $1`,
         [itemId, motionPrompt],
@@ -277,8 +327,55 @@ export async function replicateDiscoveryItem(
       }
     }
 
-    // Step 4: video via whichever model the technique resolved to.
+    // Step 4: video — multi_shot goes through the queue (minutes of work);
+    // everything else stays inline on whichever model the technique resolved to.
     if (isVideo && !item.kling_video_url) {
+      if (useMultiShot) {
+        if (!item.video_url || !item.generated_image_url) {
+          throw new Error('Multi-shot requires a source video and a generated keyframe')
+        }
+        const segmentCount = Math.max(2, (item.source_cut_count ?? 1) + 1)
+        const jobId = await enqueueMultiShotJob({
+          userId,
+          discoveryItemId: itemId,
+          imageUrl: item.generated_image_url,
+          sourceVideoUrl: item.video_url,
+          segmentCount,
+        })
+        await query(
+          `UPDATE discovery_items
+              SET replicate_status = 'video_generating',
+                  video_technique = 'multi_shot',
+                  video_model = 'multi_shot+kling-motion-control',
+                  replicate_error = NULL
+            WHERE id = $1`,
+          [itemId],
+        )
+        // Kick the worker immediately; cron is the backup if this fetch fails.
+        const base = process.env.NEXT_PUBLIC_BASE_URL ?? 'http://localhost:3000'
+        const secret = process.env.CRON_SECRET
+        if (secret) {
+          await query(
+            `UPDATE generation_queue
+                SET status = 'processing', started_at = now(), attempts = attempts + 1
+              WHERE id = $1 AND status = 'pending'`,
+            [jobId],
+          ).catch(() => {})
+          fetch(`${base}/api/queue/process/${jobId}`, {
+            method: 'POST',
+            headers: { 'x-cron-secret': secret },
+          }).catch(err => console.error('[monitor/multi-shot] fire process:', err))
+        }
+        return {
+          ok: true,
+          queued: true,
+          jobId,
+          imageUrl: item.generated_image_url,
+          technique: 'multi_shot' as VideoTechnique,
+          fellBack: false,
+        }
+      }
+
       await query(`UPDATE discovery_items SET replicate_status = 'video_generating' WHERE id = $1`, [itemId])
       const result = await generateReplicaVideo({
         technique,

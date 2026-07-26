@@ -30,7 +30,7 @@ export async function GET(req: NextRequest) {
     `SELECT id, platform, profile, content_url, content_id, views, score,
             content_type, video_technique, technique_confidence, technique_reasoning,
             source_duration, source_cut_count, video_model,
-            thumbnail_url, video_url, scene_prompt, end_scene_prompt, motion_prompt,
+            thumbnail_url, video_url, scene_prompt, scene_spec, end_scene_prompt, motion_prompt,
             generated_image_url, generated_end_image_url,
             kling_video_url, replicate_status, replicate_error,
             admin_status, posted_at, discovered_at

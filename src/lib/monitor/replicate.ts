@@ -1,17 +1,22 @@
 import { getTechnique } from './techniques'
 import type { VideoTechnique } from './types'
 
-const WAVESPEED_KEY = process.env.WAVESPEED_API_KEY!
 const IMAGE_MODEL = 'wavespeed-ai/z-image/turbo-lora'
 const API_V2 = 'https://api.wavespeed.ai/api/v2'
 const API_V3 = 'https://api.wavespeed.ai/api/v3'
+
+function wavespeedKey(): string {
+  const key = process.env.WAVESPEED_API_KEY
+  if (!key) throw new Error('WAVESPEED_API_KEY not configured')
+  return key
+}
 
 async function pollV2(requestId: string, signal: AbortSignal): Promise<string> {
   for (let i = 0; i < 40; i++) {
     if (signal.aborted) throw new Error('Aborted')
     await new Promise(r => setTimeout(r, 3000))
     const res = await fetch(`${API_V2}/predictions/${requestId}/result`, {
-      headers: { Authorization: `Bearer ${WAVESPEED_KEY}` },
+      headers: { Authorization: `Bearer ${wavespeedKey()}` },
       signal,
     })
     const data = await res.json()
@@ -31,7 +36,7 @@ async function pollV3(requestId: string, signal: AbortSignal, label: string): Pr
     if (signal.aborted) throw new Error('Aborted')
     await new Promise(r => setTimeout(r, 5000))
     const res = await fetch(`${API_V3}/predictions/${requestId}/result`, {
-      headers: { Authorization: `Bearer ${WAVESPEED_KEY}` },
+      headers: { Authorization: `Bearer ${wavespeedKey()}` },
       signal,
     })
     const data = await res.json()
@@ -55,7 +60,7 @@ export async function generateReplicaImage(opts: {
   triggerWord?: string | null
   basePromptStyle?: string | null
 }): Promise<string> {
-  if (!WAVESPEED_KEY) throw new Error('WAVESPEED_API_KEY not configured')
+  const key = wavespeedKey()
 
   const parts = [
     opts.triggerWord?.trim(),
@@ -75,7 +80,7 @@ export async function generateReplicaImage(opts: {
   const initRes = await fetch(`${API_V2}/${IMAGE_MODEL}`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${WAVESPEED_KEY}`,
+      Authorization: `Bearer ${key}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(payload),
@@ -108,7 +113,7 @@ export interface ReplicaVideoResult {
 
 /** Dispatches to whichever model the detected technique calls for. */
 export async function generateReplicaVideo(input: ReplicaVideoInput): Promise<ReplicaVideoResult> {
-  if (!WAVESPEED_KEY) throw new Error('WAVESPEED_API_KEY not configured')
+  const key = wavespeedKey()
 
   const spec = getTechnique(input.technique)
   if (!spec.model || !spec.buildPayload) {
@@ -124,7 +129,7 @@ export async function generateReplicaVideo(input: ReplicaVideoInput): Promise<Re
   const initRes = await fetch(`${API_V3}/${spec.model}`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${WAVESPEED_KEY}`,
+      Authorization: `Bearer ${key}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(spec.buildPayload(input)),

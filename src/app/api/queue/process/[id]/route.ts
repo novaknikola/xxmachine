@@ -23,6 +23,11 @@ import type {
   VideoTranscribeJobInput, VideoOcrJobInput, CaptionShuffleJobInput, CaptionGenerateJobInput, ComfyUIPodBulkJobInput,
   BulkCarouselJobInput,
 } from '../../submit/route'
+import {
+  processMultiShotJob,
+  type MonitorMultiShotJobInput,
+  type MonitorMultiShotJobOutput,
+} from '@/lib/monitor/multi-shot'
 
 interface ComfyUIRow {
   prompt: string
@@ -119,7 +124,13 @@ interface JobRow {
   status: string
   job_type: string
   input: Record<string, unknown>
-  output: { urls?: string[]; rows?: { videoName: string; text: string }[]; comfyuiRows?: ComfyUIRow[]; texts?: string[]; carouselRows?: CarouselRow[] } | null
+  output: {
+    urls?: string[]
+    rows?: { videoName: string; text: string }[]
+    comfyuiRows?: ComfyUIRow[]
+    texts?: string[]
+    carouselRows?: CarouselRow[]
+  } & MonitorMultiShotJobOutput | null
   attempts: number
   max_attempts: number
   done_items: number
@@ -779,6 +790,22 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       )
 
       return NextResponse.json({ ok: true, done: doneCount })
+    }
+
+    // ── monitor_multi_shot ────────────────────────────────────────────────────
+    if (job.job_type === 'monitor_multi_shot') {
+      const input = job.input as unknown as MonitorMultiShotJobInput
+      if (!input?.discoveryItemId || !input.imageUrl || !input.sourceVideoUrl) {
+        throw new Error('Invalid monitor_multi_shot input')
+      }
+      const result = await processMultiShotJob({
+        jobId: id,
+        userId: job.user_id,
+        input,
+        doneItems: job.done_items,
+        existingOutput: job.output,
+      })
+      return NextResponse.json({ ok: true, done: result.done, finalUrl: result.finalUrl })
     }
 
     // Unknown job type

@@ -60,6 +60,8 @@ export interface DiscoveryItemRow {
   technique_confidence: number | null
   technique_reasoning: string | null
   scene_prompt: string | null
+  /** Structured body/wardrobe/pose/hook/speech capture used to build scene_prompt. */
+  scene_spec: Record<string, unknown> | null
   end_scene_prompt: string | null
   motion_prompt: string | null
   generated_image_url: string | null
