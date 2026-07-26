@@ -1,5 +1,6 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import Link from 'next/link'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { useAuth } from '@/contexts/auth-context'
@@ -28,13 +29,6 @@ import { Button } from '@/components/ui/button'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
 
 interface NavItem {
   href: string
@@ -171,54 +165,119 @@ function NavFlyout({
   search: string
   onNavigate?: () => void
 }) {
-  const router = useRouter()
   const Icon = item.icon
   const active = groupIsActive(item, pathname, search)
+  const [open, setOpen] = useState(false)
+  const [mounted, setMounted] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState({ top: 0, left: 0 })
+
+  useEffect(() => { setMounted(true) }, [])
+
+  useLayoutEffect(() => {
+    if (!open || !triggerRef.current) return
+    const place = () => {
+      const rect = triggerRef.current!.getBoundingClientRect()
+      const panelW = 256
+      const gap = 12
+      let left = rect.right + gap
+      let top = rect.top
+      if (left + panelW > window.innerWidth - 8) {
+        left = Math.max(8, rect.left - panelW - gap)
+      }
+      const approxH = 56 + items.length * 44
+      if (top + approxH > window.innerHeight - 8) {
+        top = Math.max(8, window.innerHeight - approxH - 8)
+      }
+      setPos({ top, left })
+    }
+    place()
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => {
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
+  }, [open, items.length])
+
+  useEffect(() => {
+    if (!open) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    function onDown(e: MouseEvent) {
+      const t = e.target as Node
+      if (triggerRef.current?.contains(t) || panelRef.current?.contains(t)) return
+      setOpen(false)
+    }
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('mousedown', onDown)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('mousedown', onDown)
+    }
+  }, [open])
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger className={navTriggerClass(active)}>
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        aria-expanded={open}
+        aria-haspopup="menu"
+        onClick={() => setOpen(v => !v)}
+        className={navTriggerClass(active || open)}
+      >
         <Icon className="w-4 h-4 shrink-0" />
         <span className="flex-1 text-left">{item.label}</span>
-        <ChevronRight className="w-4 h-4 shrink-0 opacity-50" />
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        side="right"
-        align="start"
-        sideOffset={12}
-        className={cn(
-          'w-64! min-w-64 p-2 rounded-xl shadow-lg ring-1 ring-border/60',
-          'bg-popover/95 backdrop-blur-md',
-        )}
-      >
-        <DropdownMenuLabel className="px-3 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
-          {item.label}
-        </DropdownMenuLabel>
-        <div className="flex flex-col gap-0.5">
-          {items.map(child => {
-            const ChildIcon = child.icon
-            const isActive = childIsActive(child, pathname, search)
-            return (
-              <DropdownMenuItem
-                key={child.href}
-                className={cn(
-                  'min-h-10 gap-3 rounded-lg px-3 py-2.5 text-sm cursor-pointer',
-                  isActive && 'bg-primary/10 text-primary focus:bg-primary/15 focus:text-primary',
-                )}
-                onClick={() => {
-                  router.push(child.href)
-                  onNavigate?.()
-                }}
-              >
-                <ChildIcon className="w-4 h-4 opacity-80" />
-                <span className="flex-1">{child.label}</span>
-                {isActive && <ChevronRight className="w-3.5 h-3.5 opacity-60" />}
-              </DropdownMenuItem>
-            )
-          })}
-        </div>
-      </DropdownMenuContent>
-    </DropdownMenu>
+        <ChevronRight className={cn('w-4 h-4 shrink-0 opacity-50 transition-transform', open && 'translate-x-0.5')} />
+      </button>
+      {mounted && open && createPortal(
+        <div
+          ref={panelRef}
+          role="menu"
+          aria-label={item.label}
+          style={{ top: pos.top, left: pos.left }}
+          className={cn(
+            'fixed z-[100] w-64 p-2 rounded-xl shadow-lg',
+            'bg-popover/95 backdrop-blur-md ring-1 ring-border/60 text-popover-foreground',
+          )}
+        >
+          <p className="px-3 py-2.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
+            {item.label}
+          </p>
+          <div className="flex flex-col gap-0.5">
+            {items.map(child => {
+              const ChildIcon = child.icon
+              const isActive = childIsActive(child, pathname, search)
+              return (
+                <Link
+                  key={child.href}
+                  href={child.href}
+                  role="menuitem"
+                  onClick={() => {
+                    setOpen(false)
+                    onNavigate?.()
+                  }}
+                  className={cn(
+                    'flex items-center min-h-10 gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors',
+                    isActive
+                      ? 'bg-primary/10 text-primary'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-secondary',
+                  )}
+                >
+                  <ChildIcon className="w-4 h-4 opacity-80 shrink-0" />
+                  <span className="flex-1">{child.label}</span>
+                  {isActive && <ChevronRight className="w-3.5 h-3.5 opacity-60" />}
+                </Link>
+              )
+            })}
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
   )
 }
 

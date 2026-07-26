@@ -22,7 +22,7 @@ function CaptionsPageInner() {
     : tabParam === 'transcribe' ? 'Transcribe Audio'
     : tabParam === 'ocr' ? 'On-Screen Text'
     : tabParam === 'shuffle' ? 'Caption Shuffle'
-    : 'Add Captions'
+    : 'Add Captions' // default + ?tab=captions
   const [tab, setTab] = useState<Tab>(initialTab)
 
   return (
