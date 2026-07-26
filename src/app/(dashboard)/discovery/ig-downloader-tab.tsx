@@ -224,7 +224,7 @@ export function IgDownloaderTab() {
             </Button>
           </div>
           <p className="text-[10px] text-muted-foreground mt-2">
-            Runs through Apify (same as the Discovery scan) — can take 1-3 min due to background processing. Only use for profiles you have the right to download.
+            Lists via Apify, falls back to RapidAPI when Apify is over quota (same as Discovery). Only use for profiles you have the right to download.
             Profiles scanned in the last 12h load instantly from cache instead of re-scanning.
           </p>
 

@@ -3,7 +3,7 @@ import { requireUser } from '@/lib/session'
 import { resolveKey } from '@/lib/user-keys'
 import { one, query, rows } from '@/lib/db'
 import {
-  runApifyActorForUser, resolveVideoUrlViaRapidApi,
+  listProfileReels, resolveVideoUrlViaRapidApi,
   type ApifyReel, type BulkReelItem,
 } from '@/lib/instagram-scrape'
 
@@ -56,10 +56,6 @@ export async function POST(req: NextRequest) {
   const user = await requireUser(req)
   if (user instanceof NextResponse) return user
 
-  if (!process.env.APIFY_API_KEY) {
-    return NextResponse.json({ error: 'APIFY_API_KEY not configured on server' }, { status: 500 })
-  }
-
   const { username, amount, force } = await req.json().catch(() => ({})) as { username?: string; amount?: number; force?: boolean }
   if (!username?.trim()) return NextResponse.json({ error: 'username required' }, { status: 400 })
 
@@ -69,6 +65,13 @@ export async function POST(req: NextRequest) {
     .replace(/^https?:\/\/(www\.)?instagram\.com\//i, '')
     .replace(/\/.*$/, '')
   if (!cleanUsername) return NextResponse.json({ error: 'username required' }, { status: 400 })
+
+  const rapidApiKey = await resolveKey(user.id, 'RAPIDAPI_KEY')
+  if (!process.env.APIFY_API_KEY && !rapidApiKey) {
+    return NextResponse.json({
+      error: 'No reel lister available — configure APIFY_API_KEY or add a RapidAPI key in Settings.',
+    }, { status: 500 })
+  }
 
   // ── Serve from cache if scanned recently and not forcing a fresh scan ──
   if (!force) {
@@ -92,26 +95,30 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // ── Fresh scan via Apify (+ RapidAPI fallback) ──────────────────
-  const rapidApiKey = await resolveKey(user.id, 'RAPIDAPI_KEY')
-
-  let apifyReels: ApifyReel[]
+  // ── Fresh scan: Apify first, RapidAPI list fallback (same as Discovery) ──
+  let listedReels: ApifyReel[]
+  let listSource: 'apify' | 'rapidapi'
   try {
-    apifyReels = await runApifyActorForUser(cleanUsername, target)
+    const listed = await listProfileReels(cleanUsername, target, rapidApiKey)
+    listedReels = listed.reels
+    listSource = listed.source
   } catch (err) {
-    return NextResponse.json({ error: `Apify: ${err instanceof Error ? err.message : 'failed'}` }, { status: 500 })
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'Failed to list reels' },
+      { status: 500 },
+    )
   }
 
-  if (apifyReels.length === 0) {
+  if (listedReels.length === 0) {
     return NextResponse.json({
-      error: 'Apify found no posts for this profile — check whether the account is private or the username is correct.',
+      error: `No reels found for @${cleanUsername} via ${listSource} — check whether the account is private, has no Reels, or the username is correct.`,
     }, { status: 404 })
   }
 
   // Build the ordered work list, dedup by id, skip anything without a usable permalink
   const entries: { id: string; permalink: string; reel: ApifyReel }[] = []
   const seen = new Set<string>()
-  for (const reel of apifyReels) {
+  for (const reel of listedReels) {
     const id = reel.shortCode ?? reel.url
     if (!id || seen.has(id)) continue
     const permalink = reel.url ?? (reel.shortCode ? `https://www.instagram.com/reel/${reel.shortCode}/` : null)
@@ -136,10 +143,12 @@ export async function POST(req: NextRequest) {
         likes: reel.likesCount ?? 0,
         comments: reel.commentsCount ?? 0,
         postedAt: reel.timestamp ?? null,
-        source: 'apify',
+        source: listSource,
       }
     } else if (rapidApiKey) {
       enrichQueue.push(i)
+    } else {
+      skipped.push({ permalink, reason: 'No video URL and no RapidAPI key for per-link resolve' })
     }
   })
 
@@ -170,8 +179,6 @@ export async function POST(req: NextRequest) {
       }
     }
     await Promise.all(Array.from({ length: ENRICH_CONCURRENCY }, worker))
-  } else if (!rapidApiKey) {
-    for (const i of enrichQueue) skipped.push({ permalink: entries[i].permalink, reason: 'No RapidAPI key for fallback' })
   }
 
   const freshReels = results.filter((r): r is BulkReelItem => r !== null).slice(0, target)
@@ -179,8 +186,8 @@ export async function POST(req: NextRequest) {
   if (freshReels.length === 0) {
     return NextResponse.json({
       error: rapidApiKey
-        ? 'Apify found posts, but neither Apify nor RapidAPI could extract a video link (they might just be images, not reels).'
-        : 'Apify found posts without a direct video link. Add a RapidAPI key in Settings so I can try fallback extraction per link.',
+        ? `Listed ${listedReels.length} posts via ${listSource}, but could not extract video links (they might be images, not reels).`
+        : `Listed posts via ${listSource} without direct video links. Add a RapidAPI key in Settings for per-link extraction.`,
       skipped,
     }, { status: 404 })
   }
@@ -211,6 +218,12 @@ export async function POST(req: NextRequest) {
   )
 
   return NextResponse.json({
-    ok: true, username: cleanUsername, reels, skipped, fromCache: false, scannedAt: new Date().toISOString(),
+    ok: true,
+    username: cleanUsername,
+    reels,
+    skipped,
+    fromCache: false,
+    scannedAt: new Date().toISOString(),
+    source: listSource,
   })
 }
