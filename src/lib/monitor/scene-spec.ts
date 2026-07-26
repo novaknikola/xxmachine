@@ -9,9 +9,33 @@ import type { SourceProbe } from './analyze'
 /**
  * Structured capture of everything that must survive the identity swap.
  * The LoRA supplies the face and character identity; this object supplies
- * body, wardrobe, pose, framing, hook, other people and speech so the
- * regenerated shot matches the source's scroll-stopping properties.
+ * body proportions, wardrobe, pose, framing, hook, background people/actions
+ * and speech so the regenerated shot matches the source — including gag beats
+ * that happen behind the main subject.
  */
+export interface BackgroundPerson {
+  who: string
+  /** Where they sit in the frame (foreground blur / midground left / …). */
+  position: string
+  /** What they look like / wear — enough to redraw them. */
+  appearance: string
+  /** State at the start of the clip. */
+  start_state: string
+  /** State at the end of the clip. */
+  end_state: string
+  /** Chronological action, e.g. "sits on folding chair → falls backward when ball is struck". */
+  action: string
+}
+
+export interface ActionBeat {
+  /** Approximate time in seconds from clip start. */
+  t: number
+  /** Main subject action at this moment. */
+  subject: string
+  /** Background / secondary action at this moment (empty if none). */
+  background: string
+}
+
 export interface SceneSpec {
   body: {
     build: string
@@ -20,6 +44,8 @@ export interface SceneSpec {
     waist: string
     skin_tone: string
     hair: string
+    /** Free-text emphasis the model must not soften, e.g. "very large glutes, exaggerated". */
+    proportion_emphasis: string
   }
   wardrobe: {
     garments: string
@@ -46,11 +72,16 @@ export interface SceneSpec {
     eye_catching: string
     suggestiveness: string
   }
+  /** @deprecated Prefer background_people — kept for older stored specs. */
   others: {
     count: number
     description: string
     actions: string
   }
+  background_people: BackgroundPerson[]
+  /** Comic / reaction / multi-person beats that MUST appear in the recreation. */
+  must_include_events: string[]
+  action_beats: ActionBeat[]
   speech: {
     transcript: string
     kind: 'dialogue' | 'voiceover' | 'trending_sound' | 'music' | 'none' | 'unknown'
@@ -60,7 +91,7 @@ export interface SceneSpec {
 }
 
 const EMPTY_BODY = {
-  build: '', bust: '', glutes: '', waist: '', skin_tone: '', hair: '',
+  build: '', bust: '', glutes: '', waist: '', skin_tone: '', hair: '', proportion_emphasis: '',
 }
 const EMPTY_WARDROBE = {
   garments: '', coverage: '', colors: '', footwear: '', accessories: '',
@@ -75,65 +106,81 @@ const EMPTY_HOOK = { eye_catching: '', suggestiveness: '' }
 const EMPTY_OTHERS = { count: 0, description: '', actions: '' }
 const EMPTY_SPEECH: SceneSpec['speech'] = { transcript: '', kind: 'unknown' }
 
-const SCENE_SPEC_SYSTEM = `You analyze frames from a short vertical Instagram Reel.
-Return a JSON object that captures EVERYTHING needed to recreate the shot with a DIFFERENT person (different face/identity) while keeping the same body, wardrobe, pose, framing and attention-grabbing qualities.
+const SCENE_SPEC_SYSTEM = `You analyze frames sampled IN ORDER from a short vertical Instagram Reel.
+Return JSON that lets us recreate the shot with a DIFFERENT woman's face/identity while keeping
+the SAME body proportions, wardrobe, pose, framing, AND every secondary gag/reaction in the background.
 
 Return ONLY this JSON shape:
 {
   "body": {
     "build": "slim / athletic / curvy / thick / petite / tall — be specific",
-    "bust": "flat / small / medium / large / very large — what you see",
-    "glutes": "flat / small / medium / large / very large — what you see, especially if camera emphasises them",
+    "bust": "flat / small / medium / large / very large",
+    "glutes": "flat / small / medium / large / very large",
     "waist": "narrow / average / wide",
     "skin_tone": "fair / light / medium / olive / tan / brown / deep",
-    "hair": "colour, length, style (e.g. long blonde waves, short dark pixie)"
+    "hair": "colour, length, style",
+    "proportion_emphasis": "one blunt phrase restating the body sizes that MUST be copied, e.g. 'very large glutes and large bust, thick lower body'"
   },
   "wardrobe": {
-    "garments": "exact garments visible, materials, fit (tight / loose / cropped)",
-    "coverage": "how much skin is shown; straps, waistbands, underwear visibility, cleavage, midriff",
-    "colors": "dominant garment colours",
-    "footwear": "shoes or barefoot, or empty if not visible",
-    "accessories": "jewellery, hat, bag, golf club, phone, etc. or empty"
+    "garments": "exact garments, materials, fit",
+    "coverage": "how much skin; straps, waistbands, cleavage, midriff",
+    "colors": "dominant colours",
+    "footwear": "shoes or barefoot or empty",
+    "accessories": "props in her hands or on her (club, phone, visor…)"
   },
   "pose": {
-    "body_position": "standing / sitting / bent over / kneeling / walking — precise",
-    "orientation": "facing camera / 3/4 left / profile / back to camera",
-    "hips_to_camera": "how hips/glutes are angled toward the lens (squared / turned / pushed back / arched)",
-    "arms_hands": "what arms and hands are doing",
-    "gaze": "looking at camera / looking away / down / over shoulder"
+    "body_position": "precise pose at the FIRST frame",
+    "orientation": "facing camera / 3/4 / back / …",
+    "hips_to_camera": "how hips/glutes angle toward the lens",
+    "arms_hands": "arms/hands in the FIRST frame",
+    "gaze": "gaze direction"
   },
   "framing": {
     "shot_size": "close-up / medium / waist-up / full body / wide",
     "angle": "eye level / low angle / high angle / POV",
     "height": "camera height relative to subject",
     "crop": "where the frame cuts the body",
-    "emphasis": "what the composition puts in focus (face / chest / glutes / outfit / action)"
+    "emphasis": "what composition puts in focus"
   },
   "hook": {
-    "eye_catching": "the scroll-stopping element — bend, reveal, wet look, cleavage, booty angle, motion, prop, expression",
-    "suggestiveness": "none / mild / suggestive / explicit — factual, not moralising"
+    "eye_catching": "the scroll-stopping element",
+    "suggestiveness": "none / mild / suggestive / explicit"
   },
-  "others": {
-    "count": 0,
-    "description": "who else is in frame (age/gender/role) or empty",
-    "actions": "what they are doing / saying / how they interact with the subject"
-  },
+  "background_people": [
+    {
+      "who": "young man / older woman / caddie / …",
+      "position": "bottom foreground blur / midground left / behind her right / …",
+      "appearance": "clothing + rough age/build — enough to redraw",
+      "start_state": "what they are doing at the start",
+      "end_state": "what they are doing at the end",
+      "action": "full chronological action across the clip (e.g. sits on folding chair watching → loses balance and falls off the chair as she strikes the ball)"
+    }
+  ],
+  "must_include_events": [
+    "short MUST-keep events, especially background comedy/reactions, e.g. 'man in foreground falls off chair when she hits the ball'"
+  ],
+  "action_beats": [
+    { "t": 0.0, "subject": "main subject at this moment", "background": "what background people do at this moment, or empty" },
+    { "t": 1.5, "subject": "…", "background": "…" },
+    { "t": 3.0, "subject": "…", "background": "…" }
+  ],
+  "others": { "count": 0, "description": "", "actions": "" },
   "speech": {
-    "transcript": "leave empty — filled by audio transcription separately",
+    "transcript": "leave empty — filled separately",
     "kind": "dialogue" | "voiceover" | "trending_sound" | "music" | "none" | "unknown"
   },
-  "setting": "location and background in one short phrase",
-  "lighting": "lighting description in one short phrase"
+  "setting": "location + visible background props/banners in one phrase",
+  "lighting": "lighting in one phrase"
 }
 
-RULES:
-- Describe body proportions FACTUALLY. If the subject has a large chest or large glutes, say so — that is what must be reproduced.
-- Do NOT describe face shape, eye colour, freckles, or identity. Face identity is replaced by our character LoRA.
-- DO describe hair, skin tone and body — those travel with the recreation.
-- Be specific about wardrobe coverage and pose relative to the camera.
-- Adult/suggestive content is allowed and expected for this product. Describe it usefully; do not refuse or sanitise.
-- If something is not visible, use an empty string (or 0 for count), never invent.
-- Prefer short concrete phrases over fluff.`
+CRITICAL RULES:
+1. BODY SIZES ARE NOT OPTIONAL. If glutes or bust look large / very large, say exactly that in body.bust, body.glutes AND body.proportion_emphasis. Do not soften to "athletic" or "curvy" alone.
+2. BACKGROUND PEOPLE AND THEIR ACTIONS ARE NOT OPTIONAL. Scan EVERY frame for anyone else — even blurred heads, spectators, people on chairs. If someone reacts, falls, stands up, laughs, ducks — put it in background_people[].action AND must_include_events[] AND the matching action_beats[].background.
+3. Compare first frame to last frame. If a background person's state changes, that change MUST appear in action / must_include_events.
+4. Do NOT describe the main woman's face identity. DO describe hair, skin, body.
+5. Adult/suggestive content is expected. Describe factually; do not refuse or sanitise.
+6. Prefer concrete verbs ("falls backward off folding chair") over vague ones ("reacts").
+7. If nobody else is visible in any frame, background_people=[] and must_include_events=[]. Never invent people.`
 
 function asString(v: unknown): string {
   return typeof v === 'string' ? v.trim() : ''
@@ -153,6 +200,64 @@ function normalizeSpeechKind(v: unknown): SceneSpec['speech']['kind'] {
   return 'unknown'
 }
 
+function normalizeBackgroundPeople(raw: unknown, others: SceneSpec['others']): BackgroundPerson[] {
+  if (Array.isArray(raw)) {
+    return raw
+      .map((p): BackgroundPerson | null => {
+        if (!p || typeof p !== 'object') return null
+        const o = p as Record<string, unknown>
+        const who = asString(o.who)
+        const action = asString(o.action)
+        if (!who && !action) return null
+        return {
+          who,
+          position: asString(o.position),
+          appearance: asString(o.appearance),
+          start_state: asString(o.start_state),
+          end_state: asString(o.end_state),
+          action,
+        }
+      })
+      .filter((p): p is BackgroundPerson => p !== null)
+  }
+
+  // Legacy specs only had others.description / others.actions.
+  if (others.count > 0 || others.description || others.actions) {
+    return [{
+      who: others.description || `${others.count} other(s)`,
+      position: '',
+      appearance: '',
+      start_state: '',
+      end_state: '',
+      action: others.actions,
+    }]
+  }
+  return []
+}
+
+function normalizeBeats(raw: unknown): ActionBeat[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .map((b): ActionBeat | null => {
+      if (!b || typeof b !== 'object') return null
+      const o = b as Record<string, unknown>
+      return {
+        t: asNumber(o.t),
+        subject: asString(o.subject),
+        background: asString(o.background),
+      }
+    })
+    .filter((b): b is ActionBeat => b !== null && Boolean(b.subject || b.background))
+}
+
+function normalizeEvents(raw: unknown, people: BackgroundPerson[]): string[] {
+  const fromArray = Array.isArray(raw)
+    ? raw.map(asString).filter(Boolean)
+    : []
+  if (fromArray.length) return fromArray
+  return people.map(p => p.action).filter(Boolean)
+}
+
 /** Defensive parse — Grok occasionally drops fields or wraps the object. */
 export function normalizeSceneSpec(raw: unknown): SceneSpec {
   const obj = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
@@ -161,17 +266,38 @@ export function normalizeSceneSpec(raw: unknown): SceneSpec {
   const pose = (obj.pose && typeof obj.pose === 'object' ? obj.pose : {}) as Record<string, unknown>
   const framing = (obj.framing && typeof obj.framing === 'object' ? obj.framing : {}) as Record<string, unknown>
   const hook = (obj.hook && typeof obj.hook === 'object' ? obj.hook : {}) as Record<string, unknown>
-  const others = (obj.others && typeof obj.others === 'object' ? obj.others : {}) as Record<string, unknown>
+  const othersRaw = (obj.others && typeof obj.others === 'object' ? obj.others : {}) as Record<string, unknown>
   const speech = (obj.speech && typeof obj.speech === 'object' ? obj.speech : {}) as Record<string, unknown>
+
+  const others = {
+    count: Math.max(0, Math.round(asNumber(othersRaw.count))),
+    description: asString(othersRaw.description) || EMPTY_OTHERS.description,
+    actions: asString(othersRaw.actions) || EMPTY_OTHERS.actions,
+  }
+
+  const background_people = normalizeBackgroundPeople(obj.background_people, others)
+  if (!others.count && background_people.length) {
+    others.count = background_people.length
+    others.description = background_people.map(p => p.who).filter(Boolean).join('; ')
+    others.actions = background_people.map(p => p.action).filter(Boolean).join('; ')
+  }
+
+  const bust = asString(body.bust) || EMPTY_BODY.bust
+  const glutes = asString(body.glutes) || EMPTY_BODY.glutes
+  let proportion_emphasis = asString(body.proportion_emphasis)
+  if (!proportion_emphasis && (bust || glutes)) {
+    proportion_emphasis = [bust && `${bust} bust`, glutes && `${glutes} glutes`].filter(Boolean).join(', ')
+  }
 
   return {
     body: {
       build: asString(body.build) || EMPTY_BODY.build,
-      bust: asString(body.bust) || EMPTY_BODY.bust,
-      glutes: asString(body.glutes) || EMPTY_BODY.glutes,
+      bust,
+      glutes,
       waist: asString(body.waist) || EMPTY_BODY.waist,
       skin_tone: asString(body.skin_tone) || EMPTY_BODY.skin_tone,
       hair: asString(body.hair) || EMPTY_BODY.hair,
+      proportion_emphasis,
     },
     wardrobe: {
       garments: asString(wardrobe.garments) || EMPTY_WARDROBE.garments,
@@ -198,11 +324,10 @@ export function normalizeSceneSpec(raw: unknown): SceneSpec {
       eye_catching: asString(hook.eye_catching) || EMPTY_HOOK.eye_catching,
       suggestiveness: asString(hook.suggestiveness) || EMPTY_HOOK.suggestiveness,
     },
-    others: {
-      count: Math.max(0, Math.round(asNumber(others.count))),
-      description: asString(others.description) || EMPTY_OTHERS.description,
-      actions: asString(others.actions) || EMPTY_OTHERS.actions,
-    },
+    others,
+    background_people,
+    must_include_events: normalizeEvents(obj.must_include_events, background_people),
+    action_beats: normalizeBeats(obj.action_beats),
     speech: {
       transcript: asString(speech.transcript) || EMPTY_SPEECH.transcript,
       kind: normalizeSpeechKind(speech.kind),
@@ -219,10 +344,44 @@ function push(parts: string[], label: string, value: string) {
 
 /**
  * Flattens the structured spec into the image-generation prompt.
- * Face/identity is intentionally omitted — the LoRA + trigger word own that.
+ * Body proportions and background people are front-loaded — those are the
+ * details that previously got buried or dropped.
  */
 export function renderScenePrompt(spec: SceneSpec): string {
   const parts: string[] = []
+
+  // 1) Body first — models overweight early tokens; LoRA style comes later.
+  if (spec.body.proportion_emphasis) {
+    parts.push(
+      `CRITICAL body proportions (match exactly, do not slim down): ${spec.body.proportion_emphasis}`,
+    )
+  }
+  push(parts, 'Body', [
+    spec.body.build && `${spec.body.build} build`,
+    spec.body.bust && `${spec.body.bust} breasts/bust`,
+    spec.body.glutes && `${spec.body.glutes} glutes/butt`,
+    spec.body.waist && `${spec.body.waist} waist`,
+    spec.body.skin_tone && `${spec.body.skin_tone} skin`,
+    spec.body.hair,
+  ].filter(Boolean).join(', '))
+
+  // 2) Background cast must be in the still, or Kling has nothing to animate.
+  if (spec.must_include_events.length) {
+    parts.push(`MUST include these events in the scene: ${spec.must_include_events.join('; ')}`)
+  }
+  if (spec.background_people.length) {
+    const lines = spec.background_people.map((p, i) => {
+      const bits = [
+        p.who || `person ${i + 1}`,
+        p.position && `at ${p.position}`,
+        p.appearance,
+        p.start_state && `starting: ${p.start_state}`,
+        p.action && `action: ${p.action}`,
+      ].filter(Boolean)
+      return bits.join(', ')
+    })
+    parts.push(`Background people (draw them clearly, not cropped out): ${lines.join(' | ')}`)
+  }
 
   push(parts, 'Camera', [
     spec.framing.shot_size,
@@ -231,18 +390,8 @@ export function renderScenePrompt(spec: SceneSpec): string {
     spec.framing.crop,
   ].filter(Boolean).join(', '))
   push(parts, 'Composition emphasis', spec.framing.emphasis)
-
   push(parts, 'Setting', spec.setting)
   push(parts, 'Lighting', spec.lighting)
-
-  push(parts, 'Body', [
-    spec.body.build && `${spec.body.build} build`,
-    spec.body.bust && `${spec.body.bust} bust`,
-    spec.body.glutes && `${spec.body.glutes} glutes`,
-    spec.body.waist && `${spec.body.waist} waist`,
-    spec.body.skin_tone && `${spec.body.skin_tone} skin`,
-    spec.body.hair,
-  ].filter(Boolean).join(', '))
 
   push(parts, 'Wardrobe', [
     spec.wardrobe.garments,
@@ -255,7 +404,7 @@ export function renderScenePrompt(spec: SceneSpec): string {
   push(parts, 'Pose', [
     spec.pose.body_position,
     spec.pose.orientation,
-    spec.pose.hips_to_camera && `hips ${spec.pose.hips_to_camera}`,
+    spec.pose.hips_to_camera,
     spec.pose.arms_hands,
     spec.pose.gaze && `gaze ${spec.pose.gaze}`,
   ].filter(Boolean).join('; '))
@@ -265,12 +414,15 @@ export function renderScenePrompt(spec: SceneSpec): string {
     spec.hook.suggestiveness && `suggestiveness ${spec.hook.suggestiveness}`,
   ].filter(Boolean).join('; '))
 
-  if (spec.others.count > 0 || spec.others.description || spec.others.actions) {
-    push(parts, 'Other people', [
-      spec.others.count ? `${spec.others.count} other(s)` : '',
-      spec.others.description,
-      spec.others.actions,
-    ].filter(Boolean).join('; '))
+  if (spec.action_beats.length) {
+    const beats = spec.action_beats
+      .slice(0, 6)
+      .map(b => {
+        const bg = b.background ? ` / bg: ${b.background}` : ''
+        return `t=${b.t.toFixed(1)}s ${b.subject}${bg}`
+      })
+      .join(' → ')
+    push(parts, 'Action timeline', beats)
   }
 
   if (spec.speech.transcript) {
@@ -279,20 +431,51 @@ export function renderScenePrompt(spec: SceneSpec): string {
     push(parts, 'Audio', spec.speech.kind)
   }
 
+  // Repeat body + must-include at the end — second pass against style washout.
+  if (spec.body.proportion_emphasis) {
+    parts.push(`Again: body must stay ${spec.body.proportion_emphasis}`)
+  }
+  if (spec.must_include_events.length) {
+    parts.push(`Again: keep background events — ${spec.must_include_events.join('; ')}`)
+  }
+
   return parts.join('. ')
 }
 
 /**
- * Motion models get movement only, but spoken content often drives the action —
- * append a short speech cue when we have one.
+ * Motion models need the gag beats and secondary motion, not just the heroine.
  */
 export function enrichMotionPrompt(motionPrompt: string, spec: SceneSpec | null): string {
+  if (!spec) return motionPrompt.trim()
+
+  const extras: string[] = []
+  if (spec.must_include_events.length) {
+    extras.push(`Background events that must happen: ${spec.must_include_events.join('; ')}.`)
+  }
+  if (spec.background_people.length) {
+    const acts = spec.background_people
+      .map(p => [p.who, p.action].filter(Boolean).join(' '))
+      .filter(Boolean)
+    if (acts.length) extras.push(`Other people motion: ${acts.join('; ')}.`)
+  }
+  if (spec.action_beats.length) {
+    const beats = spec.action_beats
+      .filter(b => b.background || b.subject)
+      .slice(0, 8)
+      .map(b => {
+        const bg = b.background ? `, background ${b.background}` : ''
+        return `at ${b.t.toFixed(1)}s ${b.subject}${bg}`
+      })
+    if (beats.length) extras.push(`Timeline: ${beats.join(' → ')}.`)
+  }
+  if (spec.speech.transcript) {
+    extras.push(`Subject speaks: "${spec.speech.transcript}".`)
+  }
+
   const base = motionPrompt.trim()
-  if (!spec?.speech.transcript) return base
-  const cue = `Subject speaks: "${spec.speech.transcript}"`
-  if (!base) return cue
-  if (base.toLowerCase().includes(spec.speech.transcript.toLowerCase().slice(0, 24))) return base
-  return `${base} ${cue}`
+  if (!extras.length) return base
+  if (!base) return extras.join(' ')
+  return `${base} ${extras.join(' ')}`
 }
 
 async function downloadForTranscript(videoUrl: string): Promise<string> {
@@ -346,12 +529,17 @@ export async function extractSceneSpec(
         ...probe.frames.map(f => base64ImageContent(f)),
         {
           type: 'text',
-          text: `These ${probe.frames.length} frames are sampled in order from one Reel. Fill the JSON.`,
+          text: [
+            `These ${probe.frames.length} frames are sampled in chronological order from one Reel.`,
+            'Fill the JSON.',
+            'Pay special attention to: (1) exact bust/glute size, (2) anyone else in ANY frame and what they DO between first and last frame.',
+            'If a background person falls, stands, ducks, or reacts — that is a must_include_event.',
+          ].join(' '),
         },
       ],
     }],
-    maxTokens: 2048,
-    temperature: 0.3,
+    maxTokens: 3072,
+    temperature: 0.2,
   })
 
   let parsed: unknown

@@ -1,6 +1,7 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, Suspense } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { useAuth } from '@/contexts/auth-context'
 import { charactersStore, generationsStore } from '@/lib/store'
 import { Character, GenerationRow, DIMENSIONS } from '@/lib/types'
@@ -75,6 +76,22 @@ const CONCURRENCY = 2
 const TAB_LABELS = ['Image Generate', 'Dataset', 'Train LoRA', 'Bulk Generate', 'Carousel'] as const
 type Tab = typeof TAB_LABELS[number]
 
+const TAB_FROM_QUERY: Record<string, Tab> = {
+  generate: 'Image Generate',
+  dataset: 'Dataset',
+  train: 'Train LoRA',
+  bulk: 'Bulk Generate',
+  carousel: 'Carousel',
+}
+
+const QUERY_FROM_TAB: Record<Tab, string> = {
+  'Image Generate': 'generate',
+  Dataset: 'dataset',
+  'Train LoRA': 'train',
+  'Bulk Generate': 'bulk',
+  Carousel: 'carousel',
+}
+
 // ─── Helpers ─────────────────────────────────────────────────
 
 function StatusIcon({ status }: { status: JobStatus }) {
@@ -117,11 +134,25 @@ function cleanPromptLines(raw: string): string[] {
 
 // ─── Main Page ────────────────────────────────────────────────
 
-export default function BulkPage() {
+function BulkPageInner() {
   const { user } = useAuth()
-  const [tab, setTab] = useState<Tab>('Image Generate')
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const initialTab = TAB_FROM_QUERY[searchParams.get('tab') ?? ''] ?? 'Image Generate'
+  const [tab, setTabState] = useState<Tab>(initialTab)
   const [characters, setCharacters] = useState<Character[]>([])
   const [loras, setLoras] = useState<LoraRow[]>([])
+
+  useEffect(() => {
+    const next = TAB_FROM_QUERY[searchParams.get('tab') ?? ''] ?? 'Image Generate'
+    setTabState(next)
+  }, [searchParams])
+
+  function setTab(next: Tab) {
+    setTabState(next)
+    const q = QUERY_FROM_TAB[next]
+    router.replace(q === 'generate' ? '/bulk' : `/bulk?tab=${q}`, { scroll: false })
+  }
 
   const [showPromptHelp, setShowPromptHelp] = useState(false)
   const [showBundleDialog, setShowBundleDialog] = useState(false)
@@ -235,9 +266,15 @@ export default function BulkPage() {
       const ref = refImages[i % refImages.length] // cycle through references
       try {
         const fd = new FormData()
-        fd.append('file', ref.file)
+        // Ensure MIME is set — empty File.type is rejected by /api/edit-image.
+        const typed = ref.file.type
+          ? ref.file
+          : new File([ref.file], ref.file.name || 'ref.jpg', { type: 'image/jpeg' })
+        fd.append('file', typed)
         fd.append('prompt', prompt)
         fd.append('size', datasetSize)
+        fd.append('saveHistory', 'true')
+        fd.append('historyPrompt', prompt)
         const res = await fetch('/api/edit-image', { method: 'POST', body: fd })
         const data = await res.json()
         if (!res.ok || !data.urls?.length) throw new Error(data.error ?? 'Failed')
@@ -691,14 +728,14 @@ export default function BulkPage() {
                 <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">1. Reference images</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
-                <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden"
+                <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" multiple className="hidden"
                   onChange={e => addRefImages(e.target.files)} />
                 <button
                   onClick={() => fileInputRef.current?.click()}
                   className="w-full border-2 border-dashed border-border rounded-xl p-6 flex flex-col items-center gap-2 hover:border-primary/50 hover:bg-primary/5 transition-colors text-muted-foreground hover:text-foreground">
                   <Upload className="w-6 h-6" />
                   <span className="text-sm">Upload reference photos</span>
-                  <span className="text-xs opacity-60">Face + body shots, JPG/PNG</span>
+                  <span className="text-xs opacity-60">Face + body shots — JPEG, PNG or WebP</span>
                 </button>
                 {refImages.length > 0 && (
                   <div className="grid grid-cols-4 gap-2">
@@ -1417,5 +1454,13 @@ export default function BulkPage() {
         }}
       />
     </div>
+  )
+}
+
+export default function BulkPage() {
+  return (
+    <Suspense fallback={null}>
+      <BulkPageInner />
+    </Suspense>
   )
 }

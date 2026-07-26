@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { Suspense, useEffect, useMemo, useState } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import { useAuth } from '@/contexts/auth-context'
 import { Sidebar } from '@/components/sidebar'
@@ -12,6 +12,7 @@ const ROUTE_MODULES: Record<string, string> = {
   '/reels': 'reels',
   '/socials': 'socials',
   '/motion': 'motion',
+  '/copy-paste': 'generator',
   '/schedule': 'schedule',
   '/history': 'history',
 }
@@ -119,7 +120,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             sidebarOpen ? 'translate-x-0' : '-translate-x-full'
           } md:translate-x-0 fixed md:static md:w-auto w-60 h-screen md:h-auto transition-transform duration-300 ease-out z-50 md:z-auto`}
         >
-          <Sidebar onMobileClose={() => setSidebarOpen(false)} />
+          <Suspense fallback={null}>
+            <Sidebar onMobileClose={() => setSidebarOpen(false)} />
+          </Suspense>
         </div>
       </>
 

@@ -40,7 +40,7 @@ async function main() {
   }
 
   console.log('probing', videoUrl.slice(0, 90))
-  const probe = await probeSourceVideo(videoUrl, 5)
+  const probe = await probeSourceVideo(videoUrl, 8)
   if (!probe) throw new Error('probe failed')
   console.log('frames', probe.frames.length, 'dur', probe.duration, 'cuts', probe.cutCount, 'audio', probe.hasAudio)
 

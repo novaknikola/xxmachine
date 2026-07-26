@@ -62,10 +62,13 @@ export async function generateReplicaImage(opts: {
 }): Promise<string> {
   const key = wavespeedKey()
 
+  // Scene prompt (body proportions + background cast) before character style —
+  // base_prompt_style often says "slim/fit" and used to wash out bust/glute size
+  // when it came first.
   const parts = [
     opts.triggerWord?.trim(),
-    opts.basePromptStyle?.trim(),
     opts.scenePrompt.trim(),
+    opts.basePromptStyle?.trim(),
   ].filter(Boolean)
 
   const payload: Record<string, unknown> = {

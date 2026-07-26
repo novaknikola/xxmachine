@@ -13,22 +13,32 @@ import { ScheduleModal } from '@/components/schedule-modal'
 
 interface GenerationRecord {
   id: string
-  kind: 'text2img' | 'wan_edit'
+  kind: string
   character_id: string | null
   character_name: string | null
   prompt: string
   dimension: string | null
   batch: number
   image_urls: string[]
+  video_url?: string | null
   user_id: string | null
   created_at: string
+  source?: string
 }
 
-type FilterKind = 'all' | 'text2img' | 'wan_edit'
+type FilterKind = 'all' | 'text2img' | 'wan_edit' | 'replicate' | 'replicate_video' | 'queue'
 
 const KIND_LABEL: Record<string, string> = {
   text2img: 'Image Generate',
-  wan_edit: 'WAN Edit',
+  wan_edit: 'Dataset / Edit',
+  replicate: 'Copy-Paste',
+  replicate_video: 'Copy-Paste Video',
+  queue: 'Queue',
+  bulk_image: 'Bulk Generate',
+  bulk_carousel: 'Carousel',
+  video_repurpose: 'Video Variants',
+  video_caption: 'Captions',
+  monitor_multi_shot: 'Multi-shot',
 }
 
 function groupByDate(records: GenerationRecord[]) {
@@ -59,8 +69,11 @@ export default function HistoryPage() {
     setLoading(true)
     try {
       const params = new URLSearchParams()
-      if (user?.id) params.set('userId', user.id)
-      if (filter !== 'all') params.set('kind', filter)
+      if (filter !== 'all') {
+        params.set('kind', filter === 'queue' ? 'bulk_image' : filter)
+      }
+      // 'queue' filter matches several job types client-side after fetch
+      if (filter === 'queue') params.delete('kind')
       params.set('limit', String(LIMIT))
       params.set('offset', String(reset ? 0 : offset))
 
@@ -68,14 +81,22 @@ export default function HistoryPage() {
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
 
+      let gens: GenerationRecord[] = data.generations ?? []
+      if (filter === 'queue') {
+        gens = gens.filter(g => g.source === 'queue' || [
+          'bulk_image', 'bulk_carousel', 'video_repurpose', 'video_caption',
+          'monitor_multi_shot', 'comfyui_pod_bulk',
+        ].includes(g.kind))
+      }
+
       if (reset) {
-        setRecords(data.generations)
+        setRecords(gens)
         setOffset(LIMIT)
       } else {
-        setRecords(prev => [...prev, ...data.generations])
+        setRecords(prev => [...prev, ...gens])
         setOffset(o => o + LIMIT)
       }
-      setTotal(data.total)
+      setTotal(filter === 'queue' ? gens.length : data.total)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to load history')
     } finally {
@@ -95,6 +116,7 @@ export default function HistoryPage() {
   }
 
   function toggleRecord(r: GenerationRecord) {
+    if (!r.image_urls.length) return
     const allSel = r.image_urls.every(u => selected.has(u))
     setSelected(prev => {
       const n = new Set(prev)
@@ -161,7 +183,7 @@ export default function HistoryPage() {
         <div className="flex items-center gap-2 flex-wrap">
           {/* Filter */}
           <div className="flex rounded-lg border border-border overflow-hidden text-xs">
-            {(['all', 'text2img', 'wan_edit'] as FilterKind[]).map(k => (
+            {(['all', 'text2img', 'wan_edit', 'replicate', 'replicate_video', 'queue'] as FilterKind[]).map(k => (
               <button key={k} onClick={() => setFilter(k)}
                 className={`px-3 py-1.5 font-medium transition-colors flex items-center gap-1 ${filter === k ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-secondary'}`}>
                 <Filter className="w-3 h-3" />
@@ -216,7 +238,7 @@ export default function HistoryPage() {
                 <p className="text-xs font-semibold text-muted-foreground uppercase tracking-widest mb-3">{group.date}</p>
                 <div className="space-y-3">
                   {group.records.map(r => {
-                    const allRowSel = r.image_urls.every(u => selected.has(u))
+                    const allRowSel = r.image_urls.length > 0 && r.image_urls.every(u => selected.has(u))
                     const someRowSel = r.image_urls.some(u => selected.has(u))
                     return (
                       <div key={r.id}
@@ -266,6 +288,16 @@ export default function HistoryPage() {
                                 </div>
                               )
                             })}
+                            {r.video_url && (
+                              <a
+                                href={r.video_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="w-20 h-20 rounded-lg overflow-hidden border border-border bg-secondary/40 flex items-center justify-center text-[10px] text-primary font-medium text-center px-1"
+                              >
+                                Open video
+                              </a>
+                            )}
                           </div>
                         </div>
 

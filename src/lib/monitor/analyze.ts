@@ -294,18 +294,19 @@ export async function extractKeyframePrompts(probe: SourceProbe): Promise<{
 
 const MOTION_PROMPT_SYSTEM = `You are given frames sampled in order from a short vertical video.
 
-Write a single motion prompt for an image-to-video model: describe ONLY what moves
-and how, across the clip.
+Write a motion prompt for an image-to-video model describing what moves and how.
 
-Cover:
-- Subject motion (what the body/hands/head do, and at what pace)
-- Camera motion (static / slow push in / pull back / pan left-right / orbit / handheld sway)
-- Any environmental motion (hair, fabric, water, traffic, light shifts)
+MUST cover, in chronological order:
+1. Main subject motion (body, hips, arms, hands, props) with rough timing
+2. EVERY other person visible — their reactions and state changes across frames
+   (e.g. "man on folding chair in foreground topples backward as she strikes the ball")
+3. Camera motion (static / push in / pull back / pan / orbit / handheld)
+4. Environmental motion (hair, fabric, ball flight, crowd)
 
 RULES:
-- Do NOT describe appearance, face, clothing or setting — only movement.
-- Do NOT mention frames, images or the video itself.
-- One or two sentences, present tense, max 60 words.`
+- Do NOT describe face identity or clothing brands — only movement and reactions.
+- Background gags and reactions are NOT optional if visible in any frame.
+- Present tense. 3–6 sentences is fine. Do not truncate important secondary action.`
 
 /** Motion description for image_to_video and extend techniques. */
 export async function extractMotionPrompt(probe: SourceProbe): Promise<string> {

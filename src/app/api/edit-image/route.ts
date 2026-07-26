@@ -2,8 +2,18 @@ import { NextRequest, NextResponse } from 'next/server'
 import { editImage, type SeedreamResolution } from '@/lib/wavespeed'
 import { requireUser } from '@/lib/session'
 
-const API_KEY = process.env.WAVESPEED_API_KEY!
 const UPLOAD_URL = 'https://api.wavespeed.ai/api/v3/media/upload/binary'
+const ALLOWED_MIME = new Set(['image/jpeg', 'image/png', 'image/webp'])
+const SIZE_MAP: Record<string, string> = {
+  '1:1': '1024*1024', '4:3': '1152*864', '3:4': '864*1152',
+  '16:9': '1344*756', '9:16': '756*1344', '2:3': '768*1152', '3:2': '1152*768',
+}
+
+function wavespeedKey(): string {
+  const key = process.env.WAVESPEED_API_KEY
+  if (!key) throw new Error('WAVESPEED_API_KEY is not configured')
+  return key
+}
 
 async function uploadToWavespeed(file: File): Promise<string> {
   const fd = new FormData()
@@ -11,7 +21,7 @@ async function uploadToWavespeed(file: File): Promise<string> {
 
   const res = await fetch(UPLOAD_URL, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${API_KEY}` },
+    headers: { Authorization: `Bearer ${wavespeedKey()}` },
     body: fd,
   })
   const data = await res.json()
@@ -23,11 +33,24 @@ async function uploadToWavespeed(file: File): Promise<string> {
   return url as string
 }
 
-const SIZE_MAP: Record<string, string> = {
-  '1:1': '1024*1024', '4:3': '1152*864', '3:4': '864*1152',
-  '16:9': '1344*756', '9:16': '756*1344', '2:3': '768*1152', '3:2': '1152*768',
+/** Browsers often leave File.type empty for pasted/dragged images — infer from name. */
+function resolveMime(file: File): string {
+  if (file.type && ALLOWED_MIME.has(file.type)) return file.type
+  const name = file.name.toLowerCase()
+  if (name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg'
+  if (name.endsWith('.png')) return 'image/png'
+  if (name.endsWith('.webp')) return 'image/webp'
+  // Empty type but image-looking blob from the Dataset picker — treat as jpeg.
+  if (!file.type || file.type === 'application/octet-stream') return 'image/jpeg'
+  return file.type
 }
-const ALLOWED_MIME = new Set(['image/jpeg', 'image/png', 'image/webp'])
+
+function assertImageFile(file: File) {
+  const mime = resolveMime(file)
+  if (!ALLOWED_MIME.has(mime)) {
+    throw new Error('File must be a JPEG, PNG, or WebP image')
+  }
+}
 
 function parseResolution(raw: unknown): SeedreamResolution {
   return raw === '2k' ? '2k' : '1k'
@@ -53,7 +76,7 @@ export async function POST(req: NextRequest) {
     const auth = await requireUser(req)
     if (auth instanceof NextResponse) return auth
 
-    if (!API_KEY) return NextResponse.json({ error: 'WAVESPEED_API_KEY is not configured' }, { status: 500 })
+    const apiKey = wavespeedKey()
 
     const contentType = req.headers.get('content-type') ?? ''
 
@@ -77,7 +100,7 @@ export async function POST(req: NextRequest) {
         prompt,
         size: parseSize(body.size),
         resolution: parseResolution(body.resolution),
-        apiKey: API_KEY,
+        apiKey,
         signal: abort,
       })
 
@@ -110,37 +133,36 @@ export async function POST(req: NextRequest) {
     const referenceFiles = form.getAll('referenceFiles[]') as File[]
 
     let imageUrls: string[]
-    if (directUrl) {
-      imageUrls = [directUrl, ...referenceUrlList]
-      if (referenceFiles.length) {
-        for (const f of referenceFiles) {
-          if (!ALLOWED_MIME.has(f.type)) {
-            return NextResponse.json({ error: 'Reference file must be a JPEG, PNG, or WebP image' }, { status: 400 })
-          }
+    try {
+      if (directUrl) {
+        imageUrls = [directUrl, ...referenceUrlList]
+        if (referenceFiles.length) {
+          for (const f of referenceFiles) assertImageFile(f)
+          const uploaded = await Promise.all(referenceFiles.map(f => uploadToWavespeed(f)))
+          imageUrls.push(...uploaded)
         }
-        const uploaded = await Promise.all(referenceFiles.map(f => uploadToWavespeed(f)))
-        imageUrls.push(...uploaded)
-      }
-    } else {
-      const singleFile = form.get('file') as File | null
-      const multiFiles = form.getAll('files[]') as File[]
-      const allFiles = multiFiles.length > 0 ? multiFiles : singleFile ? [singleFile] : []
+      } else {
+        const singleFile = form.get('file') as File | null
+        const multiFiles = form.getAll('files[]') as File[]
+        const allFiles = multiFiles.length > 0 ? multiFiles : singleFile ? [singleFile] : []
 
-      if (!allFiles.length) return NextResponse.json({ error: 'Missing file or imageUrl' }, { status: 400 })
-      for (const f of allFiles) {
-        if (!ALLOWED_MIME.has(f.type)) {
-          return NextResponse.json({ error: 'File must be a JPEG, PNG, or WebP image' }, { status: 400 })
-        }
+        if (!allFiles.length) return NextResponse.json({ error: 'Missing file or imageUrl' }, { status: 400 })
+        for (const f of allFiles) assertImageFile(f)
+        imageUrls = await Promise.all(allFiles.map(f => uploadToWavespeed(f)))
+        if (referenceUrlList.length) imageUrls.push(...referenceUrlList)
       }
-      imageUrls = await Promise.all(allFiles.map(f => uploadToWavespeed(f)))
-      if (referenceUrlList.length) imageUrls.push(...referenceUrlList)
+    } catch (err) {
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : 'Invalid image file' },
+        { status: 400 },
+      )
     }
 
     if (!imageUrls.length) {
       return NextResponse.json({ error: 'No input images' }, { status: 400 })
     }
 
-    const urls = await editImage({ imageUrls, prompt, size, resolution, apiKey: API_KEY, signal: abort })
+    const urls = await editImage({ imageUrls, prompt, size, resolution, apiKey, signal: abort })
 
     if (saveHistory && urls.length) {
       fetch(`${process.env.NEXT_PUBLIC_BASE_URL}/api/generations`, {

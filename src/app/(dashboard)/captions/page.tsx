@@ -15,7 +15,14 @@ type Tab = typeof TAB_LABELS[number]
 
 function CaptionsPageInner() {
   const params = useSearchParams()
-  const initialTab: Tab = params.get('tab') === 'queue' ? 'Queue' : 'Add Captions'
+  const tabParam = params.get('tab')
+  const initialTab: Tab =
+    tabParam === 'queue' ? 'Queue'
+    : tabParam === 'bulk' ? 'Bulk Captions'
+    : tabParam === 'transcribe' ? 'Transcribe Audio'
+    : tabParam === 'ocr' ? 'On-Screen Text'
+    : tabParam === 'shuffle' ? 'Caption Shuffle'
+    : 'Add Captions'
   const [tab, setTab] = useState<Tab>(initialTab)
 
   return (

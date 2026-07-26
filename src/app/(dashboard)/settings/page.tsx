@@ -9,14 +9,12 @@ import { toast } from 'sonner'
 import {
   User,
   Key,
-  Brain,
   Save,
   Loader2,
   Eye,
   EyeOff,
   CheckCircle2,
   XCircle,
-  Trash2,
   Zap,
   Circle,
 } from 'lucide-react'
@@ -31,15 +29,6 @@ interface SettingsData {
     subscription_status: string
   }
   apiKeys: Record<string, boolean>
-}
-
-interface LoraRow {
-  id: string
-  name: string
-  trigger_word: string | null
-  status: 'training' | 'ready' | 'failed'
-  lora_url: string | null
-  created_at: string
 }
 
 const API_KEY_LABELS: Record<string, string> = {
@@ -327,107 +316,6 @@ function ApiKeysTab({ initialPresence }: { initialPresence: Record<string, boole
   )
 }
 
-// ─── Models Tab ───────────────────────────────────────────────────
-
-function ModelsTab() {
-  const [loras, setLoras] = useState<LoraRow[]>([])
-  const [loading, setLoading] = useState(true)
-  const [deleting, setDeleting] = useState<string | null>(null)
-
-  useEffect(() => {
-    fetch('/api/loras')
-      .then(r => r.json())
-      .then(d => setLoras(d.loras ?? []))
-      .catch(() => toast.error('Failed to load models'))
-      .finally(() => setLoading(false))
-  }, [])
-
-  async function deleteModel(id: string) {
-    setDeleting(id)
-    try {
-      const res = await fetch('/api/loras', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id }),
-      })
-      if (!res.ok) throw new Error('Delete failed')
-      setLoras(prev => prev.filter(l => l.id !== id))
-      toast.success('Model removed')
-    } catch (err) {
-      toast.error(String(err))
-    } finally {
-      setDeleting(null)
-    }
-  }
-
-  const statusColor = {
-    ready: 'bg-emerald-500/15 text-emerald-400',
-    training: 'bg-amber-500/15 text-amber-400',
-    failed: 'bg-destructive/15 text-destructive',
-  }
-
-  return (
-    <div className="glass-card rounded-2xl p-6 space-y-4">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-foreground">LoRA Models</h3>
-        <span className="text-xs text-muted-foreground">{loras.length} model{loras.length !== 1 ? 's' : ''}</span>
-      </div>
-
-      {loading ? (
-        <div className="flex items-center justify-center py-8">
-          <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
-        </div>
-      ) : loras.length === 0 ? (
-        <div className="text-center py-8">
-          <Brain className="w-8 h-8 text-muted-foreground/40 mx-auto mb-2" />
-          <p className="text-sm text-muted-foreground">No LoRA models yet</p>
-          <p className="text-xs text-muted-foreground/60 mt-1">Train a model from the Generator page</p>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {loras.map(lora => (
-            <div
-              key={lora.id}
-              className="flex items-center gap-3 px-3 py-2.5 rounded-xl bg-secondary/30 border border-border/50"
-            >
-              <Brain className="w-4 h-4 text-primary/60 shrink-0" />
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium truncate">{lora.name}</p>
-                {lora.trigger_word && (
-                  <p className="text-xs text-muted-foreground font-mono">trigger: {lora.trigger_word}</p>
-                )}
-              </div>
-              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium capitalize ${statusColor[lora.status]}`}>
-                {lora.status}
-              </span>
-              {lora.lora_url && (
-                <a
-                  href={lora.lora_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-primary hover:underline shrink-0"
-                >
-                  Download
-                </a>
-              )}
-              <button
-                onClick={() => deleteModel(lora.id)}
-                disabled={deleting === lora.id}
-                className="text-muted-foreground hover:text-destructive transition-colors shrink-0 disabled:opacity-50"
-              >
-                {deleting === lora.id
-                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  : <Trash2 className="w-3.5 h-3.5" />
-                }
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
 // ─── Content Engine Tab ──────────────────────────────────────────
 
 interface ByokKeyStatus {
@@ -566,7 +454,7 @@ function ContentEngineTab() {
 
 // ─── Main Page ────────────────────────────────────────────────────
 
-type Tab = 'profile' | 'api_keys' | 'models' | 'content_engine'
+type Tab = 'profile' | 'api_keys' | 'content_engine'
 
 export default function SettingsPage() {
   const { user } = useAuth()
@@ -588,7 +476,7 @@ export default function SettingsPage() {
       <div>
         <h1 className="text-2xl font-bold text-foreground">Settings</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Manage your profile, API keys, and models
+          Manage your profile and API keys
         </p>
       </div>
 
@@ -596,7 +484,6 @@ export default function SettingsPage() {
       <div className="flex flex-wrap gap-2">
         <TabButton active={tab === 'profile'} onClick={() => setTab('profile')} icon={User} label="Profile" />
         <TabButton active={tab === 'api_keys'} onClick={() => setTab('api_keys')} icon={Key} label="API Keys" />
-        <TabButton active={tab === 'models'} onClick={() => setTab('models')} icon={Brain} label="Models" />
         <TabButton active={tab === 'content_engine'} onClick={() => setTab('content_engine')} icon={Zap} label="Content Engine" />
       </div>
 
@@ -611,7 +498,6 @@ export default function SettingsPage() {
         <>
           {tab === 'profile' && <ProfileTab initialData={data.profile} />}
           {tab === 'api_keys' && <ApiKeysTab initialPresence={data.apiKeys} />}
-          {tab === 'models' && <ModelsTab />}
           {tab === 'content_engine' && <ContentEngineTab />}
         </>
       )}

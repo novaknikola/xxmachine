@@ -21,8 +21,8 @@ import { getTechnique, resolveExecutable } from './techniques'
 import { notifyReplicationDone, notifyReplicationFailed } from './notify'
 import type { CharacterLora, DiscoveryItemRow, TrackedProfileRow, VideoTechnique } from './types'
 
-/** Frames sampled per clip for technique detection. */
-const PROBE_FRAME_COUNT = 5
+/** Frames sampled per clip — denser sampling catches background gag beats. */
+const PROBE_FRAME_COUNT = 8
 
 export async function loadCharacter(characterId: string | null): Promise<CharacterLora | null> {
   if (!characterId) return null
@@ -211,9 +211,18 @@ export async function replicateDiscoveryItem(
       ? normalizeSceneSpec(item.scene_spec)
       : null
 
+    // Older specs lacked proportion_emphasis / background_people — regenerate those
+    // so body size and gag beats are not permanently stuck on the thin first pass.
+    const sceneSpecStale = Boolean(
+      sceneSpec && (
+        !sceneSpec.body.proportion_emphasis ||
+        !Array.isArray((item.scene_spec as { background_people?: unknown }).background_people)
+      ),
+    )
+
     // Step 1: structured scene capture (body/wardrobe/pose/hook/people/speech).
     // Falls back to the old single-frame prose prompt if the structured path fails.
-    if (!item.scene_prompt || !sceneSpec) {
+    if (!item.scene_prompt || !sceneSpec || sceneSpecStale) {
       await query(`UPDATE discovery_items SET replicate_status = 'analyzing' WHERE id = $1`, [itemId])
       try {
         if (!probe && item.video_url) {

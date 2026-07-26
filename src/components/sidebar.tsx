@@ -1,7 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { usePathname, useRouter } from 'next/navigation'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { useAuth } from '@/contexts/auth-context'
 import { cn } from '@/lib/utils'
 import {
@@ -18,6 +18,10 @@ import {
   Share2,
   RefreshCw,
   Telescope,
+  Database,
+  Sparkles,
+  Layers,
+  Captions,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -32,15 +36,26 @@ interface NavItem {
   children?: NavItem[]
 }
 
-// Six top-level sections. Variants, Discovery and Analytics are still separate
-// pages, so they sit under the section that will absorb them as tabs.
 const NAV_ITEMS: NavItem[] = [
-  { href: '/bulk', label: 'Image Studio', icon: ImageIcon, module: 'generator' },
+  {
+    href: '/bulk',
+    label: 'Image Studio',
+    icon: ImageIcon,
+    module: 'generator',
+    children: [
+      { href: '/bulk?tab=generate', label: 'Image Generate', icon: Sparkles },
+      { href: '/bulk?tab=dataset', label: 'Dataset', icon: Database },
+      { href: '/bulk?tab=train', label: 'Train LoRA', icon: Layers },
+      { href: '/bulk?tab=bulk', label: 'Bulk Generate', icon: ImageIcon },
+      { href: '/bulk?tab=carousel', label: 'Carousel', icon: ImageIcon },
+    ],
+  },
   {
     href: '/captions',
     label: 'Video Studio',
     icon: Clapperboard,
     children: [
+      { href: '/captions?tab=captions', label: 'Add Captions', icon: Captions },
       { href: '/repurpose', label: 'Variants', icon: RefreshCw },
     ],
   },
@@ -51,13 +66,29 @@ const NAV_ITEMS: NavItem[] = [
     module: 'socials',
     children: [
       { href: '/discovery', label: 'Discovery', icon: Telescope },
+      { href: '/discovery?tab=downloader', label: 'IG Downloader', icon: Telescope },
       { href: '/analytics', label: 'Analytics', icon: BarChart2 },
     ],
   },
-  { href: '/comfyui', label: 'Copy-Paste', icon: Copy },
+  { href: '/copy-paste', label: 'Copy-Paste', icon: Copy },
   { href: '/history', label: 'History', icon: History, module: 'history' },
   { href: '/settings', label: 'Settings', icon: Settings },
 ]
+
+function pathMatches(href: string, pathname: string, search: string) {
+  const [path, query] = href.split('?')
+  if (!pathname.startsWith(path)) return false
+  if (!query) {
+    // Parent links without query: active when on that path (including nested tabs).
+    return pathname === path || pathname.startsWith(path + '/')
+  }
+  const want = new URLSearchParams(query)
+  const have = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search)
+  for (const [k, v] of want.entries()) {
+    if (have.get(k) !== v) return false
+  }
+  return true
+}
 
 function NavLink({
   item,
@@ -94,33 +125,33 @@ const ADMIN_ITEMS = [
   { href: '/admin', label: 'Users', icon: Users },
 ]
 
-
 interface SidebarProps {
   onMobileClose?: () => void
 }
 
 export function Sidebar({ onMobileClose }: SidebarProps) {
   const pathname = usePathname()
+  const searchParams = useSearchParams()
+  const search = searchParams?.toString() ? `?${searchParams.toString()}` : ''
   const router = useRouter()
   const { user, logout } = useAuth()
   const [permissions, setPermissions] = useState<Record<string, boolean>>({})
 
-useEffect(() => {
-  if (!user || user.role === 'admin') return
+  useEffect(() => {
+    if (!user || user.role === 'admin') return
 
-  fetch(`/api/admin/permissions?userId=${user.id}`)
-    .then(res => (res.ok ? res.json() : null))
-    .then(data => {
-      const map: Record<string, boolean> = {}
+    fetch(`/api/admin/permissions?userId=${user.id}`)
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => {
+        const map: Record<string, boolean> = {}
+        for (const p of data?.permissions ?? []) {
+          map[p.module_name] = p.enabled
+        }
+        setPermissions(map)
+      })
+      .catch(() => {})
+  }, [user])
 
-      for (const p of data?.permissions ?? []) {
-        map[p.module_name] = p.enabled
-      }
-
-      setPermissions(map)
-    })
-    .catch(() => {})
-}, [user])
   function allowed(item: NavItem) {
     return user?.role === 'admin' || !item.module || permissions[item.module] !== false
   }
@@ -133,7 +164,6 @@ useEffect(() => {
 
   return (
     <aside className="flex flex-col w-60 min-h-screen bg-sidebar border-r border-sidebar-border">
-      {/* Logo */}
       <div className="flex items-center gap-3 px-5 py-5 border-b border-sidebar-border">
         <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary/15 border border-primary/25">
           <Zap className="w-4 h-4 text-primary" />
@@ -141,7 +171,6 @@ useEffect(() => {
         <span className="font-bold text-lg tracking-tight text-foreground">XXmachine</span>
       </div>
 
-      {/* Nav */}
       <nav className="flex-1 px-3 py-4 space-y-1">
         <p className="px-2 text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3">
           Tools
@@ -150,14 +179,15 @@ useEffect(() => {
           <div key={item.href} className="space-y-1">
             <NavLink
               item={item}
-              active={pathname.startsWith(item.href)}
+              active={pathMatches(item.href.split('?')[0], pathname, search) && !item.children?.some(c => pathMatches(c.href, pathname, search))}
               onNavigate={onMobileClose}
             />
             {item.children?.filter(allowed).map(child => (
               <NavLink
                 key={child.href}
                 item={child}
-                active={pathname.startsWith(child.href)}
+                active={pathMatches(child.href, pathname, search)
+                  || (child.href.startsWith('/bulk?tab=generate') && pathname.startsWith('/bulk') && !search.includes('tab='))}
                 nested
                 onNavigate={onMobileClose}
               />
@@ -196,7 +226,6 @@ useEffect(() => {
         )}
       </nav>
 
-      {/* User */}
       <div className="px-3 py-4 border-t border-sidebar-border">
         <div className="flex items-center gap-3 px-2 py-2 rounded-lg">
           <Avatar className="w-8 h-8 shrink-0">
