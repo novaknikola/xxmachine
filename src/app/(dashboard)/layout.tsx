@@ -1,6 +1,7 @@
 'use client'
 
 import { Suspense, useEffect, useMemo, useState } from 'react'
+import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { useAuth } from '@/contexts/auth-context'
 import { Sidebar } from '@/components/sidebar'
@@ -84,6 +85,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     }
   }, [loading, user, permissionLoading, allowed, router])
 
+  // Close mobile drawer after navigation (back/forward or link).
+  useEffect(() => {
+    setSidebarOpen(false)
+  }, [pathname])
+
   if (loading || permissionLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -95,30 +101,39 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   if (!user || !allowed) return null
 
   return (
-    <div className="flex h-screen overflow-hidden flex-col md:flex-row">
-      <div className="md:hidden flex items-center justify-between px-4 py-3 border-b border-white/10 bg-sidebar/60 backdrop-blur-xl">
-        <h1 className="font-display text-lg font-bold text-primary tracking-tight">XXmachine</h1>
+    <div className="flex h-dvh overflow-hidden flex-col md:flex-row">
+      <header className="md:hidden shrink-0 flex items-center justify-between gap-3 px-4 py-3 border-b border-border/60 bg-sidebar/80 backdrop-blur-xl pt-[max(0.75rem,env(safe-area-inset-top))]">
+        <Link
+          href="/"
+          className="font-display text-lg font-bold text-primary tracking-tight"
+          onClick={() => setSidebarOpen(false)}
+        >
+          XXmachine
+        </Link>
         <Button
           variant="ghost"
           size="icon"
-          className="w-9 h-9"
-          onClick={() => setSidebarOpen(!sidebarOpen)}
+          className="size-10"
+          onClick={() => setSidebarOpen(open => !open)}
+          aria-label={sidebarOpen ? 'Close menu' : 'Open menu'}
+          aria-expanded={sidebarOpen}
         >
           {sidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
         </Button>
-      </div>
+      </header>
 
       <>
         {sidebarOpen && (
           <div
-            className="md:hidden fixed inset-0 bg-black/50 z-40"
+            className="md:hidden fixed inset-0 bg-black/50 z-40 backdrop-blur-[1px]"
             onClick={() => setSidebarOpen(false)}
+            aria-hidden
           />
         )}
         <div
           className={`${
             sidebarOpen ? 'translate-x-0' : '-translate-x-full'
-          } md:translate-x-0 fixed md:static md:w-auto w-60 h-screen md:h-auto transition-transform duration-300 ease-out z-50 md:z-auto`}
+          } md:translate-x-0 fixed md:static top-0 left-0 z-50 md:z-auto w-64 h-dvh md:h-auto md:w-auto transition-transform duration-300 ease-out shadow-xl md:shadow-none`}
         >
           <Suspense fallback={null}>
             <Sidebar onMobileClose={() => setSidebarOpen(false)} />
@@ -126,7 +141,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </div>
       </>
 
-      <main className="flex-1 overflow-y-auto bg-background w-full">
+      <main className="flex-1 min-w-0 min-h-0 overflow-y-auto overscroll-contain bg-background w-full">
         {children}
       </main>
     </div>
