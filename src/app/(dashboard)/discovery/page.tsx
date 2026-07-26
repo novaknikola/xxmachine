@@ -389,7 +389,29 @@ function ViralFeedTab() {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
-      toast.success(`Scan complete: ${data.added} new posts${data.processed ? `, ${data.processed} replicated` : ''}`)
+
+      const listed = data.listed ?? data.scanned ?? 0
+      const source = data.source ? ` via ${data.source}` : ''
+      if (listed === 0) {
+        toast.warning(
+          `No reels found for this profile${source}. Apify may be over quota, or the account has no Reels tab items.`,
+        )
+      } else if (data.added === 0) {
+        const parts = [
+          data.skippedDuplicate ? `${data.skippedDuplicate} already saved` : null,
+          data.skippedAge ? `${data.skippedAge} too old` : null,
+          data.skippedScore ? `${data.skippedScore} below min score` : null,
+        ].filter(Boolean)
+        toast.message(
+          `Scan complete${source}: 0 new of ${listed} listed` +
+            (parts.length ? ` (${parts.join(', ')})` : ''),
+        )
+      } else {
+        toast.success(
+          `Scan complete${source}: ${data.added} new of ${listed} listed` +
+            (data.processed ? `, ${data.processed} replicated` : ''),
+        )
+      }
       fetchProfiles()
       if (viewTab === 'pending') fetchItems('pending')
     } catch (e) {

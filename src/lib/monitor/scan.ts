@@ -10,6 +10,11 @@ export interface ScanResult {
   added: number
   newItemIds: string[]
   scanned: number
+  /** Reels returned by the lister before age/score/duplicate filters. */
+  listed: number
+  skippedAge: number
+  skippedScore: number
+  skippedDuplicate: number
   /** Which lister produced the reels, so a silent Apify outage is visible. */
   source: 'apify' | 'rapidapi'
 }
@@ -39,6 +44,9 @@ export async function scanTrackedProfile(
   const cutoff = Date.now() - profile.max_age_days * 86_400_000
   const newItemIds: string[] = []
   let scanned = 0
+  let skippedAge = 0
+  let skippedScore = 0
+  let skippedDuplicate = 0
 
   const entries: { contentId: string; url: string; reel: ApifyReel; permalink: string }[] = []
   const seen = new Set<string>()
@@ -58,7 +66,10 @@ export async function scanTrackedProfile(
   for (const row of enriched) {
     scanned++
     const postedAt = row.postedAt ? new Date(row.postedAt) : new Date()
-    if (postedAt.getTime() < cutoff) continue
+    if (postedAt.getTime() < cutoff) {
+      skippedAge++
+      continue
+    }
 
     const score = calculateViralityScore({
       views: row.views,
@@ -67,7 +78,10 @@ export async function scanTrackedProfile(
       followers,
       postedAt,
     })
-    if (score < profile.min_score) continue
+    if (score < profile.min_score) {
+      skippedScore++
+      continue
+    }
 
     const inserted = await one<{ id: string }>(
       `INSERT INTO discovery_items
@@ -104,6 +118,8 @@ export async function scanTrackedProfile(
           [inserted.id],
         )
       }
+    } else {
+      skippedDuplicate++
     }
   }
 
@@ -114,7 +130,16 @@ export async function scanTrackedProfile(
     [profile.id, userId, newItemIds.length],
   )
 
-  return { added: newItemIds.length, newItemIds, scanned, source }
+  return {
+    added: newItemIds.length,
+    newItemIds,
+    scanned,
+    listed: apifyReels.length,
+    skippedAge,
+    skippedScore,
+    skippedDuplicate,
+    source,
+  }
 }
 
 async function enrichReels(

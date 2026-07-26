@@ -2,6 +2,20 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireUser } from '@/lib/session'
 import { query, rows, one } from '@/lib/db'
 
+/** Accepts @user, bare handle, or full instagram.com URL. */
+function normalizeIgUsername(raw: string): string {
+  let s = raw.trim()
+  try {
+    if (s.includes('instagram.com')) {
+      const u = new URL(s.startsWith('http') ? s : `https://${s}`)
+      s = u.pathname.split('/').filter(Boolean)[0] ?? ''
+    }
+  } catch {
+    /* keep raw */
+  }
+  return s.replace(/^@/, '').replace(/\/+$/, '').split('?')[0]?.trim() ?? ''
+}
+
 export async function GET(req: NextRequest) {
   const user = await requireUser(req)
   if (user instanceof NextResponse) return user
@@ -20,6 +34,9 @@ export async function POST(req: NextRequest) {
   const { platform, username, min_score, max_age_days, autopilot, autopilot_min_score, character_id } = await req.json()
   if (!platform || !username) return NextResponse.json({ error: 'platform and username required' }, { status: 400 })
 
+  const handle = normalizeIgUsername(String(username))
+  if (!handle) return NextResponse.json({ error: 'Invalid Instagram username' }, { status: 400 })
+
   const row = await one(
     `insert into tracked_profiles
        (user_id, platform, username, min_score, max_age_days, autopilot, autopilot_min_score, character_id)
@@ -32,7 +49,7 @@ export async function POST(req: NextRequest) {
            character_id = coalesce(excluded.character_id, tracked_profiles.character_id),
            status = 'ACTIVE'
      returning *`,
-    [user.id, platform, username.replace('@',''), min_score ?? 10, max_age_days ?? 14, autopilot ?? false, autopilot_min_score ?? 25, character_id ?? null],
+    [user.id, platform, handle, min_score ?? 10, max_age_days ?? 14, autopilot ?? false, autopilot_min_score ?? 25, character_id ?? null],
   )
   return NextResponse.json({ profile: row })
 }
