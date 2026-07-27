@@ -414,11 +414,26 @@ function BulkPageInner() {
     return carouselRefUrlsRef.current
   }
 
-  async function callSeedreamEdit(prompt: string, size: string, imageUrls: string[]): Promise<string[]> {
+  async function callSeedreamEdit(
+    prompt: string,
+    size: string,
+    imageUrls: string[],
+    meta?: { characterId?: string; characterName?: string },
+  ): Promise<string[]> {
     const res = await fetch('/api/edit-image', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, size, resolution: seedreamResolution, imageUrls }),
+      body: JSON.stringify({
+        prompt,
+        size,
+        resolution: seedreamResolution,
+        imageUrls,
+        saveHistory: true,
+        historyPrompt: prompt,
+        kind: 'seedream_edit',
+        characterId: meta?.characterId,
+        characterName: meta?.characterName,
+      }),
     })
     const data = await res.json()
     if (!res.ok || !data.urls?.length) throw new Error(data.error ?? 'Seedream edit failed')
@@ -524,7 +539,10 @@ function BulkPageInner() {
       let baseUrls: string[]
       if (refOnly) {
         const refUrls = await ensureCarouselRefUrls()
-        baseUrls = await callSeedreamEdit(generationPrompt, job.dimension, refUrls)
+        baseUrls = await callSeedreamEdit(generationPrompt, job.dimension, refUrls, {
+          characterId: job.characterId || undefined,
+          characterName: job.characterName,
+        })
       } else {
         const res = await fetch('/api/generate', {
           method: 'POST',
@@ -574,6 +592,10 @@ function BulkPageInner() {
             variantPrompt,
             job.dimension,
             [baseUrls[0], ...refUrls],
+            {
+              characterId: job.characterId || undefined,
+              characterName: job.characterName,
+            },
           )
           return editUrls[0]
         }))

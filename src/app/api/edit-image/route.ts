@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { editImage, type SeedreamResolution } from '@/lib/wavespeed'
 import { requireUser } from '@/lib/session'
+import { persistGeneration } from '@/lib/persist-generation'
 
 const UPLOAD_URL = 'https://api.wavespeed.ai/api/v3/media/upload/binary'
 const ALLOWED_MIME = new Set(['image/jpeg', 'image/png', 'image/webp'])
@@ -67,6 +68,39 @@ interface EditImageJsonBody {
   resolution?: SeedreamResolution
   imageUrls?: string[]
   imageUrl?: string
+  /** Persist outputs to Generation History (DB). Default false. */
+  saveHistory?: boolean
+  historyPrompt?: string
+  kind?: string
+  characterId?: string
+  characterName?: string
+}
+
+async function saveToHistory(opts: {
+  kind: string
+  prompt: string
+  dimension?: string
+  wavespeedUrls: string[]
+  userId: string
+  characterId?: string | null
+  characterName?: string | null
+}) {
+  if (!opts.wavespeedUrls.length) return
+  try {
+    await persistGeneration({
+      kind: opts.kind,
+      prompt: opts.prompt,
+      dimension: opts.dimension ?? null,
+      batch: opts.wavespeedUrls.length,
+      wavespeedUrls: opts.wavespeedUrls,
+      userId: opts.userId,
+      characterId: opts.characterId ?? null,
+      characterName: opts.characterName ?? null,
+    })
+  } catch (e) {
+    // History is best-effort: never fail the edit because of it.
+    console.error('[edit-image] history save failed:', e)
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -95,14 +129,27 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'Missing imageUrls' }, { status: 400 })
       }
 
+      const size = parseSize(body.size)
       const urls = await editImage({
         imageUrls,
         prompt,
-        size: parseSize(body.size),
+        size,
         resolution: parseResolution(body.resolution),
         apiKey,
         signal: abort,
       })
+
+      if (body.saveHistory && urls.length) {
+        await saveToHistory({
+          kind: body.kind?.trim() || 'seedream_edit',
+          prompt: (body.historyPrompt ?? prompt).trim() || prompt,
+          dimension: body.size ?? size ?? undefined,
+          wavespeedUrls: urls,
+          userId: auth.id,
+          characterId: body.characterId ?? null,
+          characterName: body.characterName ?? null,
+        })
+      }
 
       return NextResponse.json({ urls, inputUrl: imageUrls[0] })
     }
@@ -121,6 +168,9 @@ export async function POST(req: NextRequest) {
     const size = parseSize((form.get('size') as string | null) ?? undefined)
     const saveHistory = form.get('saveHistory') === 'true'
     const historyPrompt = (form.get('historyPrompt') as string | null) ?? prompt ?? ''
+    // Multipart callers are the Dataset / Edit and carousel tabs, which have
+    // always been filed under `wan_edit` in History.
+    const historyKind = (form.get('kind') as string | null)?.trim() || 'wan_edit'
     const resolution = parseResolution((form.get('resolution') as string | null)?.trim())
 
     if (!prompt) return NextResponse.json({ error: 'Missing prompt' }, { status: 400 })
@@ -165,18 +215,15 @@ export async function POST(req: NextRequest) {
     const urls = await editImage({ imageUrls, prompt, size, resolution, apiKey, signal: abort })
 
     if (saveHistory && urls.length) {
-      fetch(`${process.env.NEXT_PUBLIC_BASE_URL}/api/generations`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          kind: 'wan_edit',
-          prompt: historyPrompt,
-          dimension: size ?? '9:16',
-          batch: 1,
-          wavespeedUrls: urls,
-          userId: auth.id,
-        }),
-      }).catch(e => console.error('[edit-image] history save failed:', e))
+      await saveToHistory({
+        kind: historyKind,
+        prompt: historyPrompt,
+        dimension: size ?? '9:16',
+        wavespeedUrls: urls,
+        userId: auth.id,
+        characterId: (form.get('characterId') as string | null) || null,
+        characterName: (form.get('characterName') as string | null) || null,
+      })
     }
 
     return NextResponse.json({ urls, inputUrl: imageUrls[0] })

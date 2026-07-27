@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { requireUser } from '@/lib/session'
+import { persistGeneration } from '@/lib/persist-generation'
 
 const API_KEY = process.env.WAVESPEED_API_KEY!
 const HF_TOKEN = process.env.HF_TOKEN!
@@ -56,9 +58,12 @@ async function pollResult(requestId: string, signal?: AbortSignal): Promise<stri
 export async function POST(req: NextRequest) {
   const abort = AbortSignal.timeout(130_000)
   try {
+    const auth = await requireUser(req)
+    if (auth instanceof NextResponse) return auth
+
     if (!API_KEY) return NextResponse.json({ error: 'WAVESPEED_API_KEY is not configured' }, { status: 500 })
 
-    const { prompt, dimension, batch, loraUrl, loraScale, characterId, characterName, userId } = await req.json()
+    const { prompt, dimension, batch, loraUrl, loraScale, characterId, characterName } = await req.json()
 
     if (!prompt) return NextResponse.json({ error: 'Missing prompt' }, { status: 400 })
 
@@ -92,22 +97,22 @@ export async function POST(req: NextRequest) {
       allUrls.push(...urls)
     }
 
-    // Save to DB in background — don't block the response
+    // Persist to History (direct DB + storage — no self-HTTP to BASE_URL).
     if (allUrls.length) {
-      fetch(`${process.env.NEXT_PUBLIC_BASE_URL}/api/generations`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      try {
+        await persistGeneration({
           kind: 'text2img',
           characterId: characterId ?? null,
           characterName: characterName ?? null,
           prompt,
-          dimension,
+          dimension: dimension ?? null,
           batch: batch ?? 1,
           wavespeedUrls: allUrls,
-          userId: userId ?? null,
-        }),
-      }).catch(e => console.error('[generate] history save failed:', e))
+          userId: auth.id,
+        })
+      } catch (e) {
+        console.error('[generate] history persist failed:', e)
+      }
     }
 
     return NextResponse.json({ urls: allUrls })

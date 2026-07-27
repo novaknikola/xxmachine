@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
+import { Fragment, useState, useEffect, useMemo } from 'react'
 import { useAuth } from '@/contexts/auth-context'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -8,7 +8,14 @@ import { toast } from 'sonner'
 import {
   Download, Trash2, FolderDown, CheckSquare, Square,
   ImageIcon, Loader2, Filter, RefreshCw, CalendarDays,
+  ChevronDown, MoreHorizontal, Sparkles, Wand2, Layers,
+  Copy, Clapperboard, ListTodo, X,
 } from 'lucide-react'
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
+  DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { ScheduleModal } from '@/components/schedule-modal'
 
 interface GenerationRecord {
@@ -26,11 +33,13 @@ interface GenerationRecord {
   source?: string
 }
 
-type FilterKind = 'all' | 'text2img' | 'wan_edit' | 'replicate' | 'replicate_video' | 'queue'
+type FilterKind =
+  | 'all' | 'text2img' | 'seedream_edit' | 'wan_edit' | 'replicate' | 'replicate_video' | 'queue'
 
 const KIND_LABEL: Record<string, string> = {
   text2img: 'Image Generate',
   wan_edit: 'Dataset / Edit',
+  seedream_edit: 'Seedream Edit',
   replicate: 'Copy-Paste',
   replicate_video: 'Copy-Paste Video',
   queue: 'Queue',
@@ -40,6 +49,31 @@ const KIND_LABEL: Record<string, string> = {
   video_caption: 'Captions',
   monitor_multi_shot: 'Multi-shot',
 }
+
+const FILTER_GROUPS: {
+  label: string
+  items: { value: FilterKind; icon: typeof Sparkles }[]
+}[] = [
+  {
+    label: 'Studio',
+    items: [
+      { value: 'text2img', icon: Sparkles },
+      { value: 'seedream_edit', icon: Wand2 },
+      { value: 'wan_edit', icon: Layers },
+    ],
+  },
+  {
+    label: 'Copy-Paste',
+    items: [
+      { value: 'replicate', icon: Copy },
+      { value: 'replicate_video', icon: Clapperboard },
+    ],
+  },
+  {
+    label: 'Jobs',
+    items: [{ value: 'queue', icon: ListTodo }],
+  },
+]
 
 function groupByDate(records: GenerationRecord[]) {
   const map = new Map<string, GenerationRecord[]>()
@@ -180,42 +214,125 @@ export default function HistoryPage() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
-          {/* Filter */}
-          <div className="flex rounded-lg border border-border overflow-hidden text-xs">
-            {(['all', 'text2img', 'wan_edit', 'replicate', 'replicate_video', 'queue'] as FilterKind[]).map(k => (
-              <button key={k} onClick={() => setFilter(k)}
-                className={`px-3 py-1.5 font-medium transition-colors flex items-center gap-1 ${filter === k ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-secondary'}`}>
-                <Filter className="w-3 h-3" />
-                {k === 'all' ? 'All' : KIND_LABEL[k]}
+        <div className="flex items-center gap-2">
+          {/* Type filter — one trigger instead of a row of seven */}
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              className={`inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+                filter === 'all'
+                  ? 'border-border text-muted-foreground hover:bg-secondary hover:text-foreground'
+                  : 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15'
+              }`}
+            >
+              <Filter className="w-3 h-3" />
+              {filter === 'all' ? 'All types' : KIND_LABEL[filter]}
+              <ChevronDown className="w-3 h-3 opacity-60" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-auto min-w-48">
+              <DropdownMenuRadioGroup
+                value={filter}
+                onValueChange={value => setFilter(value as FilterKind)}
+              >
+                <DropdownMenuRadioItem value="all" className="text-xs">
+                  <Filter className="w-3.5 h-3.5 text-muted-foreground" />
+                  All types
+                </DropdownMenuRadioItem>
+                {FILTER_GROUPS.map(group => (
+                  <Fragment key={group.label}>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel className="text-[10px] uppercase tracking-wider">
+                      {group.label}
+                    </DropdownMenuLabel>
+                    {group.items.map(({ value, icon: Icon }) => (
+                      <DropdownMenuRadioItem key={value} value={value} className="text-xs">
+                        <Icon className="w-3.5 h-3.5 text-muted-foreground" />
+                        {KIND_LABEL[value]}
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </Fragment>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          {/* Selection takes over the bar only while something is picked */}
+          {selectedList.length > 0 ? (
+            <div className="flex items-center gap-1 h-8 rounded-lg border border-primary/40 bg-primary/10 pl-2.5 pr-1">
+              <span className="text-xs font-medium text-primary tabular-nums">
+                {selectedList.length} selected
+              </span>
+              <Button
+                size="sm"
+                className="h-6 text-xs gap-1.5 px-2"
+                disabled={zipping}
+                onClick={() => downloadZip(selectedList, `history_selected_${new Date().toISOString().slice(0, 10)}.zip`)}
+              >
+                {zipping ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+                Download
+              </Button>
+              <button
+                onClick={() => setSelected(new Set())}
+                className="size-6 rounded-md flex items-center justify-center text-primary/70 hover:text-primary hover:bg-primary/15 transition-colors"
+                title="Clear selection"
+              >
+                <X className="w-3.5 h-3.5" />
               </button>
-            ))}
-          </div>
-
-          <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5" onClick={() => load(true)}>
-            <RefreshCw className="w-3 h-3" />Refresh
-          </Button>
-
-          <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5"
-            onClick={() => selected.size === allUrls.length ? setSelected(new Set()) : setSelected(new Set(allUrls))}>
-            {selected.size === allUrls.length
-              ? <><Square className="w-3 h-3" />Deselect all</>
-              : <><CheckSquare className="w-3 h-3" />Select all</>}
-          </Button>
-
-          {selectedList.length > 0 && (
-            <Button size="sm" className="h-8 text-xs gap-1.5" disabled={zipping}
-              onClick={() => downloadZip(selectedList, `history_selected_${new Date().toISOString().slice(0, 10)}.zip`)}>
-              {zipping ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
-              Download {selectedList.length}
+            </div>
+          ) : (
+            <Button
+              variant="outline"
+              size="icon"
+              className="size-8"
+              onClick={() => load(true)}
+              disabled={loading}
+              title="Refresh"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
             </Button>
           )}
 
-          <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5" disabled={zipping || !allUrls.length}
-            onClick={() => downloadZip(allUrls, `history_all_${new Date().toISOString().slice(0, 10)}.zip`)}>
-            {zipping ? <Loader2 className="w-3 h-3 animate-spin" /> : <FolderDown className="w-3 h-3" />}
-            Download all
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              className="inline-flex size-8 items-center justify-center rounded-lg border border-border text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+              title="More actions"
+            >
+              <MoreHorizontal className="w-4 h-4" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-auto min-w-52">
+              <DropdownMenuItem
+                className="text-xs"
+                disabled={!allUrls.length}
+                onClick={() => setSelected(new Set(allUrls))}
+              >
+                <CheckSquare className="w-3.5 h-3.5" />
+                Select all loaded
+                <span className="ml-auto text-[10px] text-muted-foreground tabular-nums">
+                  {allUrls.length}
+                </span>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="text-xs"
+                disabled={!selected.size}
+                onClick={() => setSelected(new Set())}
+              >
+                <Square className="w-3.5 h-3.5" />
+                Clear selection
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                className="text-xs"
+                disabled={zipping || !allUrls.length}
+                onClick={() => downloadZip(allUrls, `history_all_${new Date().toISOString().slice(0, 10)}.zip`)}
+              >
+                <FolderDown className="w-3.5 h-3.5" />
+                Download all loaded
+              </DropdownMenuItem>
+              <DropdownMenuItem className="text-xs" disabled={loading} onClick={() => load(true)}>
+                <RefreshCw className="w-3.5 h-3.5" />
+                Refresh
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { rows, query } from '@/lib/db'
-import { uploadImagesFromUrls } from '@/lib/supabase-storage'
 import { requireUser } from '@/lib/session'
+import { persistGeneration } from '@/lib/persist-generation'
 
 interface SaveBody {
   kind: string
@@ -32,6 +32,9 @@ export interface HistoryRecord {
 // POST — save a generation, upload images to Storage, persist to DB
 export async function POST(req: NextRequest) {
   try {
+    const auth = await requireUser(req)
+    if (auth instanceof NextResponse) return auth
+
     const body = await req.json() as SaveBody
 
     if (!body.wavespeedUrls?.length) {
@@ -41,28 +44,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Missing prompt' }, { status: 400 })
     }
 
-    const genId = crypto.randomUUID()
-    const basePath = `${body.userId ?? 'anon'}/${genId}`
-    const permanentUrls = await uploadImagesFromUrls(body.wavespeedUrls, basePath)
+    const saved = await persistGeneration({
+      kind: body.kind ?? 'text2img',
+      characterId: body.characterId ?? null,
+      characterName: body.characterName ?? null,
+      prompt: body.prompt,
+      dimension: body.dimension ?? null,
+      batch: body.batch ?? 1,
+      wavespeedUrls: body.wavespeedUrls,
+      userId: auth.id,
+    })
 
-    await query(
-      `INSERT INTO generations
-        (id, kind, character_id, character_name, prompt, dimension, batch, image_urls, user_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [
-        genId,
-        body.kind ?? 'text2img',
-        body.characterId ?? null,
-        body.characterName ?? null,
-        body.prompt,
-        body.dimension ?? null,
-        body.batch ?? 1,
-        permanentUrls,
-        body.userId ?? null,
-      ],
-    )
-
-    return NextResponse.json({ ok: true, id: genId, imageUrls: permanentUrls })
+    return NextResponse.json({ ok: true, id: saved.id, imageUrls: saved.imageUrls })
   } catch (err) {
     console.error('[generations] save error:', err)
     return NextResponse.json({ error: err instanceof Error ? err.message : 'Unknown error' }, { status: 500 })
@@ -112,12 +105,14 @@ export async function GET(req: NextRequest) {
         user_id: string | null
         created_at: string
       }>(
-        `SELECT id, kind, character_id, character_name, prompt, dimension, batch,
-                image_urls, user_id, created_at
+        // Prompts are only rendered as a 2-line preview here, so they are
+        // truncated to keep a large page cheap to fetch.
+        `SELECT id, kind, character_id, character_name, LEFT(prompt, 400) AS prompt,
+                dimension, batch, image_urls, user_id, created_at
            FROM generations
           WHERE user_id = $1
           ORDER BY created_at DESC
-          LIMIT 500`,
+          LIMIT 3000`,
         [userId],
       ),
       rows<{
@@ -130,7 +125,8 @@ export async function GET(req: NextRequest) {
         discovered_at: string
         content_type: string | null
       }>(
-        `SELECT id, profile, scene_prompt, generated_image_url, generated_end_image_url,
+        `SELECT id, profile, LEFT(scene_prompt, 400) AS scene_prompt,
+                generated_image_url, generated_end_image_url,
                 kling_video_url, discovered_at, content_type
            FROM discovery_items
           WHERE user_id = $1
@@ -140,7 +136,7 @@ export async function GET(req: NextRequest) {
               OR kling_video_url IS NOT NULL
             )
           ORDER BY discovered_at DESC
-          LIMIT 300`,
+          LIMIT 1000`,
         [userId],
       ),
       rows<{
