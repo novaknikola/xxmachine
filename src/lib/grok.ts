@@ -19,7 +19,11 @@ interface GrokOptions {
   maxTokens?: number
   temperature?: number
   json?: boolean
+  /** Upper bound for a single call; a hung request must not pin the route forever. */
+  timeoutMs?: number
 }
+
+const DEFAULT_TIMEOUT_MS = 300_000
 
 export async function callGrok(opts: GrokOptions): Promise<string> {
   const key = process.env.XAI_API_KEY
@@ -37,14 +41,23 @@ export async function callGrok(opts: GrokOptions): Promise<string> {
   }
   if (opts.json) body.response_format = { type: 'json_object' }
 
-  const res = await fetch(GROK_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${key}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  })
+  let res: Response
+  try {
+    res = await fetch(GROK_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+    })
+  } catch (err) {
+    if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+      throw new Error('Grok request timed out')
+    }
+    throw err
+  }
 
   const data = await res.json()
   if (!res.ok) throw new Error(data?.error?.message ?? `Grok error (${res.status})`)

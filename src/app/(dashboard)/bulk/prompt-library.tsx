@@ -652,12 +652,87 @@ export function resolveBundle(bundle: InstagramBundle): string[] {
   return out
 }
 
+const VARIETY_BATCH = 18
+/** Grok spends 35-60s of reasoning per batch, so allow plenty of headroom before giving up. */
+const VARIETY_TIMEOUT_MS = 180_000
+const VARIETY_MAX_PARALLEL = 3
+const VARIETY_MAX_WAVES = 3
+
+/** Reports unique prompts collected so far so callers can show real progress. */
+export type VarietyProgress = (done: number, total: number) => void
+
+async function requestVariants(examples: string[], count: number, hint?: string): Promise<string[]> {
+  let res: Response
+  try {
+    res = await fetch('/api/grok/generate-prompt-variants', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(hint ? { examples, count, hint } : { examples, count }),
+      signal: AbortSignal.timeout(VARIETY_TIMEOUT_MS),
+    })
+  } catch {
+    throw new Error('Prompt generation timed out — try again')
+  }
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error ?? 'Generation failed')
+  return (data.prompts ?? []) as string[]
+}
+
+/**
+ * Collects `count` unique fresh prompts from Grok, seeded by `pool`.
+ *
+ * Each batch costs 35-60s, so waves run concurrently rather than one call at a
+ * time — a 40-prompt feed lands in roughly one batch duration instead of three.
+ * A wave only fails the run when every request in it failed.
+ */
+async function collectVariants(
+  pool: string[],
+  count: number,
+  hint?: string,
+  onProgress?: VarietyProgress,
+): Promise<string[]> {
+  const collected: string[] = []
+  const seen = new Set<string>()
+  onProgress?.(0, count)
+
+  for (let wave = 0; wave < VARIETY_MAX_WAVES && collected.length < count; wave++) {
+    const missing = count - collected.length
+    const parallel = Math.max(1, Math.min(VARIETY_MAX_PARALLEL, Math.ceil(missing / VARIETY_BATCH)))
+    const results = await Promise.allSettled(
+      Array.from({ length: parallel }, () =>
+        requestVariants(sampleExamples(pool, 8), VARIETY_BATCH, hint),
+      ),
+    )
+
+    for (const result of results) {
+      if (result.status !== 'fulfilled') continue
+      for (const raw of result.value) {
+        const p = String(raw).trim()
+        const key = p.toLowerCase()
+        if (!p || seen.has(key)) continue
+        seen.add(key)
+        collected.push(p)
+      }
+    }
+    onProgress?.(Math.min(collected.length, count), count)
+
+    const firstFailure = results.find(r => r.status === 'rejected')
+    if (firstFailure?.status === 'rejected' && !collected.length) {
+      throw firstFailure.reason instanceof Error ? firstFailure.reason : new Error('Generation failed')
+    }
+  }
+
+  return collected.slice(0, count)
+}
+
 /**
  * Generates a fresh variety feed via Grok, seeded from the bundle's reference themes'
- * prompts. Batches requests to the generate-prompt-variants endpoint (which caps at 20
- * per call) and dedupes across batches until `count` unique prompts are collected.
+ * prompts, deduped across batches until `count` unique prompts are collected.
  */
-export async function generateAiVariety(bundle: InstagramBundle): Promise<string[]> {
+export async function generateAiVariety(
+  bundle: InstagramBundle,
+  onProgress?: VarietyProgress,
+): Promise<string[]> {
   if (!bundle.aiVariety) return []
   const { referenceThemes, count } = bundle.aiVariety
 
@@ -668,69 +743,23 @@ export async function generateAiVariety(bundle: InstagramBundle): Promise<string
   }
   if (!pool.length) return []
 
-  const collected: string[] = []
-  const seen = new Set<string>()
-  const BATCH = 18
-  const maxAttempts = Math.ceil(count / 10) + 4
-  let attempts = 0
-
-  while (collected.length < count && attempts < maxAttempts) {
-    attempts++
-    const examples = sampleExamples(pool, 8)
-    const res = await fetch('/api/grok/generate-prompt-variants', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ examples, count: BATCH }),
-    })
-    const data = await res.json()
-    if (!res.ok) throw new Error(data.error ?? 'Generation failed')
-    for (const raw of (data.prompts ?? []) as string[]) {
-      const p = String(raw).trim()
-      const key = p.toLowerCase()
-      if (!p || seen.has(key)) continue
-      seen.add(key)
-      collected.push(p)
-      if (collected.length >= count) break
-    }
-  }
-  return collected
+  return collectVariants(pool, count, undefined, onProgress)
 }
 
-export async function generateNicheAiVariety(nicheId: string, count = 40): Promise<string[]> {
+export async function generateNicheAiVariety(
+  nicheId: string,
+  count = 40,
+  onProgress?: VarietyProgress,
+): Promise<string[]> {
   const niche = NICHE_DEFINITIONS.find(n => n.id === nicheId)
   if (!niche?.prompts.length) return []
 
-  const pool = [...niche.prompts]
-  const collected: string[] = []
-  const seen = new Set<string>()
-  const BATCH = 18
-  const maxAttempts = Math.ceil(count / 10) + 4
-  let attempts = 0
-
-  while (collected.length < count && attempts < maxAttempts) {
-    attempts++
-    const examples = sampleExamples(pool, 8)
-    const res = await fetch('/api/grok/generate-prompt-variants', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        examples,
-        count: BATCH,
-        hint: `Same niche persona as examples: ${niche.label}. ${niche.description}`,
-      }),
-    })
-    const data = await res.json()
-    if (!res.ok) throw new Error(data.error ?? 'Generation failed')
-    for (const raw of (data.prompts ?? []) as string[]) {
-      const p = String(raw).trim()
-      const key = p.toLowerCase()
-      if (!p || seen.has(key)) continue
-      seen.add(key)
-      collected.push(p)
-      if (collected.length >= count) break
-    }
-  }
-  return collected
+  return collectVariants(
+    [...niche.prompts],
+    count,
+    `Same niche persona as examples: ${niche.label}. ${niche.description}`,
+    onProgress,
+  )
 }
 
 export function InstagramBundleDialog({
@@ -744,12 +773,16 @@ export function InstagramBundleDialog({
 }) {
   const [replace, setReplace] = useState(true)
   const [generatingLabel, setGeneratingLabel] = useState<string | null>(null)
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const [nicheSearch, setNicheSearch] = useState('')
+
+  const trackProgress: VarietyProgress = (done, total) => setProgress({ done, total })
+  const progressLabel = progress ? `${progress.done}/${progress.total}` : null
 
   async function handleNicheAi(nicheId: string, label: string) {
     setGeneratingLabel(`${label} AI`)
     try {
-      const prompts = await generateNicheAiVariety(nicheId, 40)
+      const prompts = await generateNicheAiVariety(nicheId, 40, trackProgress)
       if (!prompts.length) { toast.error('No prompts generated — try again'); return }
       onApply(prompts, replace)
       void savePromptsToLibrary(prompts, `${label} (AI)`, 'grok-generated', nicheAiLibraryTags(nicheId))
@@ -759,6 +792,7 @@ export function InstagramBundleDialog({
       toast.error(err instanceof Error ? err.message : 'Generation failed')
     } finally {
       setGeneratingLabel(null)
+      setProgress(null)
     }
   }
 
@@ -780,7 +814,7 @@ export function InstagramBundleDialog({
     if (bundle.aiVariety) {
       setGeneratingLabel(bundle.label)
       try {
-        const prompts = await generateAiVariety(bundle)
+        const prompts = await generateAiVariety(bundle, trackProgress)
         if (!prompts.length) { toast.error('No prompts generated — try again'); return }
         onApply(prompts, replace)
         void savePromptsToLibrary(prompts, bundle.label, 'grok-generated')
@@ -790,6 +824,7 @@ export function InstagramBundleDialog({
         toast.error(err instanceof Error ? err.message : 'Generation failed')
       } finally {
         setGeneratingLabel(null)
+        setProgress(null)
       }
     }
   }
@@ -802,6 +837,12 @@ export function InstagramBundleDialog({
           <p className="text-xs text-muted-foreground">
             Curated sets apply instantly; Static Full Feeds are fixed; AI feeds generate fresh prompts — all saved to the tag library.
           </p>
+          {generatingLabel && (
+            <p className="text-xs text-primary mt-1.5">
+              Writing fresh prompts for {generatingLabel}
+              {progressLabel ? ` — ${progressLabel} ready` : ''}. Grok takes about a minute; keep this tab open.
+            </p>
+          )}
         </DialogHeader>
         <div className="px-5 pb-3 shrink-0">
           <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
@@ -854,7 +895,10 @@ export function InstagramBundleDialog({
                       </Button>
                       <Button size="sm" variant="outline" disabled={anyBusy} onClick={() => niche?.id && handleNicheAi(niche.id, niche.label)}>
                         {aiBusy
-                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ? <>
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              {progressLabel && <span className="ml-1 tabular-nums">{progressLabel}</span>}
+                            </>
                           : <><Sparkles className="w-3.5 h-3.5 mr-1" />AI</>}
                       </Button>
                     </div>
@@ -894,7 +938,10 @@ export function InstagramBundleDialog({
                 </div>
                 <Button size="sm" className="shrink-0" disabled={anyBusy} onClick={() => handleApply(bundle)}>
                   {busy
-                    ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Generating</>
+                    ? <>
+                        <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                        <span className="tabular-nums">{progressLabel ?? 'Generating'}</span>
+                      </>
                     : isAi
                       ? <><Sparkles className="w-3.5 h-3.5 mr-1.5" />Generate</>
                       : <><Plus className="w-3.5 h-3.5 mr-1.5" />Apply</>}

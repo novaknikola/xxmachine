@@ -23,9 +23,15 @@ Return ONLY a JSON object: {"prompts": ["...", "...", ...]} with exactly ${count
     maxTokens: 4096,
     temperature: 1.0,
     json: true,
+    timeoutMs: 170_000,
   })
 
-  const parsed = JSON.parse(raw) as { prompts?: unknown }
+  let parsed: { prompts?: unknown }
+  try {
+    parsed = JSON.parse(raw) as { prompts?: unknown }
+  } catch {
+    throw new Error('Grok returned an incomplete response — try again')
+  }
   if (!Array.isArray(parsed.prompts)) throw new Error('Invalid response: missing prompts array')
   return parsed.prompts.map(p => String(p).trim()).filter(Boolean)
 }
