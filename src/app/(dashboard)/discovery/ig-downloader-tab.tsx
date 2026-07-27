@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { toast } from 'sonner'
 import {
   Download, FolderDown, Loader2, Search, AtSign, Eye, Heart, MessageCircle, CheckCircle2, AlertTriangle, History, RefreshCw,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, Copy,
 } from 'lucide-react'
 import type { BulkReelItem } from '@/app/api/instagram/bulk-reels/route'
 
@@ -43,6 +43,8 @@ export function IgDownloaderTab() {
   const [skipped, setSkipped] = useState<{ permalink: string; reason: string }[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [downloadingId, setDownloadingId] = useState<string | null>(null)
+  const [copyingId, setCopyingId] = useState<string | null>(null)
+  const [enqueueing, setEnqueueing] = useState(false)
   const [zipping, setZipping] = useState(false)
   const [history, setHistory] = useState<ScrapedProfile[]>([])
   const [fromCache, setFromCache] = useState(false)
@@ -64,7 +66,11 @@ export function IgDownloaderTab() {
     return () => clearTimeout(t)
   }, [loadHistory])
 
-  async function fetchReels(force = false, usernameOverride?: string) {
+  async function fetchReels(
+    force = false,
+    usernameOverride?: string,
+    opts?: { cacheOnly?: boolean },
+  ) {
     const clean = (usernameOverride ?? username).trim().replace(/^@/, '')
     if (!clean) { toast.error('Enter an Instagram username'); return }
 
@@ -76,7 +82,12 @@ export function IgDownloaderTab() {
       const res = await fetch('/api/instagram/bulk-reels', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: clean, amount, force }),
+        body: JSON.stringify({
+          username: clean,
+          amount,
+          force,
+          cacheOnly: Boolean(opts?.cacheOnly),
+        }),
       })
       const data = await res.json()
       setSkipped(data.skipped ?? [])
@@ -90,10 +101,10 @@ export function IgDownloaderTab() {
       setFromCache(Boolean(data.fromCache))
       setScannedAt(data.scannedAt ?? null)
       toast.success(data.fromCache
-        ? `${data.reels.length} reels for @${cleanUsername} (cached)`
+        ? `${data.reels.length} reels for @${cleanUsername} (cached — no API credit used)`
         : `${data.reels.length} reels found for @${cleanUsername}`)
       if (data.skipped?.length) toast.warning(`${data.skipped.length} reels skipped — see the list below`)
-      loadHistory()
+      if (!opts?.cacheOnly) loadHistory()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Fetch failed')
     } finally {
@@ -101,9 +112,10 @@ export function IgDownloaderTab() {
     }
   }
 
+  /** History View — DB only, never Apify/RapidAPI. */
   function pickHistoryProfile(u: string) {
     setUsername(u)
-    fetchReels(false, u)
+    fetchReels(false, u, { cacheOnly: true })
   }
 
   /** Re-resolves a dead/expired video link for one reel via RapidAPI, returns a fresh URL. */
@@ -186,6 +198,78 @@ export function IgDownloaderTab() {
       toast.success(failed ? `ZIP downloaded (${failed} failed)` : 'ZIP downloaded')
     } finally {
       setZipping(false)
+    }
+  }
+
+  async function enqueueCopyPaste(targets: BulkReelItem[]) {
+    const clean = username.trim().replace(/^@/, '')
+    if (!clean) { toast.error('Username missing'); return }
+    if (!targets.length) { toast.error('Select at least one reel'); return }
+
+    const res = await fetch('/api/monitor/enqueue', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: clean,
+        reels: targets.map(r => ({
+          id: r.id,
+          permalink: r.permalink,
+          videoUrl: r.videoUrl,
+          thumbnailUrl: r.thumbnailUrl,
+          views: r.views,
+          likes: r.likes,
+          comments: r.comments,
+          postedAt: r.postedAt,
+        })),
+      }),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error ?? 'Failed to enqueue')
+
+    const n = (data.added ?? 0) + (data.refreshed ?? 0)
+    toast.success(
+      n === 1
+        ? 'Sent 1 reel to Copy-Paste — classifying…'
+        : `Sent ${n} reels to Copy-Paste — classifying…`,
+      {
+        action: {
+          label: 'Open Studio',
+          onClick: () => { window.location.href = '/copy-paste' },
+        },
+      },
+    )
+    if (!data.hasCharacter) {
+      toast.warning(
+        data.profileTracked
+          ? `Bind a character to @${clean} in Discovery before Replicate`
+          : `Add @${clean} as a tracked profile with a character in Discovery before Replicate`,
+      )
+    }
+    if (data.skippedBusy) {
+      toast.message(`${data.skippedBusy} already generating — left untouched`)
+    }
+  }
+
+  async function copyPasteOne(reel: BulkReelItem) {
+    setCopyingId(reel.id)
+    try {
+      await enqueueCopyPaste([reel])
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Copy-Paste enqueue failed')
+    } finally {
+      setCopyingId(null)
+    }
+  }
+
+  async function copyPasteSelected() {
+    const targets = reels.filter(r => selected.has(r.id))
+    setEnqueueing(true)
+    try {
+      await enqueueCopyPaste(targets)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Copy-Paste enqueue failed')
+    } finally {
+      setEnqueueing(false)
     }
   }
 
@@ -308,6 +392,16 @@ export function IgDownloaderTab() {
                   {zipping ? <Loader2 className="w-3 h-3 mr-1.5 animate-spin" /> : <FolderDown className="w-3 h-3 mr-1.5" />}
                   ZIP ({selected.size})
                 </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="h-7 text-xs"
+                  disabled={enqueueing || selected.size === 0}
+                  onClick={copyPasteSelected}
+                >
+                  {enqueueing ? <Loader2 className="w-3 h-3 mr-1.5 animate-spin" /> : <Copy className="w-3 h-3 mr-1.5" />}
+                  Copy-Paste ({selected.size})
+                </Button>
               </div>
             </div>
           </CardHeader>
@@ -343,14 +437,24 @@ export function IgDownloaderTab() {
                         <span className="flex items-center gap-0.5"><MessageCircle className="w-2.5 h-2.5" />{formatCount(reel.comments)}</span>
                       </div>
                     </div>
-                    <button
-                      onClick={e => { e.stopPropagation(); downloadOne(reel) }}
-                      disabled={downloadingId === reel.id}
-                      className="absolute top-1.5 left-1.5 w-6 h-6 rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
-                      title="Download"
-                    >
-                      {downloadingId === reel.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
-                    </button>
+                    <div className="absolute top-1.5 left-1.5 flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button
+                        onClick={e => { e.stopPropagation(); downloadOne(reel) }}
+                        disabled={downloadingId === reel.id}
+                        className="w-7 h-7 rounded-full bg-black/60 text-white flex items-center justify-center hover:bg-black/80"
+                        title="Download"
+                      >
+                        {downloadingId === reel.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                      </button>
+                      <button
+                        onClick={e => { e.stopPropagation(); copyPasteOne(reel) }}
+                        disabled={copyingId === reel.id || enqueueing}
+                        className="w-7 h-7 rounded-full bg-primary/90 text-primary-foreground flex items-center justify-center hover:bg-primary"
+                        title="Send to Copy-Paste"
+                      >
+                        {copyingId === reel.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Copy className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
                   </div>
                 )
               })}

@@ -603,6 +603,29 @@ function CharacterForm({ form, onChange }: { form: Partial<Character>; onChange:
         <Textarea value={form.basePromptStyle ?? ''} onChange={e => onChange({ ...form, basePromptStyle: e.target.value })} rows={3} className="bg-input border-border text-xs resize-none" />
       </div>
       <div className="space-y-1.5">
+        <Label className="text-xs text-muted-foreground">
+          Seedream face refs (Copy-Paste)
+        </Label>
+        <Textarea
+          value={(form.faceRefUrls ?? []).join('\n')}
+          onChange={e =>
+            onChange({
+              ...form,
+              faceRefUrls: e.target.value
+                .split(/[\n,]+/)
+                .map(s => s.trim())
+                .filter(Boolean),
+            })
+          }
+          rows={3}
+          className="bg-input border-border text-xs resize-none font-mono"
+          placeholder={'https://…/face1.jpg\nhttps://…/face2.png\n(close-ups of her face — used with Seedream Edit)'}
+        />
+        <p className="text-[11px] text-muted-foreground">
+          Public image URLs, one per line. Source reel thumbnail stays the layout ref; these lock identity.
+        </p>
+      </div>
+      <div className="space-y-1.5">
         <Label className="text-xs text-muted-foreground">Character Story</Label>
         <Textarea value={form.story ?? ''} onChange={e => onChange({ ...form, story: e.target.value })} rows={4} className="bg-input border-border text-xs resize-none" />
       </div>
@@ -654,6 +677,7 @@ async function addCharacter() {
       defaultMode: newForm.defaultMode ?? 'SFW',
       recommendedNicheId: newForm.recommendedNicheId,
       hairLock: newForm.hairLock ?? '',
+      faceRefUrls: newForm.faceRefUrls ?? [],
     }),
   })
 
@@ -663,7 +687,7 @@ async function addCharacter() {
   }
 
   setAdding(false)
-  setNewForm({ name: '', loraUrl: '', loraScale: 0.8, triggerWord: '', basePromptStyle: '', story: '', startDate: '', defaultMode: 'SFW', recommendedNicheId: undefined, hairLock: '' })
+  setNewForm({ name: '', loraUrl: '', loraScale: 0.8, triggerWord: '', basePromptStyle: '', story: '', startDate: '', defaultMode: 'SFW', recommendedNicheId: undefined, hairLock: '', faceRefUrls: [] })
   await refresh()
   toast.success('Character added')
 }

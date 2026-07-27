@@ -1,5 +1,9 @@
 import { one, query, rows } from '@/lib/db'
-import { analyzeVideoContent, classifyContentImage } from './classify'
+import {
+  analyzeVideoContent,
+  classifyContentImage,
+  techniqueContextFromSceneSpec,
+} from './classify'
 import {
   extractKeyframePrompts,
   extractMotionPrompt,
@@ -23,7 +27,9 @@ import {
   renderScenePrompt,
   type SceneSpec,
 } from './scene-spec'
+import { muxSourceAudioOntoVideo } from './mux-audio'
 import { enqueueMultiShotJob } from './multi-shot'
+import { normalizeSoundMode, type SoundMode } from './cost-estimate'
 import { getTechnique, resolveExecutable } from './techniques'
 import { notifyReplicationDone, notifyReplicationFailed } from './notify'
 import type {
@@ -41,7 +47,8 @@ export async function loadCharacter(characterId: string | null): Promise<Charact
   if (!characterId) return null
   return one<CharacterLora>(
     `SELECT id, name, lora_url, COALESCE(lora_scale, 0.8)::float AS lora_scale,
-            trigger_word, base_prompt_style
+            trigger_word, base_prompt_style,
+            COALESCE(face_ref_urls, '{}') AS face_ref_urls
        FROM characters WHERE id = $1`,
     [characterId],
   )
@@ -103,7 +110,23 @@ export async function classifyDiscoveryItem(itemId: string, userId: string) {
       return { ...result, video_technique: null as VideoTechnique | null }
     }
 
-    const analysis = await analyzeVideoContent(probe)
+    // Full analysis first (timeline + optional ASR), then technique with that context.
+    let sceneSpec: SceneSpec | null = null
+    let scenePrompt: string | null = null
+    try {
+      sceneSpec = await extractSceneSpec(probe, item.video_url)
+      scenePrompt = renderScenePrompt(sceneSpec)
+    } catch (err) {
+      console.warn(
+        '[monitor/classify] scene_spec failed, technique-only:',
+        err instanceof Error ? err.message : err,
+      )
+    }
+
+    const analysis = await analyzeVideoContent(
+      probe,
+      sceneSpec ? techniqueContextFromSceneSpec(sceneSpec) : null,
+    )
     const spec = getTechnique(analysis.video_technique)
 
     // multi_shot is executable via the queue (shared keyframe + stitch), even though
@@ -120,8 +143,10 @@ export async function classifyDiscoveryItem(itemId: string, userId: string) {
           SET content_type = $2, category = $2,
               video_technique = $3, technique_confidence = $4, technique_reasoning = $5,
               source_duration = $6, source_cut_count = $7,
-              replicate_status = $8,
-              replicate_error = $9
+              scene_spec = COALESCE($8::jsonb, scene_spec),
+              scene_prompt = COALESCE($9, scene_prompt),
+              replicate_status = $10,
+              replicate_error = $11
         WHERE id = $1`,
       [
         itemId,
@@ -131,6 +156,8 @@ export async function classifyDiscoveryItem(itemId: string, userId: string) {
         analysis.reasoning,
         probe.duration,
         probe.cutCount,
+        sceneSpec ? JSON.stringify(sceneSpec) : null,
+        scenePrompt,
         status,
         status === 'needs_review' ? spec.reviewReason ?? null : null,
       ],
@@ -162,6 +189,8 @@ export interface ReplicateOptions {
   seedreamResolution?: '1k' | '2k'
   /** Video backend — default auto (by technique). */
   videoBackend?: VideoBackend
+  /** Post-video audio: silent | mux source | Seedance native (fish = silent for now). */
+  soundMode?: SoundMode
 }
 
 export async function replicateDiscoveryItem(
@@ -186,6 +215,7 @@ export async function replicateDiscoveryItem(
 
   const imageModel = normalizeImageModel(options?.imageModel ?? item.image_model)
   const videoBackendChoice = normalizeVideoBackend(options?.videoBackend)
+  const soundMode = normalizeSoundMode(options?.soundMode)
   const character = characterOverride ?? await loadCharacter(profile?.character_id ?? null)
   if (!character) {
     throw new Error('No character bound to this profile — set character in Discovery')
@@ -193,8 +223,13 @@ export async function replicateDiscoveryItem(
   if (imageModel === 'z_image' && !character.lora_url) {
     throw new Error('Z-Image needs a character with LoRA — bind one in Discovery, or switch to Seedream Edit')
   }
-  if (imageModel === 'seedream_edit' && !item.thumbnail_url) {
-    throw new Error('Seedream Edit needs a source thumbnail on the discovery item')
+  if (imageModel === 'seedream_edit') {
+    const faceRefs = (character.face_ref_urls ?? []).map(u => u.trim()).filter(Boolean)
+    if (!faceRefs.length) {
+      throw new Error(
+        'Seedream Edit needs character face reference photos — upload them on the character / Copy-Paste refs',
+      )
+    }
   }
 
   const contentType = item.content_type ?? 'video_gen'
@@ -216,7 +251,11 @@ export async function replicateDiscoveryItem(
     : resolveExecutable(item.video_technique, Boolean(item.video_url))
   const technique = resolved.technique
   const fellBack = resolved.fellBack
-  const videoPlan = resolveVideoBackend(videoBackendChoice, technique)
+  const videoPlan = resolveVideoBackend(
+    videoBackendChoice,
+    technique,
+    item.scene_spec,
+  )
   const useMultiShot = Boolean(detectedMultiShot && videoPlan.useMultiShotQueue)
   // Prompt / image steps for multi_shot reuse the motion_transfer requirements.
   const spec = getTechnique(useMultiShot ? 'motion_transfer' : technique)
@@ -240,18 +279,29 @@ export async function replicateDiscoveryItem(
       ? normalizeSceneSpec(item.scene_spec)
       : null
 
-    // Older specs lacked proportion_emphasis / background_people — regenerate those
-    // so body size and gag beats are not permanently stuck on the thin first pass.
+    // Older specs lacked body emphasis / cast / captions / spatial layout — regenerate
+    // so we get the director-style prompt (E2E quality) instead of a thin first pass.
+    const rawSpec = item.scene_spec as Record<string, unknown> | null
+    const framingRaw = (rawSpec?.framing && typeof rawSpec.framing === 'object'
+      ? rawSpec.framing
+      : null) as Record<string, unknown> | null
+    const hasSpatial =
+      typeof framingRaw?.subject_placement === 'string' &&
+      framingRaw.subject_placement.trim().length > 0 &&
+      typeof framingRaw?.body_layout === 'string' &&
+      framingRaw.body_layout.trim().length > 0
     const sceneSpecStale = Boolean(
       sceneSpec && (
         !sceneSpec.body.proportion_emphasis ||
-        !Array.isArray((item.scene_spec as { background_people?: unknown }).background_people)
+        !Array.isArray(rawSpec?.background_people) ||
+        typeof rawSpec?.on_screen_text !== 'string' ||
+        !hasSpatial
       ),
     )
 
     // Step 1: structured scene capture (body/wardrobe/pose/hook/people/speech).
-    // Falls back to the old single-frame prose prompt if the structured path fails.
-    if (!item.scene_prompt || !sceneSpec || sceneSpecStale) {
+    // Never overwrite a non-empty scene_prompt (user may have edited it in Details).
+    if (!sceneSpec || sceneSpecStale) {
       await query(`UPDATE discovery_items SET replicate_status = 'analyzing' WHERE id = $1`, [itemId])
       try {
         if (!probe && item.video_url) {
@@ -259,12 +309,19 @@ export async function replicateDiscoveryItem(
         }
         if (probe) {
           sceneSpec = await extractSceneSpec(probe, item.video_url)
-          const scenePrompt = renderScenePrompt(sceneSpec)
-          await query(
-            `UPDATE discovery_items SET scene_spec = $2::jsonb, scene_prompt = $3 WHERE id = $1`,
-            [itemId, JSON.stringify(sceneSpec), scenePrompt],
-          )
-          item.scene_prompt = scenePrompt
+          const rendered = renderScenePrompt(sceneSpec)
+          if (item.scene_prompt?.trim()) {
+            await query(
+              `UPDATE discovery_items SET scene_spec = $2::jsonb WHERE id = $1`,
+              [itemId, JSON.stringify(sceneSpec)],
+            )
+          } else {
+            await query(
+              `UPDATE discovery_items SET scene_spec = $2::jsonb, scene_prompt = $3 WHERE id = $1`,
+              [itemId, JSON.stringify(sceneSpec), rendered],
+            )
+            item.scene_prompt = rendered
+          }
           item.scene_spec = sceneSpec as unknown as Record<string, unknown>
         }
       } catch (err) {
@@ -273,6 +330,13 @@ export async function replicateDiscoveryItem(
           err instanceof Error ? err.message : err,
         )
       }
+    } else if (!item.scene_prompt?.trim() && sceneSpec) {
+      const rendered = renderScenePrompt(sceneSpec)
+      await query(
+        `UPDATE discovery_items SET scene_prompt = $2 WHERE id = $1`,
+        [itemId, rendered],
+      )
+      item.scene_prompt = rendered
     }
 
     // Step 1b: keyframe end-state for FLF2V, or legacy prose if structured failed.
@@ -323,15 +387,18 @@ export async function replicateDiscoveryItem(
       }
     }
 
-    // Step 3: character keyframes (Z-Image+LoRA or Seedream Edit from source thumb).
-    const seedreamRef = item.thumbnail_url
+    // Step 3: character keyframes (Z-Image+LoRA or Seedream Edit).
+    // Seedream: character face_ref_urls only + scene prompt (no source reel frame).
     const char = character
     async function makeKeyframe(scenePrompt: string): Promise<string> {
       if (imageModel === 'seedream_edit') {
-        if (!seedreamRef) throw new Error('Seedream Edit needs a source thumbnail')
+        const faceRefs = (char.face_ref_urls ?? []).map(u => u.trim()).filter(Boolean)
+        if (!faceRefs.length) {
+          throw new Error('Seedream Edit needs character face reference photos')
+        }
         return generateReplicaImageSeedream({
           scenePrompt,
-          referenceImageUrls: [seedreamRef],
+          referenceImageUrls: faceRefs.slice(0, 10),
           triggerWord: char.trigger_word,
           basePromptStyle: char.base_prompt_style,
           resolution: options?.seedreamResolution ?? '1k',
@@ -418,6 +485,7 @@ export async function replicateDiscoveryItem(
           imageUrl: item.generated_image_url,
           sourceVideoUrl: item.video_url,
           segmentCount,
+          soundMode,
         })
         await query(
           `UPDATE discovery_items
@@ -471,13 +539,39 @@ export async function replicateDiscoveryItem(
         duration: item.source_duration ?? probe?.duration ?? null,
         loraUrl: character.lora_url,
         loraScale: character.lora_scale,
+        generateAudio: soundMode === 'seedance_native',
       })
+
+      let finalVideoUrl = result.videoUrl
+      let videoModel = result.model
+      let muxNote: string | null = null
+
+      if (soundMode === 'source') {
+        if (!item.video_url) {
+          throw new Error('Keep source audio requires the original reel video_url')
+        }
+        const muxed = await muxSourceAudioOntoVideo({
+          generatedVideoUrl: result.videoUrl,
+          sourceVideoUrl: item.video_url,
+          storagePath: `monitor/${itemId}/final_with_audio.mp4`,
+        })
+        finalVideoUrl = muxed.url
+        if (muxed.skippedReason) {
+          muxNote = muxed.skippedReason
+          videoModel = `${result.model}+audio:skipped`
+        } else {
+          videoModel = `${result.model}+audio:source`
+        }
+      } else if (soundMode === 'seedance_native') {
+        videoModel = `${result.model}+audio:native`
+      }
+
       await query(
         `UPDATE discovery_items
             SET kling_video_url = $2, video_model = $3, video_technique = $4,
-                replicate_status = 'done', replicate_error = NULL
+                replicate_status = 'done', replicate_error = $5
           WHERE id = $1`,
-        [itemId, result.videoUrl, result.model, result.technique],
+        [itemId, finalVideoUrl, videoModel, result.technique, muxNote],
       )
       await notifyReplicationDone({
         userId,
@@ -485,15 +579,16 @@ export async function replicateDiscoveryItem(
         contentUrl: item.content_url,
         contentType,
         imageUrl: item.generated_image_url,
-        videoUrl: result.videoUrl,
+        videoUrl: finalVideoUrl,
       }).catch(() => {})
       return {
         ok: true,
         imageUrl: item.generated_image_url,
-        videoUrl: result.videoUrl,
+        videoUrl: finalVideoUrl,
         technique: result.technique,
-        model: result.model,
+        model: videoModel,
         fellBack,
+        soundMode,
       }
     }
 

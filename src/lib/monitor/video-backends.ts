@@ -1,3 +1,4 @@
+import type { SceneSpec } from './scene-spec'
 import type { VideoTechnique } from './types'
 
 /**
@@ -38,6 +39,8 @@ export interface VideoBackendInput {
   duration?: number | null
   loraUrl?: string | null
   loraScale?: number
+  /** Seedance only — when true, ask the model to generate audio. */
+  generateAudio?: boolean
 }
 
 export interface ResolvedVideoBackend {
@@ -84,8 +87,59 @@ export function normalizeVideoBackend(raw: unknown): VideoBackend {
   return 'auto'
 }
 
+/**
+ * Story / dialogue / prop-heavy clips reproduce better on Seedance I2V than
+ * Kling motion-control (which expects a clean single-body motion reference).
+ */
+export function hasStorySignals(spec: SceneSpec | Record<string, unknown> | null | undefined): boolean {
+  if (!spec || typeof spec !== 'object') return false
+  const speech = (spec as SceneSpec).speech
+    ?? (spec as { speech?: { transcript?: string; kind?: string } }).speech
+  const transcript = (speech?.transcript ?? '').trim()
+  const kind = speech?.kind
+  if (transcript && (kind === 'dialogue' || kind === 'voiceover' || !kind || kind === 'unknown')) {
+    // Non-empty ASR with dialogue-like content → narrative clip.
+    if (transcript.length >= 12) return true
+  }
+
+  const events = (spec as SceneSpec).must_include_events
+    ?? (spec as { must_include_events?: string[] }).must_include_events
+  if (Array.isArray(events) && events.length >= 1) return true
+
+  const people = (spec as SceneSpec).background_people
+    ?? (spec as { background_people?: unknown[] }).background_people
+  if (Array.isArray(people) && people.length >= 1) {
+    const withAction = people.filter(p => {
+      if (!p || typeof p !== 'object') return false
+      const action = (p as { action?: string }).action?.trim()
+      return Boolean(action)
+    })
+    if (withAction.length >= 1) return true
+  }
+
+  const caption = ((spec as SceneSpec).on_screen_text
+    ?? (spec as { on_screen_text?: string }).on_screen_text
+    ?? '').trim()
+  const beats = (spec as SceneSpec).action_beats
+    ?? (spec as { action_beats?: unknown[] }).action_beats
+  if (caption && Array.isArray(beats) && beats.length >= 3) return true
+
+  return false
+}
+
 /** Technique → Auto backend. */
-export function defaultBackendForTechnique(technique: VideoTechnique): Exclude<VideoBackend, 'auto'> {
+export function defaultBackendForTechnique(
+  technique: VideoTechnique,
+  sceneSpec?: SceneSpec | Record<string, unknown> | null,
+): Exclude<VideoBackend, 'auto'> {
+  // Story beats win over "continuous body motion → Kling" for single-shot techniques.
+  if (
+    hasStorySignals(sceneSpec) &&
+    technique !== 'multi_shot'
+  ) {
+    return 'seedance_i2v'
+  }
+
   switch (technique) {
     case 'motion_transfer':
     case 'multi_shot':
@@ -102,8 +156,9 @@ export function defaultBackendForTechnique(technique: VideoTechnique): Exclude<V
 export function resolveVideoBackend(
   choice: VideoBackend,
   technique: VideoTechnique,
+  sceneSpec?: SceneSpec | Record<string, unknown> | null,
 ): ResolvedVideoBackend {
-  const backend = choice === 'auto' ? defaultBackendForTechnique(technique) : choice
+  const backend = choice === 'auto' ? defaultBackendForTechnique(technique, sceneSpec) : choice
 
   if (technique === 'multi_shot' && (choice === 'auto' || choice === 'kling_mc')) {
     return {
@@ -173,7 +228,7 @@ export function resolveVideoBackend(
             aspect_ratio: '9:16',
             resolution: '720p',
             duration: seedanceDuration(input.duration),
-            generate_audio: false,
+            generate_audio: Boolean(input.generateAudio),
             enable_web_search: false,
           }
           if (input.endImageUrl) body.last_image = input.endImageUrl
@@ -224,7 +279,7 @@ export function resolveVideoBackend(
       }
 
     default:
-      return resolveVideoBackend('seedance_i2v', technique)
+      return resolveVideoBackend('seedance_i2v', technique, sceneSpec)
   }
 }
 

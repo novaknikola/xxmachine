@@ -26,6 +26,8 @@ export interface MonitorMultiShotJobInput {
   discoveryItemId: string
   imageUrl: string
   sourceVideoUrl: string
+  /** When 'silent', stitch without original audio. Default source. */
+  soundMode?: 'silent' | 'source' | 'fish' | 'seedance_native'
 }
 
 export interface MonitorMultiShotJobOutput {
@@ -45,11 +47,13 @@ export async function enqueueMultiShotJob(opts: {
   imageUrl: string
   sourceVideoUrl: string
   segmentCount: number
+  soundMode?: 'silent' | 'source' | 'fish' | 'seedance_native'
 }): Promise<string> {
   const input: MonitorMultiShotJobInput = {
     discoveryItemId: opts.discoveryItemId,
     imageUrl: opts.imageUrl,
     sourceVideoUrl: opts.sourceVideoUrl,
+    soundMode: opts.soundMode ?? 'source',
   }
   const row = await one<{ id: string }>(
     `INSERT INTO generation_queue (user_id, job_type, input, total_items)
@@ -214,10 +218,11 @@ export async function processMultiShotJob(opts: {
       clipPaths.push(path)
     }
 
+    const muxSourceAudio = (input.soundMode ?? 'source') === 'source'
     await stitchSegments({
       clipPaths,
       segments: trimSegments,
-      audioSourcePath: sourcePath,
+      audioSourcePath: muxSourceAudio ? sourcePath : null,
       outputPath: stitchedPath,
     })
 

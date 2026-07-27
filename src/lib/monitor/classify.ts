@@ -1,6 +1,26 @@
 import { callGrok, GROK_SMART, base64ImageContent } from '@/lib/grok'
 import type { SourceProbe } from './analyze'
+import type { SceneSpec } from './scene-spec'
 import type { ContentType, VideoTechnique } from './types'
+
+/** Extra context from full scene analysis (timeline + ASR) for technique routing. */
+export interface TechniqueContext {
+  transcript?: string
+  onScreenText?: string
+  mustIncludeEvents?: string[]
+  actionBeats?: Array<{ t: number; subject: string; background: string }>
+}
+
+export function techniqueContextFromSceneSpec(spec: SceneSpec): TechniqueContext {
+  return {
+    transcript: spec.speech.transcript || undefined,
+    onScreenText: spec.on_screen_text || undefined,
+    mustIncludeEvents: spec.must_include_events.length ? spec.must_include_events : undefined,
+    actionBeats: spec.action_beats.length
+      ? spec.action_beats.map(b => ({ t: b.t, subject: b.subject, background: b.background }))
+      : undefined,
+  }
+}
 
 const CLASSIFY_PROMPT = `Analyze this Instagram content frame and classify it.
 
@@ -107,13 +127,36 @@ export interface VideoAnalysis {
  * Classifies content type and required technique in a single vision call, then lets
  * the measured signals override the model where they are decisive.
  */
-export async function analyzeVideoContent(probe: SourceProbe): Promise<VideoAnalysis> {
+export async function analyzeVideoContent(
+  probe: SourceProbe,
+  context?: TechniqueContext | null,
+): Promise<VideoAnalysis> {
   const facts = [
     `Measured duration: ${probe.duration ? `${probe.duration.toFixed(1)}s` : 'unknown'}`,
     `Hard cuts detected in source: ${probe.cutCount}`,
     `Audio track present: ${probe.hasAudio ? 'yes' : 'no'}`,
     `Frames provided: ${probe.frames.length}, evenly spaced from start to end`,
-  ].join('\n')
+  ]
+
+  if (context?.transcript?.trim()) {
+    facts.push(`Speech transcript (ASR): "${context.transcript.trim()}"`)
+  }
+  if (context?.onScreenText?.trim()) {
+    facts.push(`Burned-in on-screen caption: "${context.onScreenText.trim()}"`)
+  }
+  if (context?.mustIncludeEvents?.length) {
+    facts.push(`Must-include story events: ${context.mustIncludeEvents.join(' | ')}`)
+  }
+  if (context?.actionBeats?.length) {
+    const beats = context.actionBeats
+      .slice(0, 12)
+      .map(b => {
+        const bg = b.background?.trim() ? ` / bg: ${b.background.trim()}` : ''
+        return `@${b.t.toFixed(1)}s ${b.subject}${bg}`
+      })
+      .join('; ')
+    facts.push(`Action timeline: ${beats}`)
+  }
 
   const raw = await callGrok({
     model: GROK_SMART,
@@ -122,7 +165,7 @@ export async function analyzeVideoContent(probe: SourceProbe): Promise<VideoAnal
       role: 'user',
       content: [
         ...probe.frames.map(f => base64ImageContent(f)),
-        { type: 'text', text: `${TECHNIQUE_PROMPT}\n\nMeasured facts:\n${facts}` },
+        { type: 'text', text: `${TECHNIQUE_PROMPT}\n\nMeasured facts:\n${facts.join('\n')}` },
       ],
     }],
     maxTokens: 1024,

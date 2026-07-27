@@ -21,6 +21,7 @@ import {
 } from './studio-settings'
 import type { ImageModelChoice, VideoBackendChoice } from '@/lib/monitor/cost-estimate'
 import { JobDetailSheet } from './job-detail-sheet'
+import { PasteUrlsPanel } from './paste-urls-panel'
 
 interface ReplicateItem {
   id: string
@@ -38,6 +39,7 @@ interface ReplicateItem {
   replicate_status: string
   replicate_error: string | null
   scene_prompt: string | null
+  motion_prompt: string | null
   scene_spec: {
     body?: {
       bust?: string
@@ -50,10 +52,13 @@ interface ReplicateItem {
     pose?: { body_position?: string; hips_to_camera?: string }
     hook?: { eye_catching?: string; suggestiveness?: string }
     others?: { count?: number; actions?: string }
-    background_people?: Array<{ who?: string; action?: string }>
+    background_people?: Array<{ who?: string; action?: string; position?: string }>
     must_include_events?: string[]
+    action_beats?: Array<{ t?: number; subject?: string; background?: string }>
     speech?: { transcript?: string; kind?: string }
     framing?: { shot_size?: string; emphasis?: string }
+    on_screen_text?: string
+    on_screen_text_style?: string
   } | null
   generated_image_url: string | null
   generated_end_image_url: string | null
@@ -81,14 +86,30 @@ function sceneSpecSummary(spec: ReplicateItem['scene_spec']): string | null {
     spec.hook?.eye_catching,
     bg && `BG: ${bg}`,
     spec.speech?.transcript && `speech: "${spec.speech.transcript.slice(0, 80)}${spec.speech.transcript.length > 80 ? '…' : ''}"`,
+    spec.on_screen_text && `caption: "${spec.on_screen_text.slice(0, 80)}${spec.on_screen_text.length > 80 ? '…' : ''}"`,
   ].filter(Boolean)
   return bits.length ? bits.join(' · ') : null
 }
 
+/** Compact classify teaser: beat count + transcript/caption flags. */
+function analysisTeaser(item: ReplicateItem): string | null {
+  const spec = item.scene_spec
+  if (!spec) return null
+  const beatCount = spec.action_beats?.filter(b => b.subject?.trim()).length ?? 0
+  const parts: string[] = []
+  if (beatCount > 0) parts.push(`${beatCount} beat${beatCount === 1 ? '' : 's'}`)
+  if (spec.speech?.transcript?.trim()) parts.push('has transcript')
+  if (spec.on_screen_text?.trim()) parts.push('caption')
+  if ((spec.must_include_events?.length ?? 0) > 0) {
+    parts.push(`${spec.must_include_events!.length} must-include`)
+  }
+  return parts.length ? parts.join(' · ') : null
+}
+
 const STATUS_LABEL: Record<string, string> = {
-  pending_classify: 'Needs classify',
-  classified: 'Classified',
-  analyzing: 'Analyzing scene',
+  pending_classify: 'Classifying…',
+  classified: 'Ready',
+  analyzing: 'Analyzing',
   image_generating: 'Generating image',
   image_done: 'Image ready',
   video_generating: 'Generating video',
@@ -163,6 +184,11 @@ export function RunTab() {
     if (studio.stopRequested && action === 'replicate') {
       toast.message('Stopped — clear stop or turn Autopilot back on to continue')
       return
+    }
+    // Seedance/Z-Image run inline (not generation_queue). While running, status
+    // leaves "classified" → item vanishes from Pending — follow it on Active.
+    if (action === 'replicate' && filter === 'pending') {
+      setFilter('active')
     }
     setWorking(id)
     studio.setQueueBusy(1)
@@ -276,6 +302,17 @@ export function RunTab() {
 
   return (
     <div className="space-y-6">
+      <PasteUrlsPanel
+        onEnqueued={() => {
+          if (filter === 'pending') {
+            reload()
+          } else {
+            setLoading(true)
+            setFilter('pending')
+          }
+        }}
+      />
+
       <div className="sticky top-0 z-20 -mx-1 px-1 py-3 bg-background/90 backdrop-blur-md border-b border-border/60 space-y-5">
         <div className="flex flex-wrap items-end gap-4">
           <Field className="w-[140px]">
@@ -388,7 +425,9 @@ export function RunTab() {
         </div>
 
         <FieldHint>
-          {studio.imageModel === 'z_image' ? 'Z-Image locks face via LoRA.' : 'Seedream edits layout from the source thumb + refs.'}
+          {studio.imageModel === 'z_image'
+            ? 'Z-Image locks face via character LoRA (Admin → Characters).'
+            : 'Seedream: source thumb = layout; reference photos = panel above.'}
           {' '}
           {soundHint}
           {studio.sound === 'fish' ? ' Preference saved; Fish mux ships next.' : ''}
@@ -443,6 +482,7 @@ export function RunTab() {
             const est = studio.estimateFor(item.source_duration)
             const step = stepIndex(item.replicate_status)
             const summary = sceneSpecSummary(item.scene_spec)
+            const teaser = analysisTeaser(item)
             return (
               <Card key={item.id} className="bg-card/80">
                 <CardContent className="pt-1">
@@ -511,6 +551,12 @@ export function RunTab() {
                                 ? 'one continuous shot'
                                 : `${item.source_cut_count} cut${item.source_cut_count === 1 ? '' : 's'}`
                             )}
+                            {teaser && (
+                              <>
+                                {' · '}
+                                {teaser}
+                              </>
+                            )}
                             {' · '}
                             path{' '}
                             {IMAGE_MODEL_LABEL[studio.imageModel]} →{' '}
@@ -556,7 +602,10 @@ export function RunTab() {
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2 pt-1">
-                        {(!item.content_type || !item.video_technique) && (
+                        {/* Auto-classify runs on enqueue; retry only if still stuck / failed analysis. */}
+                        {(item.replicate_status === 'failed'
+                          || (item.replicate_status === 'pending_classify' && !item.content_type)
+                          || (item.replicate_status === 'classified' && !item.video_technique)) && (
                           <Button
                             variant="outline"
                             disabled={working === item.id}
@@ -565,10 +614,13 @@ export function RunTab() {
                             {working === item.id
                               ? <Loader2 className="w-4 h-4 animate-spin" />
                               : <Sparkles className="w-4 h-4" />}
-                            {item.content_type ? 'Detect technique' : 'Classify'}
+                            Retry classify
                           </Button>
                         )}
-                        {item.replicate_status !== 'done' && item.replicate_status !== 'skipped' && (
+                        {item.replicate_status !== 'done'
+                          && item.replicate_status !== 'skipped'
+                          && item.replicate_status !== 'analyzing'
+                          && !(item.replicate_status === 'pending_classify' && !item.content_type) && (
                           <Button
                             disabled={working === item.id}
                             onClick={() => {
@@ -580,6 +632,13 @@ export function RunTab() {
                               ? <Loader2 className="w-4 h-4 animate-spin" />
                               : <Play className="w-4 h-4" />}
                             {item.replicate_status === 'needs_review' ? 'Replicate anyway' : 'Replicate'}
+                          </Button>
+                        )}
+                        {(item.replicate_status === 'analyzing'
+                          || (item.replicate_status === 'pending_classify' && !item.content_type)) && (
+                          <Button variant="outline" disabled>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            Classifying…
                           </Button>
                         )}
                         <Button variant="ghost" onClick={() => setDetailId(item.id)}>
@@ -631,6 +690,13 @@ export function RunTab() {
         videoLabel={VIDEO_BACKEND_OPTIONS.find(o => o.value === studio.videoBackend)?.label ?? ''}
         soundLabel={SOUND_OPTIONS.find(o => o.value === studio.sound)?.label ?? ''}
         formatUsd={studio.formatUsd}
+        onPromptsSaved={update => {
+          setItems(prev => prev.map(i => (
+            i.id === update.id
+              ? { ...i, scene_prompt: update.scene_prompt, motion_prompt: update.motion_prompt }
+              : i
+          )))
+        }}
       />
     </div>
   )

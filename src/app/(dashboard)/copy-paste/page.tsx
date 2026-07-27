@@ -1,6 +1,7 @@
 'use client'
 
-import { Copy, OctagonX } from 'lucide-react'
+import { Copy, OctagonX, Play } from 'lucide-react'
+import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -41,10 +42,23 @@ function StudioChrome({ children }: { children: React.ReactNode }) {
               <span className="text-muted-foreground">Today </span>
               <span className="font-semibold tabular-nums">{studio.formatUsd(studio.todaySpendUsd)}</span>
             </div>
-            <Button variant="destructive" onClick={() => studio.requestStopAll()}>
-              <OctagonX className="w-4 h-4" />
-              Stop all
-            </Button>
+            {studio.stopRequested ? (
+              <Button
+                variant="default"
+                onClick={() => {
+                  studio.clearStop()
+                  toast.success('Ready — Replicate / Autopilot can run again')
+                }}
+              >
+                <Play className="w-4 h-4" />
+                Play
+              </Button>
+            ) : (
+              <Button variant="destructive" onClick={() => studio.requestStopAll()}>
+                <OctagonX className="w-4 h-4" />
+                Stop all
+              </Button>
+            )}
           </div>
         </div>
       </div>

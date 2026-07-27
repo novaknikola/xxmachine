@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireUser } from '@/lib/session'
 import { replicateDiscoveryItem } from '@/lib/monitor/process-item'
 import { normalizeImageModel, normalizeVideoBackend } from '@/lib/monitor/replicate'
+import { normalizeSoundMode } from '@/lib/monitor/cost-estimate'
 
 export async function POST(
   req: NextRequest,
@@ -15,6 +16,7 @@ export async function POST(
     image_model?: string
     seedream_resolution?: '1k' | '2k'
     video_backend?: string
+    sound_mode?: string
     stop_after_image?: boolean
   }
 
@@ -23,6 +25,7 @@ export async function POST(
       imageModel: normalizeImageModel(body.image_model),
       seedreamResolution: body.seedream_resolution === '2k' ? '2k' : '1k',
       videoBackend: normalizeVideoBackend(body.video_backend),
+      soundMode: normalizeSoundMode(body.sound_mode),
       stopAfterImage: Boolean(body.stop_after_image),
     })
     return NextResponse.json({ ok: true, ...result })

@@ -5,6 +5,9 @@ const MAX_POLLS = 48 // 4 min cap
 
 const RAPIDAPI_HOST = 'instagram-reels-downloader-api.p.rapidapi.com'
 const RAPIDAPI_SCRAPER_HOST = 'instagram-scraper-ai1.p.rapidapi.com'
+/** Fallback when the primary downloader host is upgrading / down. */
+const RAPIDAPI_DOWNLOAD_FALLBACK_HOST =
+  'instagram-downloader-scraper-reels-igtv-posts-stories.p.rapidapi.com'
 /** The PRO plan rejects bursts, so space out the two calls a lookup needs. */
 const RAPIDAPI_CALL_GAP_MS = 1_500
 
@@ -230,7 +233,7 @@ interface RapidDownloadData {
   medias?: RapidDownloadMedia[]
 }
 
-export async function resolveVideoUrlViaRapidApi(permalink: string, apiKey: string) {
+async function resolveViaPrimaryDownloader(permalink: string, apiKey: string) {
   const res = await fetch(`https://${RAPIDAPI_HOST}/download?url=${encodeURIComponent(permalink)}`, {
     headers: {
       'x-rapidapi-key': apiKey,
@@ -245,10 +248,128 @@ export async function resolveVideoUrlViaRapidApi(permalink: string, apiKey: stri
   if (!data) throw new Error('Empty response')
   const video = data.medias?.find(m => m.type === 'video' && m.url)
   if (!video?.url) throw new Error('No video media in the response (probably not a reel)')
+  // Reject Instagram HTML page links masquerading as media (breaks ffmpeg probe).
+  if (/instagram\.com\/(p|reel|reels|tv)\//i.test(video.url)) {
+    throw new Error('Downloader returned a page URL instead of a video file')
+  }
   return {
     videoUrl: video.url,
     thumbnail: data.thumbnail ?? null,
     likes: data.like_count ?? null,
     views: data.view_count ?? null,
+  }
+}
+
+interface ScraperFallbackItem {
+  media?: string
+  thumb?: string
+  isVideo?: boolean
+}
+
+async function resolveViaScraperFallback(permalink: string, apiKey: string) {
+  const res = await fetch(
+    `https://${RAPIDAPI_DOWNLOAD_FALLBACK_HOST}/scraper?url=${encodeURIComponent(permalink)}`,
+    {
+      headers: {
+        'x-rapidapi-key': apiKey,
+        'x-rapidapi-host': RAPIDAPI_DOWNLOAD_FALLBACK_HOST,
+        'Content-Type': 'application/json',
+      },
+    },
+  )
+  const json = await res.json().catch(() => null) as {
+    data?: ScraperFallbackItem[]
+    message?: string
+    error?: string
+  } | null
+  if (!res.ok) {
+    throw new Error(json?.message ?? json?.error ?? `HTTP ${res.status}`)
+  }
+  const items = Array.isArray(json?.data) ? json.data : []
+  const video = items.find(m => m.isVideo && m.media)
+  if (!video?.media) throw new Error('No video media in scraper fallback response')
+  if (/instagram\.com\/(p|reel|reels|tv)\//i.test(video.media)) {
+    throw new Error('Downloader returned a page URL instead of a video file')
+  }
+  return {
+    videoUrl: video.media,
+    thumbnail: video.thumb ?? null,
+    likes: null as number | null,
+    views: null as number | null,
+  }
+}
+
+export async function resolveVideoUrlViaRapidApi(permalink: string, apiKey: string) {
+  try {
+    return await resolveViaPrimaryDownloader(permalink, apiKey)
+  } catch (primaryErr) {
+    await new Promise(r => setTimeout(r, RAPIDAPI_CALL_GAP_MS))
+    try {
+      return await resolveViaScraperFallback(permalink, apiKey)
+    } catch (fallbackErr) {
+      const primary = primaryErr instanceof Error ? primaryErr.message : 'primary failed'
+      const fallback = fallbackErr instanceof Error ? fallbackErr.message : 'fallback failed'
+      throw new Error(`${primary} (fallback: ${fallback})`)
+    }
+  }
+}
+
+export interface ResolvedReelMedia {
+  videoUrl: string
+  thumbnail: string | null
+  likes: number | null
+  views: number | null
+  source: 'download' | 'profile_list'
+}
+
+/**
+ * Resolve a reel video URL. Prefers the download API; when that host is down
+ * (upgrade / outage), falls back to listing the owner's reels and matching shortcode.
+ */
+export async function resolveReelMedia(
+  permalink: string,
+  apiKey: string,
+  opts?: { shortCode?: string; ownerUsername?: string | null },
+): Promise<ResolvedReelMedia> {
+  let downloadError: string | null = null
+  try {
+    const r = await resolveVideoUrlViaRapidApi(permalink, apiKey)
+    return {
+      videoUrl: r.videoUrl,
+      thumbnail: r.thumbnail,
+      likes: r.likes,
+      views: r.views,
+      source: 'download',
+    }
+  } catch (err) {
+    downloadError = err instanceof Error ? err.message : 'Download API failed'
+  }
+
+  const owner = opts?.ownerUsername?.trim().replace(/^@/, '')
+  const shortCode =
+    opts?.shortCode
+    ?? permalink.match(/\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/i)?.[1]
+
+  if (!owner || !shortCode) {
+    throw new Error(
+      `${downloadError}. Add the source IG username (reel owner) so we can resolve via profile listing.`,
+    )
+  }
+
+  await new Promise(r => setTimeout(r, RAPIDAPI_CALL_GAP_MS))
+  const { reels } = await listReelsViaRapidApi(owner, apiKey, 50)
+  const match = reels.find(r => (r.shortCode ?? '').toLowerCase() === shortCode.toLowerCase())
+  if (!match?.videoUrl) {
+    throw new Error(
+      `Download API: ${downloadError}. Profile @${owner} listed ${reels.length} reels but none matched ${shortCode}.`,
+    )
+  }
+
+  return {
+    videoUrl: match.videoUrl,
+    thumbnail: match.displayUrl ?? match.images?.[0] ?? null,
+    likes: match.likesCount ?? null,
+    views: match.videoViewCount ?? null,
+    source: 'profile_list',
   }
 }

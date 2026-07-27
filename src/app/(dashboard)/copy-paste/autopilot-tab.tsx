@@ -106,10 +106,23 @@ export function AutopilotTab() {
                 <RefreshCw className="w-4 h-4" />
                 Refresh
               </Button>
-              <Button variant="destructive" onClick={() => studio.requestStopAll()}>
-                <Pause className="w-4 h-4" />
-                Stop all
-              </Button>
+              {studio.stopRequested ? (
+                <Button
+                  variant="default"
+                  onClick={() => {
+                    studio.clearStop()
+                    toast.success('Ready — Autopilot / Replicate can run again')
+                  }}
+                >
+                  <Play className="w-4 h-4" />
+                  Play
+                </Button>
+              ) : (
+                <Button variant="destructive" onClick={() => studio.requestStopAll()}>
+                  <Pause className="w-4 h-4" />
+                  Stop all
+                </Button>
+              )}
             </div>
           </div>
           {overCap && (

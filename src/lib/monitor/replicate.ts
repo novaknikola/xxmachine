@@ -27,14 +27,27 @@ function buildImagePrompt(opts: {
   scenePrompt: string
   triggerWord?: string | null
   basePromptStyle?: string | null
+  /**
+   * Seedream: images[] are character face refs only (no source reel frame).
+   * Instruct a fresh photo from the scene prompt, identity from refs.
+   */
+  characterRefsOnly?: boolean
 }): string {
-  // Scene (body + background cast) before character style — style often says
+  // Scene (body + cast + caption) before character style — style often says
   // "slim/fit" and washes out bust/glute size when it comes first.
   return [
     opts.triggerWord?.trim(),
+    opts.characterRefsOnly
+      ? [
+          'Generate a NEW photograph from the scene description below.',
+          'The attached images are character identity references only (face, hair, skin, piercings).',
+          'Match that woman\'s identity; do NOT copy pose, framing, outfit, or background from the reference photos.',
+          'Do NOT edit or composite an existing reel frame — invent the shot from the prompt.',
+        ].join(' ')
+      : null,
     opts.scenePrompt.trim(),
     opts.basePromptStyle?.trim(),
-  ].filter(Boolean).join(', ')
+  ].filter(Boolean).join('\n\n')
 }
 
 function wavespeedKey(): string {
@@ -123,8 +136,8 @@ export async function generateReplicaImage(opts: {
 }
 
 /**
- * Seedream Edit — keeps source layout/wardrobe from reference frame(s), steered by
- * the same detailed scene prompt (+ character trigger/style). No LoRA path.
+ * Seedream Edit — character face refs + detailed scene prompt → new keyframe.
+ * No source reel thumbnail/frame is passed.
  */
 export async function generateReplicaImageSeedream(opts: {
   scenePrompt: string
@@ -135,12 +148,12 @@ export async function generateReplicaImageSeedream(opts: {
 }): Promise<string> {
   const refs = opts.referenceImageUrls.map(u => u.trim()).filter(Boolean)
   if (!refs.length) {
-    throw new Error('Seedream Edit needs at least one reference image (source thumbnail/frame)')
+    throw new Error('Seedream Edit needs at least one character face reference photo')
   }
 
   const urls = await editImage({
     imageUrls: refs,
-    prompt: buildImagePrompt(opts),
+    prompt: buildImagePrompt({ ...opts, characterRefsOnly: true }),
     size: '9:16',
     resolution: opts.resolution ?? '1k',
     apiKey: wavespeedKey(),
@@ -160,6 +173,8 @@ export interface ReplicaVideoInput {
   duration?: number | null
   loraUrl?: string | null
   loraScale?: number
+  /** Seedance native audio (generate_audio). */
+  generateAudio?: boolean
 }
 
 export interface ReplicaVideoResult {

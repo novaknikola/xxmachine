@@ -56,7 +56,13 @@ export async function POST(req: NextRequest) {
   const user = await requireUser(req)
   if (user instanceof NextResponse) return user
 
-  const { username, amount, force } = await req.json().catch(() => ({})) as { username?: string; amount?: number; force?: boolean }
+  const { username, amount, force, cacheOnly } = await req.json().catch(() => ({})) as {
+    username?: string
+    amount?: number
+    force?: boolean
+    /** History "View": return DB cache only — never call Apify/RapidAPI. */
+    cacheOnly?: boolean
+  }
   if (!username?.trim()) return NextResponse.json({ error: 'username required' }, { status: 400 })
 
   const target = Math.min(Math.max(amount ?? 24, 1), 200)
@@ -73,25 +79,41 @@ export async function POST(req: NextRequest) {
     }, { status: 500 })
   }
 
-  // ── Serve from cache if scanned recently and not forcing a fresh scan ──
-  if (!force) {
+  // ── Serve from cache ──
+  // View/history (cacheOnly): any cached rows, ignore TTL and amount threshold.
+  // Normal Search: fresh cache (<12h) only if it already has ≥ requested amount.
+  {
     const profile = await one<CachedProfileRow>(
       `select last_scanned_at from ig_downloader_profiles where user_id = $1 and username = $2`,
       [user.id, cleanUsername],
     )
-    if (profile) {
+    if (profile && !force) {
       const ageHours = (Date.now() - new Date(profile.last_scanned_at).getTime()) / 3_600_000
-      if (ageHours < CACHE_TTL_HOURS) {
-        const reels = await loadCachedReels(user.id, cleanUsername)
-        // Only serve from cache if it already covers what was asked for — otherwise fall
-        // through to a fresh scan so asking for more reels actually fetches more.
-        if (reels.length >= target) {
+      const reels = await loadCachedReels(user.id, cleanUsername)
+      if (reels.length > 0) {
+        if (cacheOnly) {
           return NextResponse.json({
-            ok: true, username: cleanUsername, reels, skipped: [],
+            ok: true,
+            username: cleanUsername,
+            reels: reels.slice(0, target),
+            skipped: [],
+            fromCache: true,
+            scannedAt: profile.last_scanned_at,
+          })
+        }
+        if (ageHours < CACHE_TTL_HOURS && reels.length >= target) {
+          return NextResponse.json({
+            ok: true, username: cleanUsername, reels: reels.slice(0, target), skipped: [],
             fromCache: true, scannedAt: profile.last_scanned_at,
           })
         }
       }
+    }
+    if (cacheOnly) {
+      return NextResponse.json({
+        error: `No cached reels for @${cleanUsername}. Use Search (or Force rescan) once to populate the cache.`,
+        fromCache: false,
+      }, { status: 404 })
     }
   }
 

@@ -25,6 +25,11 @@ export interface Character {
   recommendedNicheId?: string
   /** Locked hair description appended to every generation for brand consistency. */
   hairLock?: string
+  /**
+   * Public image URLs of the character's face (close-ups).
+   * Used by Seedream Edit in Copy-Paste alongside the source reel thumbnail.
+   */
+  faceRefUrls?: string[]
 }
 
 export type ScheduledPostStatus =

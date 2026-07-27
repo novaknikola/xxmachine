@@ -88,4 +88,6 @@ export interface CharacterLora {
   lora_scale: number
   trigger_word: string | null
   base_prompt_style: string | null
+  /** Face close-ups for Seedream Edit identity (public URLs). */
+  face_ref_urls: string[]
 }

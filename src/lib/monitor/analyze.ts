@@ -5,6 +5,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { callGrok, GROK_SMART, base64ImageContent } from '@/lib/grok'
+import { isPlayableVideoUrl } from './video-url'
 
 const execFileAsync = promisify(execFile)
 
@@ -13,6 +14,20 @@ const FRAME_WIDTH = 512
 /** ffmpeg scene score above which a frame boundary counts as a hard cut. */
 const SCENE_THRESHOLD = 0.35
 const MAX_VIDEO_BYTES = 40_000_000
+/** Prevents ffmpeg hanging forever on HTML / corrupt downloads. */
+const FF_TIMEOUT_MS = 45_000
+
+function ff(
+  cmd: string,
+  args: string[],
+  opts?: { maxBuffer?: number; timeout?: number },
+) {
+  return execFileAsync(cmd, args, {
+    maxBuffer: opts?.maxBuffer,
+    timeout: opts?.timeout ?? FF_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
+  })
+}
 
 export const SCENE_PROMPT_SYSTEM = `You are analyzing an Instagram Reel frame to generate a detailed image generation prompt.
 
@@ -57,9 +72,9 @@ export async function extractVideoFrame(videoUrl: string, tag: string): Promise<
     })
     if (!res.ok) return null
     writeFileSync(videoPath, Buffer.from(await res.arrayBuffer()))
-    await execFileAsync('ffmpeg', [
+    await ff('ffmpeg', [
       '-y', '-i', videoPath, '-ss', '1.5', '-vframes', '1', '-q:v', '2', framePath,
-    ])
+    ], { timeout: 20_000 })
     if (!existsSync(framePath)) return null
     return readFileSync(framePath).toString('base64')
   } catch {
@@ -83,8 +98,16 @@ export interface SourceProbe {
 }
 
 async function downloadVideo(videoUrl: string, path: string): Promise<void> {
+  if (!isPlayableVideoUrl(videoUrl)) {
+    throw new Error(`not a direct video URL: ${videoUrl.slice(0, 80)}`)
+  }
   const res = await fetch(videoUrl, { signal: AbortSignal.timeout(45_000) })
   if (!res.ok) throw new Error(`source video fetch failed: ${res.status}`)
+
+  const contentType = (res.headers.get('content-type') ?? '').toLowerCase()
+  if (contentType.includes('text/html')) {
+    throw new Error('source URL returned HTML, not video')
+  }
 
   const declared = Number(res.headers.get('content-length') ?? 0)
   if (declared > MAX_VIDEO_BYTES) throw new Error(`source video too large: ${declared} bytes`)
@@ -92,15 +115,17 @@ async function downloadVideo(videoUrl: string, path: string): Promise<void> {
   const buffer = Buffer.from(await res.arrayBuffer())
   if (buffer.byteLength === 0) throw new Error('source video is empty')
   if (buffer.byteLength > MAX_VIDEO_BYTES) throw new Error('source video too large')
+  // Instagram HTML error pages are tiny; real reels are much larger.
+  if (buffer.byteLength < 8_000) throw new Error('source download too small to be a video')
 
   writeFileSync(path, buffer)
 }
 
 async function probeFormat(path: string): Promise<{ duration: number | null; hasAudio: boolean }> {
   try {
-    const { stdout } = await execFileAsync('ffprobe', [
+    const { stdout } = await ff('ffprobe', [
       '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', path,
-    ])
+    ], { timeout: 20_000 })
     const json = JSON.parse(stdout)
     const duration = parseFloat(json.format?.duration ?? '0')
     const hasAudio = (json.streams ?? []).some(
@@ -120,11 +145,11 @@ async function probeFormat(path: string): Promise<{ duration: number | null; has
  */
 async function detectSceneCuts(path: string): Promise<number[]> {
   try {
-    const { stderr } = await execFileAsync('ffmpeg', [
+    const { stderr } = await ff('ffmpeg', [
       '-i', path,
       '-vf', `select='gt(scene,${SCENE_THRESHOLD})',showinfo`,
       '-f', 'null', '-',
-    ], { maxBuffer: 20_000_000 })
+    ], { maxBuffer: 20_000_000, timeout: 60_000 })
 
     const times: number[] = []
     for (const m of stderr.matchAll(/pts_time:([0-9.]+)/g)) {
@@ -139,10 +164,10 @@ async function detectSceneCuts(path: string): Promise<number[]> {
 
 async function extractFrameAt(path: string, seconds: number, outPath: string): Promise<string | null> {
   try {
-    await execFileAsync('ffmpeg', [
+    await ff('ffmpeg', [
       '-y', '-ss', seconds.toFixed(2), '-i', path,
       '-vframes', '1', '-vf', `scale=${FRAME_WIDTH}:-2`, '-q:v', '3', outPath,
-    ])
+    ], { timeout: 20_000 })
     if (!existsSync(outPath)) return null
     return readFileSync(outPath).toString('base64')
   } catch {
@@ -163,9 +188,18 @@ export async function probeSourceVideo(
   const framePaths: string[] = []
 
   try {
+    if (!isPlayableVideoUrl(videoUrl)) {
+      console.warn('[monitor/probe] refusing page URL as video:', videoUrl.slice(0, 100))
+      return null
+    }
     await downloadVideo(videoUrl, videoPath)
 
     const { duration, hasAudio } = await probeFormat(videoPath)
+    // No duration ⇒ not a real media file (e.g. HTML saved as .mp4) — skip heavy scene pass.
+    if (duration == null) {
+      console.warn('[monitor/probe] ffprobe found no duration — skipping cuts/frames')
+      return null
+    }
     const cutTimes = await detectSceneCuts(videoPath)
 
     // Without a duration we can only trust an early frame; seeking blind risks empty output.
@@ -292,21 +326,23 @@ export async function extractKeyframePrompts(probe: SourceProbe): Promise<{
   return { start, end: end.trim() }
 }
 
-const MOTION_PROMPT_SYSTEM = `You are given frames sampled in order from a short vertical video.
+const MOTION_PROMPT_SYSTEM = `You are given frames sampled in order from a short vertical Instagram Reel.
 
-Write a motion prompt for an image-to-video model describing what moves and how.
+Write a DETAILED motion prompt for Seedance / image-to-video — director style, chronological, concrete verbs.
 
-MUST cover, in chronological order:
-1. Main subject motion (body, hips, arms, hands, props) with rough timing
-2. EVERY other person visible — their reactions and state changes across frames
-   (e.g. "man on folding chair in foreground topples backward as she strikes the ball")
-3. Camera motion (static / push in / pull back / pan / orbit / handheld)
-4. Environmental motion (hair, fabric, ball flight, crowd)
+MUST cover, in order:
+1. Main subject motion beat-by-beat (walk, lean, speak, wave, strike, etc.) with rough timing cues
+2. EVERY other person — reactions and state changes
+   (e.g. "young man bottom-left turns to camera biting his knuckles with a wide grin")
+3. Whether any on-screen caption/meme text stays visible for the whole clip (quote it if readable)
+4. Camera motion (static / push in / pull back / pan / handheld) and lighting stability
+5. Secondary motion (hair, fabric strain, mic, crowd)
 
 RULES:
-- Do NOT describe face identity or clothing brands — only movement and reactions.
-- Background gags and reactions are NOT optional if visible in any frame.
-- Present tense. 3–6 sentences is fine. Do not truncate important secondary action.`
+- Do NOT describe face identity — only movement and reactions.
+- Background gags are NOT optional if visible in any frame.
+- Present tense. Prefer 4–8 dense sentences over a vague one-liner.
+- End with: vertical 9:16, natural physically plausible motion.`
 
 /** Motion description for image_to_video and extend techniques. */
 export async function extractMotionPrompt(probe: SourceProbe): Promise<string> {
@@ -319,8 +355,8 @@ export async function extractMotionPrompt(probe: SourceProbe): Promise<string> {
         { type: 'text', text: MOTION_PROMPT_SYSTEM },
       ],
     }],
-    maxTokens: 512,
-    temperature: 0.4,
+    maxTokens: 900,
+    temperature: 0.35,
   })
   if (!prompt?.trim()) throw new Error('Empty motion prompt from Grok')
   return prompt.trim()
