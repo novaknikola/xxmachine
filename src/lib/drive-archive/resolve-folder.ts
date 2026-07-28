@@ -1,15 +1,63 @@
-import { one, withClient } from '@/lib/db'
+import { withClient } from '@/lib/db'
 import { ensureChildFolder } from '@/lib/google-drive'
 import { ensureDriveRootFolder } from './ensure-root-folder'
-import { driveFormatFolderName, normalizeDriveStage, type DriveArchiveKind, type DriveArchiveStage } from './content-format'
+import {
+  driveFormatFolderName,
+  normalizeDriveStage,
+  type DriveArchiveKind,
+  type DriveArchiveStage,
+} from './content-format'
 import { archiveDateKey, characterDriveFolderName, sanitizeDriveKey } from './paths'
+import type { PoolClient } from 'pg'
+
+async function ensureCachedSegment(
+  client: PoolClient,
+  opts: {
+    userId: string
+    path: string
+    parentId: string
+    name: string
+    accessToken: string
+    characterKey: string
+    kind: string
+    stage: string
+    dateKey: string
+  },
+): Promise<string> {
+  const cached = await client.query<{ folder_id: string }>(
+    `SELECT folder_id FROM drive_folders WHERE user_id = $1 AND path = $2`,
+    [opts.userId, opts.path],
+  )
+  if (cached.rows[0]?.folder_id) return cached.rows[0].folder_id
+
+  const folderId = await ensureChildFolder(opts.parentId, opts.name, opts.accessToken)
+
+  await client.query(
+    `INSERT INTO drive_folders
+       (user_id, character_key, kind, stage, date_key, model_key, path, folder_id)
+     VALUES ($1, $2, $3, $4, $5, '_default', $6, $7)
+     ON CONFLICT (user_id, path)
+     DO UPDATE SET folder_id = EXCLUDED.folder_id`,
+    [
+      opts.userId,
+      opts.characterKey,
+      opts.kind,
+      opts.stage,
+      opts.dateKey,
+      opts.path,
+      folderId,
+    ],
+  )
+
+  return folderId
+}
 
 /**
  * Resolve (and cache) the leaf Drive folder:
  * XXMachine Archives / {girl} / {stories|carousel|video} / {ready|raw} / {YYYY-MM-DD}
  *
- * Uses a per-user advisory lock so concurrent raw+ready uploads do not create
- * duplicate girl folders on Drive.
+ * Every path segment is cached under a per-user advisory lock so concurrent
+ * raw/ready uploads reuse the same girl/format folders instead of creating duplicates.
  */
 export async function resolveArchiveFolder(opts: {
   userId: string
@@ -23,8 +71,7 @@ export async function resolveArchiveFolder(opts: {
   const characterKey = sanitizeDriveKey(opts.characterKey)
   const stage = normalizeDriveStage(opts.stage)
   const dateKey = (opts.dateKey || '').trim() || archiveDateKey()
-  const kindKey = driveFormatFolderName(opts.kind)
-  // Keep API kind in cache as the canonical ContentFormat-ish value when possible
+  const formatName = driveFormatFolderName(opts.kind)
   const kindCache = (() => {
     const s = String(opts.kind ?? '').toLowerCase()
     if (s === 'carousel' || s === 'carousels') return 'carousels'
@@ -32,24 +79,22 @@ export async function resolveArchiveFolder(opts: {
     return 'stories'
   })()
 
-  const cached = await one<{ folder_id: string }>(
-    `SELECT folder_id FROM drive_folders
-      WHERE user_id = $1 AND character_key = $2 AND kind = $3 AND stage = $4 AND date_key = $5`,
-    [opts.userId, characterKey, kindCache, stage, dateKey],
-  )
-  if (cached?.folder_id) return cached.folder_id
+  const girlName = characterDriveFolderName(characterKey)
+  const girlPath = girlName
+  const formatPath = `${girlPath}/${formatName}`
+  const stagePath = `${formatPath}/${stage}`
+  const leafPath = `${stagePath}/${dateKey}`
 
   const lockKey = `drive-archive:${opts.userId}`
 
   return withClient(async client => {
     await client.query('SELECT pg_advisory_lock(hashtext($1::text))', [lockKey])
     try {
-      const again = await client.query<{ folder_id: string }>(
-        `SELECT folder_id FROM drive_folders
-          WHERE user_id = $1 AND character_key = $2 AND kind = $3 AND stage = $4 AND date_key = $5`,
-        [opts.userId, characterKey, kindCache, stage, dateKey],
+      const cachedLeaf = await client.query<{ folder_id: string }>(
+        `SELECT folder_id FROM drive_folders WHERE user_id = $1 AND path = $2`,
+        [opts.userId, leafPath],
       )
-      if (again.rows[0]?.folder_id) return again.rows[0].folder_id
+      if (cachedLeaf.rows[0]?.folder_id) return cachedLeaf.rows[0].folder_id
 
       let rootId = opts.rootFolderId ?? null
       if (!rootId) {
@@ -60,21 +105,53 @@ export async function resolveArchiveFolder(opts: {
         )
       }
 
-      const girlFolder = characterDriveFolderName(characterKey)
-      const characterFolderId = await ensureChildFolder(rootId, girlFolder, opts.accessToken)
-      const formatFolderId = await ensureChildFolder(characterFolderId, kindKey, opts.accessToken)
-      const stageFolderId = await ensureChildFolder(formatFolderId, stage, opts.accessToken)
-      const leafId = await ensureChildFolder(stageFolderId, dateKey, opts.accessToken)
+      const characterFolderId = await ensureCachedSegment(client, {
+        userId: opts.userId,
+        path: girlPath,
+        parentId: rootId,
+        name: girlName,
+        accessToken: opts.accessToken,
+        characterKey,
+        kind: kindCache,
+        stage: '_',
+        dateKey: '_',
+      })
 
-      await client.query(
-        `INSERT INTO drive_folders (user_id, character_key, kind, stage, date_key, model_key, folder_id)
-         VALUES ($1, $2, $3, $4, $5, '_default', $6)
-         ON CONFLICT (user_id, character_key, kind, stage, date_key)
-         DO UPDATE SET folder_id = EXCLUDED.folder_id`,
-        [opts.userId, characterKey, kindCache, stage, dateKey, leafId],
-      )
+      const formatFolderId = await ensureCachedSegment(client, {
+        userId: opts.userId,
+        path: formatPath,
+        parentId: characterFolderId,
+        name: formatName,
+        accessToken: opts.accessToken,
+        characterKey,
+        kind: kindCache,
+        stage: '_',
+        dateKey: '_',
+      })
 
-      return leafId
+      const stageFolderId = await ensureCachedSegment(client, {
+        userId: opts.userId,
+        path: stagePath,
+        parentId: formatFolderId,
+        name: stage,
+        accessToken: opts.accessToken,
+        characterKey,
+        kind: kindCache,
+        stage,
+        dateKey: '_',
+      })
+
+      return ensureCachedSegment(client, {
+        userId: opts.userId,
+        path: leafPath,
+        parentId: stageFolderId,
+        name: dateKey,
+        accessToken: opts.accessToken,
+        characterKey,
+        kind: kindCache,
+        stage,
+        dateKey,
+      })
     } finally {
       await client.query('SELECT pg_advisory_unlock(hashtext($1::text))', [lockKey])
     }
