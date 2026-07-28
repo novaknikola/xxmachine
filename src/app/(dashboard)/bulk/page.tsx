@@ -504,8 +504,7 @@ function BulkPageInner() {
   }
 
   function isSeedreamRefOnlyMode(): boolean {
-    return carouselMode
-      && carouselRefImages.length > 0
+    return carouselRefImages.length > 0
       && !bulkLoraUrl
       && selectedCharIds.length === 0
   }
@@ -515,7 +514,7 @@ function BulkPageInner() {
     if (!lines.length) { toast.error('Add at least one prompt'); return }
     const refOnly = isSeedreamRefOnlyMode()
     if (!selectedCharIds.length && !bulkLoraUrl && !refOnly) {
-      toast.error('Select a character, LoRA, or upload reference images (carousel)')
+      toast.error('Select a character, LoRA, or upload Seedream reference images')
       return
     }
 
@@ -682,6 +681,10 @@ function BulkPageInner() {
     if (!jobs.length) { toast.error('No tasks to submit'); return }
     try {
       const refOnly = isSeedreamRefOnlyMode()
+      if (refOnly && !carouselMode) {
+        toast.error('Seedream-only (refs, no character) — use Run on this page; Queue needs a character/LoRA or Generate carousel')
+        return
+      }
       let referenceImageUrls: string[] | undefined
       if (carouselMode && carouselRefImages.length) {
         referenceImageUrls = await uploadCarouselRefImages()
@@ -1362,74 +1365,80 @@ function BulkPageInner() {
                       )}
                     </span>
                   </div>
-                  {carouselMode && !bulkLoraUrl && selectedCharIds.length === 0 && carouselRefImages.length === 0 && (
+                  {!bulkLoraUrl && selectedCharIds.length === 0 && carouselRefImages.length === 0 && (
                     <p className="text-[10px] text-muted-foreground/70">
-                      No LoRA selected — upload reference images above to run carousel via Seedream only.
+                      No character/LoRA — upload Seedream references below to generate without Z-image.
                     </p>
                   )}
-                  {carouselMode && (
-                    <div className="space-y-2">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <Label className="text-xs text-muted-foreground">Seedream reference images</Label>
-                        {seedreamRefOnly && (
-                          <Badge variant="secondary" className="text-[10px] h-5">Seedream-only — no Z-image</Badge>
-                        )}
-                      </div>
-                      <p className="text-[10px] text-muted-foreground/70 leading-relaxed">
-                        {seedreamRefOnly
-                          ? 'Without LoRA, references drive identity — base slide and all variants use Seedream only (consistent hair, skin, outfit).'
-                          : 'Optional extras sent with each variant edit alongside the Z-image base — improves detail consistency.'}
-                      </p>
-                      <input
-                        ref={carouselRefInputRef}
-                        type="file"
-                        accept="image/jpeg,image/png,image/webp"
-                        multiple
-                        className="hidden"
-                        onChange={e => { addCarouselRefImages(e.target.files); e.target.value = '' }}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => carouselRefInputRef.current?.click()}
-                        disabled={carouselRefImages.length >= MAX_CAROUSEL_REF_IMAGES}
-                        className="w-full border-2 border-dashed border-border rounded-xl p-4 flex flex-col items-center gap-1.5 hover:border-primary/50 hover:bg-primary/5 transition-colors text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:pointer-events-none"
-                      >
-                        <Upload className="w-5 h-5" />
-                        <span className="text-xs">Upload reference photos</span>
-                        <span className="text-[10px] opacity-60">Up to {MAX_CAROUSEL_REF_IMAGES} — face, hair, outfit detail</span>
-                      </button>
-                      {carouselRefImages.length > 0 && (
-                        <div className="grid grid-cols-5 gap-2">
-                          {carouselRefImages.map(img => (
-                            <div key={img.id} className="relative group aspect-square rounded-lg overflow-hidden border border-border">
-                              {/* eslint-disable-next-line @next/next/no-img-element */}
-                              <img src={img.url} alt="" className="w-full h-full object-cover" />
-                              <button
-                                type="button"
-                                onClick={() => setCarouselRefImages(prev => prev.filter(i => i.id !== img.id))}
-                                className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
-                              >
-                                <X className="w-2.5 h-2.5" />
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {carouselRefImages.length > 0 && (
-                        <p className="text-[10px] text-muted-foreground text-center">
-                          {carouselRefImages.length} reference image{carouselRefImages.length === 1 ? '' : 's'}
-                          {seedreamRefOnly
-                            ? ' — all slides via Seedream edit'
-                            : ' — base slide + refs on each variant'}
-                          {!seedreamRefOnly && carouselRefImages.length > SEEDREAM_MAX_IMAGES - 1 && (
-                            <span className="block text-amber-400/80">
-                              Variants use the first {SEEDREAM_MAX_IMAGES - 1} — the base slide takes one slot of {SEEDREAM_MAX_IMAGES}.
-                            </span>
-                          )}
-                        </p>
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Label className="text-xs text-muted-foreground">Seedream reference images</Label>
+                      {seedreamRefOnly && (
+                        <Badge variant="secondary" className="text-[10px] h-5">Seedream-only — no Z-image</Badge>
                       )}
                     </div>
-                  )}
+                    <p className="text-[10px] text-muted-foreground/70 leading-relaxed">
+                      {seedreamRefOnly
+                        ? carouselMode
+                          ? 'Without LoRA, references drive identity — base slide and all variants use Seedream only (consistent hair, skin, outfit).'
+                          : 'Without LoRA/character, references drive identity — each prompt runs as Seedream edit only.'
+                        : carouselMode
+                          ? 'Optional extras sent with each variant edit alongside the Z-image base — improves detail consistency.'
+                          : 'Optional. With a character/LoRA selected these are unused for single images; turn on Generate carousel to apply them on variants.'}
+                    </p>
+                    <input
+                      ref={carouselRefInputRef}
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      multiple
+                      className="hidden"
+                      onChange={e => { addCarouselRefImages(e.target.files); e.target.value = '' }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => carouselRefInputRef.current?.click()}
+                      disabled={carouselRefImages.length >= MAX_CAROUSEL_REF_IMAGES}
+                      className="w-full border-2 border-dashed border-border rounded-xl p-4 flex flex-col items-center gap-1.5 hover:border-primary/50 hover:bg-primary/5 transition-colors text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:pointer-events-none"
+                    >
+                      <Upload className="w-5 h-5" />
+                      <span className="text-xs">Upload reference photos</span>
+                      <span className="text-[10px] opacity-60">Up to {MAX_CAROUSEL_REF_IMAGES} — face, hair, outfit detail</span>
+                    </button>
+                    {carouselRefImages.length > 0 && (
+                      <div className="grid grid-cols-5 gap-2">
+                        {carouselRefImages.map(img => (
+                          <div key={img.id} className="relative group aspect-square rounded-lg overflow-hidden border border-border">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img src={img.url} alt="" className="w-full h-full object-cover" />
+                            <button
+                              type="button"
+                              onClick={() => setCarouselRefImages(prev => prev.filter(i => i.id !== img.id))}
+                              className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+                            >
+                              <X className="w-2.5 h-2.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {carouselRefImages.length > 0 && (
+                      <p className="text-[10px] text-muted-foreground text-center">
+                        {carouselRefImages.length} reference image{carouselRefImages.length === 1 ? '' : 's'}
+                        {seedreamRefOnly
+                          ? carouselMode
+                            ? ' — all slides via Seedream edit'
+                            : ' — Seedream edit (no Z-image)'
+                          : carouselMode
+                            ? ' — base slide + refs on each variant'
+                            : ' — ready for carousel variants (Generate carousel)'}
+                        {carouselMode && !seedreamRefOnly && carouselRefImages.length > SEEDREAM_MAX_IMAGES - 1 && (
+                          <span className="block text-amber-400/80">
+                            Variants use the first {SEEDREAM_MAX_IMAGES - 1} — the base slide takes one slot of {SEEDREAM_MAX_IMAGES}.
+                          </span>
+                        )}
+                      </p>
+                    )}
+                  </div>
                   <Button className="w-full" onClick={buildJobs}
                     disabled={promptCount === 0 || bulkModelCount === 0}>
                     <Layers className="w-4 h-4 mr-2" />
