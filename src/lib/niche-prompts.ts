@@ -5,6 +5,14 @@
 import type { NicheDefinition } from './niche-utils'
 import { IPHONE_SUFFIX } from './niche-utils'
 import { EXTRA_NICHE_DEFINITIONS } from './niches/extra-niches'
+import { getMyGifNicheById, isMyGifNicheId, mygifLibraryTags } from './niches/mygif-niches'
+
+export {
+  MYGIF_NICHE_DEFINITIONS,
+  getMyGifNicheById,
+  isMyGifNicheId,
+  mygifLibraryTags,
+} from './niches/mygif-niches'
 
 export type { NicheDefinition } from './niche-utils'
 export { NICHE_HAIR_DEFAULTS, getNicheHairDefault } from './niche-utils'
@@ -274,20 +282,25 @@ export const NICHE_DEFINITIONS: NicheDefinition[] = [
   ...EXTRA_NICHE_DEFINITIONS,
 ]
 
+/** Brand niches only — never includes MyGIF scrapes (Admin picker stays clean). */
 export function getNicheById(id: string): NicheDefinition | undefined {
   return NICHE_DEFINITIONS.find(n => n.id === id)
 }
 
 export function resolveNichePrompts(nicheId: string): string[] {
-  const niche = getNicheById(nicheId)
+  const niche = getNicheById(nicheId) ?? getMyGifNicheById(nicheId)
   return niche ? [...niche.prompts] : []
 }
 
 /** Tags for prompt_library when saving a niche full feed. */
 export function nicheLibraryTags(nicheId: string): string[] {
+  if (isMyGifNicheId(nicheId)) return mygifLibraryTags(nicheId)
   return ['static-bundle', 'niche', `niche-${nicheId}`, 'full-feed']
 }
 
 export function nicheAiLibraryTags(nicheId: string): string[] {
+  if (isMyGifNicheId(nicheId)) {
+    return ['grok-generated', 'mygif', nicheId, 'full-feed']
+  }
   return ['grok-generated', 'niche', `niche-${nicheId}`, 'full-feed']
 }
