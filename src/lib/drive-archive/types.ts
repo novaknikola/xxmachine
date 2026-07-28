@@ -16,4 +16,6 @@ export interface EnqueueDriveArchiveInput {
   modelKey?: string | null
   /** Default ready — publish folder. raw = originals before repurpose. */
   stage?: import('./content-format').DriveArchiveStage | null
+  /** UTC YYYY-MM-DD; defaults to today at enqueue time. */
+  dateKey?: string | null
 }

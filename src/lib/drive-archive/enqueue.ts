@@ -1,5 +1,6 @@
 import { one, query } from '@/lib/db'
 import {
+  archiveDateKey,
   buildArchiveFilename,
   guessMimeType,
   hashUrl,
@@ -49,6 +50,7 @@ export async function enqueueDriveArchive(
   const characterKey = sanitizeDriveKey(input.characterKey)
   const modelKey = sanitizeDriveKey(input.modelKey, '_default')
   const stage = normalizeDriveStage(input.stage)
+  const dateKey = (input.dateKey || '').trim() || archiveDateKey()
   let enqueued = 0
 
   for (let i = 0; i < urls.length; i++) {
@@ -62,13 +64,14 @@ export async function enqueueDriveArchive(
       mimeType,
       index: i,
       total: urls.length,
+      modelKey,
     })
 
     const result = await query(
       `INSERT INTO drive_exports
          (user_id, source_type, source_id, source_url, url_hash, filename, mime_type,
-          character_key, kind, stage, model_key, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending')
+          character_key, kind, stage, date_key, model_key, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending')
        ON CONFLICT (user_id, source_type, source_id, url_hash) DO NOTHING
        RETURNING id`,
       [
@@ -82,6 +85,7 @@ export async function enqueueDriveArchive(
         characterKey,
         input.kind,
         stage,
+        dateKey,
         modelKey,
       ],
     )

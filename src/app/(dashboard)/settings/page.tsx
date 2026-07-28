@@ -663,8 +663,8 @@ function DriveArchiveTab() {
         <p className="font-semibold text-foreground text-sm">How it works</p>
         <ul className="space-y-1.5">
           <li>• Files stay in app storage; Drive gets a copy after generation finishes.</li>
-          <li>• Folder layout: character → stories/carousels/reels → ready|raw → AI model.</li>
-          <li>• Pick Story / Carousel / Video when generating — that chooses the folder + repurpose profile.</li>
+          <li>• Folder layout: girl → stories|carousel|video → ready|raw → YYYY-MM-DD (AI model in filename).</li>
+          <li>• Pick Story / Carousel / Video + Drive folder (girl) when generating — creates the folder if missing.</li>
           <li>• Images and Copy-Paste videos auto-repurpose into ready/; originals only in raw/. Failures retry then skip (never original in ready/).</li>
           <li>• Uploads run on the server (cron + kick after enqueue).</li>
         </ul>

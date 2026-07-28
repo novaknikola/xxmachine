@@ -30,6 +30,7 @@ import {
 } from '@/lib/canvas-utils'
 import {
   CONTENT_FORMATS,
+  driveFormatFolderName,
   suggestedDimensionForFormat,
   type ContentFormat,
 } from '@/lib/drive-archive/content-format'
@@ -416,6 +417,7 @@ export function GenerateTab() {
   const [dimension, setDimension] = useState('9:16')
   const [batch, setBatch] = useState(1)
   const [contentFormat, setContentFormat] = useState<ContentFormat>('stories')
+  const [driveLabel, setDriveLabel] = useState('')
   const [loading, setLoading] = useState(false)
 
   const [slides, setSlides] = useState<Slide[]>([])
@@ -444,13 +446,23 @@ export function GenerateTab() {
         if (cancelled) return
 
         setCharacters(chars)
-        setCharacterId(prev => prev || (chars.length > 0 ? chars[0].id : ''))
+        setCharacterId(prev => {
+          const next = prev || (chars.length > 0 ? chars[0].id : '')
+          const char = chars.find((c: Character) => c.id === next)
+          if (char) setDriveLabel(char.name)
+          return next
+        })
       } catch (err) {
         console.error('[GenerateTab] failed to load characters from API', err)
         const fallback = charactersStore.getAll()
         if (!cancelled) {
           setCharacters(fallback)
-          setCharacterId(prev => prev || (fallback.length > 0 ? fallback[0].id : ''))
+          setCharacterId(prev => {
+            const next = prev || (fallback.length > 0 ? fallback[0].id : '')
+            const char = fallback.find(c => c.id === next)
+            if (char) setDriveLabel(char.name)
+            return next
+          })
         }
       } finally {
         if (!cancelled) refreshHistory()
@@ -469,12 +481,14 @@ export function GenerateTab() {
     if (!characterId) { toast.error('Select a character'); return }
     const character = characters.find(c => c.id === characterId)
     if (!character) return
+    const folderLabel = driveLabel.trim() || character.name
+    if (!folderLabel) { toast.error('Enter a Drive folder name (girl)'); return }
 
     const row: GenerationRow = {
       id: crypto.randomUUID(),
       kind: 'text2img',
       characterId,
-      characterName: character.name,
+      characterName: folderLabel,
       prompt: prompt.trim(),
       dimension,
       batch,
@@ -500,7 +514,7 @@ export function GenerateTab() {
           loraUrl: character.loraUrl,
           loraScale: character.loraScale,
           characterId,
-          characterName: character.name,
+          characterName: folderLabel,
           userId: user?.id,
           contentFormat,
         }),
@@ -576,7 +590,12 @@ export function GenerateTab() {
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
           <div className="space-y-1.5">
             <Label className="text-xs text-muted-foreground uppercase tracking-wider">Character</Label>
-            <Select value={characterId} onValueChange={(v: string | null) => { if (v) setCharacterId(v) }}>
+            <Select value={characterId} onValueChange={(v: string | null) => {
+              if (!v) return
+              setCharacterId(v)
+              const char = characters.find(c => c.id === v)
+              if (char) setDriveLabel(char.name)
+            }}>
               <SelectTrigger className="bg-input border-border"><SelectValue placeholder="Select character" /></SelectTrigger>
               <SelectContent>
                 {characters.map(c => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
@@ -587,6 +606,21 @@ export function GenerateTab() {
                 <p className="text-xs text-muted-foreground line-clamp-3">{selectedChar.story || 'No character description.'}</p>
               </div>
             )}
+          </div>
+
+          <div className="space-y-1.5">
+            <Label className="text-xs text-muted-foreground uppercase tracking-wider">
+              Drive folder (girl)
+            </Label>
+            <Input
+              value={driveLabel}
+              onChange={e => setDriveLabel(e.target.value)}
+              placeholder="e.g. tiana"
+              className="bg-input border-border h-9 text-sm"
+            />
+            <p className="text-[10px] text-muted-foreground/70 leading-snug">
+              Creates or reuses this folder under XXMachine Archives. Prefills from character.
+            </p>
           </div>
 
           <Separator className="bg-border/50" />
@@ -618,9 +652,10 @@ export function GenerateTab() {
             <p className="text-[10px] text-muted-foreground/80 leading-snug">
               Auto-repurpose → Drive{' '}
               <span className="font-mono text-foreground/80">
-                {selectedChar?.name || 'Model'}/{contentFormat}/ready/…
+                {(driveLabel.trim() || selectedChar?.name || 'girl').toLowerCase()}/
+                {driveFormatFolderName(contentFormat)}/ready/YYYY-MM-DD/
               </span>
-              {' '}(originals also saved under raw/).
+              {' '}(originals under raw/).
             </p>
           </div>
 

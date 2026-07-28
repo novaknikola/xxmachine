@@ -40,6 +40,7 @@ import { buildStyledScenePrompt, withTriggerWord } from '@/lib/character-prompt'
 import { SEEDREAM_MAX_IMAGES, type SeedreamResolution } from '@/lib/wavespeed'
 import {
   CONTENT_FORMATS,
+  driveFormatFolderName,
   suggestedDimensionForFormat,
   type ContentFormat,
 } from '@/lib/drive-archive/content-format'
@@ -208,6 +209,7 @@ function BulkPageInner() {
   const [promptsRaw, setPromptsRaw] = useState('')
   const [dimension, setDimension] = useState('9:16')
   const [contentFormat, setContentFormat] = useState<ContentFormat>('stories')
+  const [driveLabel, setDriveLabel] = useState('')
   const [jobs, setJobs] = useState<BulkJob[]>([])
   const [running, setRunning] = useState(false)
   const [expandedJobs, setExpandedJobs] = useState<Set<string>>(new Set())
@@ -517,23 +519,33 @@ function BulkPageInner() {
       toast.error('Select a character, LoRA, or upload Seedream reference images')
       return
     }
+    if (refOnly && !driveLabel.trim() && selectedCharIds.length === 0) {
+      toast.error('Enter a Drive folder name (girl) for Seedream-only jobs')
+      return
+    }
 
     const newJobs: BulkJob[] = []
     if (selectedCharIds.length > 0) {
       for (const charId of selectedCharIds) {
         const char = characters.find(c => c.id === charId)
         if (!char) continue
+        const folderName =
+          selectedCharIds.length === 1 && driveLabel.trim()
+            ? driveLabel.trim()
+            : char.name
         for (const prompt of lines) {
-          newJobs.push({ id: crypto.randomUUID(), characterId: charId, characterName: char.name, prompt, dimension, status: 'pending', outputUrls: [] })
+          newJobs.push({ id: crypto.randomUUID(), characterId: charId, characterName: folderName, prompt, dimension, status: 'pending', outputUrls: [] })
         }
       }
     } else if (refOnly) {
+      const folderName = driveLabel.trim() || 'seedream_refs'
       for (const prompt of lines) {
-        newJobs.push({ id: crypto.randomUUID(), characterId: '', characterName: 'Seedream refs', prompt, dimension, status: 'pending', outputUrls: [] })
+        newJobs.push({ id: crypto.randomUUID(), characterId: '', characterName: folderName, prompt, dimension, status: 'pending', outputUrls: [] })
       }
     } else {
+      const folderName = driveLabel.trim() || 'custom_lora'
       for (const prompt of lines) {
-        newJobs.push({ id: crypto.randomUUID(), characterId: '', characterName: 'Custom LoRA', prompt, dimension, status: 'pending', outputUrls: [] })
+        newJobs.push({ id: crypto.randomUUID(), characterId: '', characterName: folderName, prompt, dimension, status: 'pending', outputUrls: [] })
       }
     }
     setJobs(newJobs)
@@ -1181,7 +1193,18 @@ function BulkPageInner() {
                         {characters.map(char => {
                           const selected = selectedCharIds.includes(char.id)
                           return (
-                            <button key={char.id} onClick={() => setSelectedCharIds(prev => prev.includes(char.id) ? prev.filter(x => x !== char.id) : [...prev, char.id])}
+                            <button key={char.id} onClick={() => {
+                              setSelectedCharIds(prev => {
+                                const next = prev.includes(char.id)
+                                  ? prev.filter(x => x !== char.id)
+                                  : [...prev, char.id]
+                                if (next.length === 1) {
+                                  const only = characters.find(c => c.id === next[0])
+                                  if (only) setDriveLabel(only.name)
+                                }
+                                return next
+                              })
+                            }}
                               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border text-left transition-all ${selected ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/40 text-muted-foreground hover:text-foreground'}`}>
                               <div className={`w-4 h-4 rounded border-2 flex items-center justify-center shrink-0 ${selected ? 'border-primary bg-primary' : 'border-muted-foreground/40'}`}>
                                 {selected && <CheckCircle2 className="w-3 h-3 text-primary-foreground" />}
@@ -1206,7 +1229,21 @@ function BulkPageInner() {
                   )}
                   <Separator />
                   <div className="space-y-1.5">
-                    <Label className="text-xs text-muted-foreground">For (Drive folder)</Label>
+                    <Label className="text-xs text-muted-foreground">Drive folder (girl)</Label>
+                    <Input
+                      value={driveLabel}
+                      onChange={e => setDriveLabel(e.target.value)}
+                      placeholder="e.g. tiana"
+                      className="h-8 text-xs"
+                    />
+                    <p className="text-[10px] text-muted-foreground/70 leading-snug">
+                      Reuses this folder on Drive if it exists, otherwise creates it.
+                      {selectedCharIds.length > 1 ? ' Multi-select uses each character name.' : ''}
+                    </p>
+                  </div>
+                  <Separator />
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-muted-foreground">For (publish format)</Label>
                     <div className="grid grid-cols-3 gap-1.5">
                       {CONTENT_FORMATS.map(f => (
                         <button
@@ -1229,9 +1266,11 @@ function BulkPageInner() {
                       ))}
                     </div>
                     <p className="text-[10px] text-muted-foreground/70 leading-snug">
-                      Auto-repurpose → Drive{' '}
+                      Path:{' '}
                       <span className="font-mono">
-                        {'{Model}'}/{carouselMode ? 'carousels' : contentFormat}/ready/…
+                        {(driveLabel.trim() || '{girl}').toLowerCase()}/
+                        {driveFormatFolderName(carouselMode ? 'carousels' : contentFormat)}
+                        /ready/YYYY-MM-DD/
                       </span>
                     </p>
                   </div>

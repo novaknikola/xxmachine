@@ -1,4 +1,4 @@
-import { Pool, type QueryResult, type QueryResultRow } from 'pg'
+import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from 'pg'
 
 declare global {
   // eslint-disable-next-line no-var
@@ -47,4 +47,14 @@ export async function one<T extends QueryResultRow = QueryResultRow>(
 ): Promise<T | null> {
   const r = await query<T>(text, params)
   return r.rows[0] ?? null
+}
+
+/** Borrow a client for transactions / advisory locks. Always releases. */
+export async function withClient<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await getPool().connect()
+  try {
+    return await fn(client)
+  } finally {
+    client.release()
+  }
 }

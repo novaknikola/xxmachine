@@ -24,6 +24,7 @@ interface DriveExportRow {
   character_key: string
   kind: string
   stage: string
+  date_key: string
   model_key: string
   attempts: number
 }
@@ -59,7 +60,7 @@ async function claimNextExport(): Promise<DriveExportRow | null> {
          FOR UPDATE SKIP LOCKED
       )
       RETURNING e.id, e.user_id, e.source_url, e.filename, e.mime_type,
-                e.character_key, e.kind, e.stage, e.model_key, e.attempts`,
+                e.character_key, e.kind, e.stage, e.date_key, e.model_key, e.attempts`,
     [MAX_ATTEMPTS],
   )
 }
@@ -139,8 +140,8 @@ async function processOne(row: DriveExportRow): Promise<'done' | 'failed' | 'ski
       userId: row.user_id,
       characterKey: row.character_key,
       kind: row.kind as DriveArchiveKind,
-      modelKey: row.model_key,
       stage: row.stage,
+      dateKey: row.date_key,
       accessToken,
       rootFolderId: user.drive_root_folder_id,
     })
