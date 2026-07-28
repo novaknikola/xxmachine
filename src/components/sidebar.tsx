@@ -45,7 +45,7 @@ const NAV_ITEMS: NavItem[] = [
     icon: ImageIcon,
     module: 'generator',
     children: [
-      { href: '/bulk?tab=generate', label: 'Image Generate', icon: Sparkles },
+      { href: '/bulk', label: 'Image Generate', icon: Sparkles },
       { href: '/bulk?tab=dataset', label: 'Dataset', icon: Database },
       { href: '/bulk?tab=train', label: 'Train LoRA', icon: Layers },
       { href: '/bulk?tab=bulk', label: 'Bulk Generate', icon: ImageIcon },
@@ -106,12 +106,11 @@ function pathMatches(href: string, pathname: string, search: string) {
 }
 
 function childIsActive(child: NavItem, pathname: string, search: string) {
-  return (
-    pathMatches(child.href, pathname, search)
-    || (child.href.startsWith('/bulk?tab=generate')
-      && pathname.startsWith('/bulk')
-      && !search.includes('tab='))
-  )
+  // Image Generate lives at bare /bulk (no tab query).
+  if (child.href === '/bulk') {
+    return pathname.startsWith('/bulk') && !search.includes('tab=')
+  }
+  return pathMatches(child.href, pathname, search)
 }
 
 function groupIsActive(item: NavItem, pathname: string, search: string) {
@@ -142,6 +141,7 @@ function NavLink({
   return (
     <Link
       href={item.href}
+      prefetch={false}
       onClick={onNavigate}
       className={navTriggerClass(active)}
     >
@@ -255,6 +255,7 @@ function NavFlyout({
                 <Link
                   key={child.href}
                   href={child.href}
+                  prefetch={false}
                   role="menuitem"
                   onClick={() => {
                     setOpen(false)
@@ -329,6 +330,7 @@ function NavAccordion({
               <Link
                 key={child.href}
                 href={child.href}
+                prefetch={false}
                 onClick={onNavigate}
                 className={cn(
                   'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors min-h-10',

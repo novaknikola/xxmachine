@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback, Suspense } from 'react'
+import { useState, useEffect, useRef, useCallback, Suspense, lazy } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useAuth } from '@/contexts/auth-context'
 import { charactersStore, generationsStore } from '@/lib/store'
@@ -35,10 +35,21 @@ import {
   FolderDown, Upload, Cpu, Database, Plus, X, RefreshCw, HelpCircle,
   ListTodo,
 } from 'lucide-react'
-import { PromptHelpDialog, InstagramBundleDialog } from './prompt-library'
+import { GenerateTab } from './generate-tab'
 import { buildStyledScenePrompt, withTriggerWord } from '@/lib/character-prompt'
 import { SEEDREAM_MAX_IMAGES, type SeedreamResolution } from '@/lib/wavespeed'
-import { GenerateTab } from './generate-tab'
+import {
+  CONTENT_FORMATS,
+  suggestedDimensionForFormat,
+  type ContentFormat,
+} from '@/lib/drive-archive/content-format'
+
+const PromptHelpDialog = lazy(() =>
+  import('./prompt-library').then(m => ({ default: m.PromptHelpDialog })),
+)
+const InstagramBundleDialog = lazy(() =>
+  import('./prompt-library').then(m => ({ default: m.InstagramBundleDialog })),
+)
 import { CarouselTab } from './carousel-tab'
 
 // ─── Types ────────────────────────────────────────────────────
@@ -144,13 +155,26 @@ function BulkPageInner() {
   const [loras, setLoras] = useState<LoraRow[]>([])
 
   useEffect(() => {
-    const next = TAB_FROM_QUERY[searchParams.get('tab') ?? ''] ?? 'Image Generate'
-    setTabState(next)
+    const raw = searchParams.get('tab') ?? ''
+    const next = TAB_FROM_QUERY[raw] ?? 'Image Generate'
+    setTabState(prev => (prev === next ? prev : next))
   }, [searchParams])
 
   function setTab(next: Tab) {
     setTabState(next)
     const q = QUERY_FROM_TAB[next]
+    const current = searchParams.get('tab')
+    // Image Generate uses bare /bulk; treat ?tab=generate as already there.
+    const alreadyOnTab =
+      (q === 'generate' && (current === null || current === '' || current === 'generate'))
+      || (q !== 'generate' && current === q)
+    if (alreadyOnTab) {
+      // One-shot normalize so sidebar ?tab=generate and page /bulk stay in sync.
+      if (q === 'generate' && current === 'generate') {
+        router.replace('/bulk', { scroll: false })
+      }
+      return
+    }
     router.replace(q === 'generate' ? '/bulk' : `/bulk?tab=${q}`, { scroll: false })
   }
 
@@ -183,6 +207,7 @@ function BulkPageInner() {
   const [selectedCharIds, setSelectedCharIds] = useState<string[]>([])
   const [promptsRaw, setPromptsRaw] = useState('')
   const [dimension, setDimension] = useState('9:16')
+  const [contentFormat, setContentFormat] = useState<ContentFormat>('stories')
   const [jobs, setJobs] = useState<BulkJob[]>([])
   const [running, setRunning] = useState(false)
   const [expandedJobs, setExpandedJobs] = useState<Set<string>>(new Set())
@@ -224,6 +249,7 @@ function BulkPageInner() {
   useEffect(() => {
     if (!carouselMode) return
     setCarouselExtra(recommendedCarouselExtras(carouselPresetId))
+    setContentFormat('carousels')
   }, [carouselMode, carouselPresetId])
 
   useEffect(() => {
@@ -418,7 +444,7 @@ function BulkPageInner() {
     prompt: string,
     size: string,
     imageUrls: string[],
-    meta?: { characterId?: string; characterName?: string },
+    meta?: { characterId?: string; characterName?: string; contentFormat?: ContentFormat },
   ): Promise<string[]> {
     const res = await fetch('/api/edit-image', {
       method: 'POST',
@@ -433,6 +459,7 @@ function BulkPageInner() {
         kind: 'seedream_edit',
         characterId: meta?.characterId,
         characterName: meta?.characterName,
+        contentFormat: meta?.contentFormat ?? contentFormat,
       }),
     })
     const data = await res.json()
@@ -542,12 +569,23 @@ function BulkPageInner() {
         baseUrls = await callSeedreamEdit(generationPrompt, job.dimension, refUrls, {
           characterId: job.characterId || undefined,
           characterName: job.characterName,
+          contentFormat: carouselMode ? 'carousels' : contentFormat,
         })
       } else {
         const res = await fetch('/api/generate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt: generationPrompt, dimension: job.dimension, batch: 1, loraUrl, loraScale, characterId: job.characterId, characterName: job.characterName, userId: user?.id }),
+          body: JSON.stringify({
+            prompt: generationPrompt,
+            dimension: job.dimension,
+            batch: 1,
+            loraUrl,
+            loraScale,
+            characterId: job.characterId,
+            characterName: job.characterName,
+            userId: user?.id,
+            contentFormat: carouselMode ? 'carousels' : contentFormat,
+          }),
         })
         const data = await res.json()
         if (!res.ok || data.error) throw new Error(data.error ?? 'API error')
@@ -595,6 +633,7 @@ function BulkPageInner() {
             {
               characterId: job.characterId || undefined,
               characterName: job.characterName,
+              contentFormat: 'carousels',
             },
           )
           return editUrls[0]
@@ -1164,6 +1203,37 @@ function BulkPageInner() {
                   )}
                   <Separator />
                   <div className="space-y-1.5">
+                    <Label className="text-xs text-muted-foreground">For (Drive folder)</Label>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {CONTENT_FORMATS.map(f => (
+                        <button
+                          key={f.id}
+                          type="button"
+                          title={f.hint}
+                          disabled={carouselMode && f.id !== 'carousels'}
+                          onClick={() => {
+                            setContentFormat(f.id)
+                            if (!carouselMode) setDimension(suggestedDimensionForFormat(f.id))
+                          }}
+                          className={`py-2 rounded-md text-xs font-medium border transition-colors disabled:opacity-40 ${
+                            (carouselMode ? 'carousels' : contentFormat) === f.id
+                              ? 'bg-primary text-primary-foreground border-primary'
+                              : 'bg-secondary border-border text-muted-foreground hover:text-foreground'
+                          }`}
+                        >
+                          {f.label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-muted-foreground/70 leading-snug">
+                      Auto-repurpose → Drive{' '}
+                      <span className="font-mono">
+                        {'{Model}'}/{carouselMode ? 'carousels' : contentFormat}/ready/…
+                      </span>
+                    </p>
+                  </div>
+                  <Separator />
+                  <div className="space-y-1.5">
                     <Label className="text-xs text-muted-foreground">Dimension</Label>
                     <Select value={dimension} onValueChange={(v) => setDimension(v ?? '')}>
                       <SelectTrigger><SelectValue /></SelectTrigger>
@@ -1177,7 +1247,18 @@ function BulkPageInner() {
                   <Separator />
                   <div className="space-y-1.5">
                     <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
-                      <input type="checkbox" checked={carouselMode} onChange={e => setCarouselMode(e.target.checked)} className="accent-primary" />
+                      <input
+                        type="checkbox"
+                        checked={carouselMode}
+                        onChange={e => {
+                          const on = e.target.checked
+                          setCarouselMode(on)
+                          if (on) {
+                            setContentFormat('carousels')
+                          }
+                        }}
+                        className="accent-primary"
+                      />
                       Generate carousel
                     </label>
                     {carouselMode && (
@@ -1442,39 +1523,47 @@ function BulkPageInner() {
         </div>
       )}
 
-      <PromptHelpDialog
-        open={showPromptHelp}
-        onClose={() => setShowPromptHelp(false)}
-        onAdd={prompts => {
-          if (tab === 'Bulk Generate') {
-            setPromptsRaw(prev => {
-              const existing = prev.trim()
-              return existing ? existing + '\n' + prompts.join('\n') : prompts.join('\n')
-            })
-          } else {
-            setDatasetPrompts(prev => {
-              const existing = prev.trim()
-              return existing ? existing + '\n' + prompts.join('\n') : prompts.join('\n')
-            })
-          }
-          setShowPromptHelp(false)
-          toast.success(`Added ${prompts.length} prompt${prompts.length > 1 ? 's' : ''}`)
-        }}
-      />
+      {showPromptHelp && (
+        <Suspense fallback={null}>
+          <PromptHelpDialog
+            open={showPromptHelp}
+            onClose={() => setShowPromptHelp(false)}
+            onAdd={prompts => {
+              if (tab === 'Bulk Generate') {
+                setPromptsRaw(prev => {
+                  const existing = prev.trim()
+                  return existing ? existing + '\n' + prompts.join('\n') : prompts.join('\n')
+                })
+              } else {
+                setDatasetPrompts(prev => {
+                  const existing = prev.trim()
+                  return existing ? existing + '\n' + prompts.join('\n') : prompts.join('\n')
+                })
+              }
+              setShowPromptHelp(false)
+              toast.success(`Added ${prompts.length} prompt${prompts.length > 1 ? 's' : ''}`)
+            }}
+          />
+        </Suspense>
+      )}
 
-      <InstagramBundleDialog
-        open={showBundleDialog}
-        onClose={() => setShowBundleDialog(false)}
-        highlightNicheId={selectedCharIds.length === 1 ? characters.find(c => c.id === selectedCharIds[0])?.recommendedNicheId : undefined}
-        onApply={(prompts, replace) => {
-          setPromptsRaw(prev => {
-            if (replace) return prompts.join('\n')
-            const existing = prev.trim()
-            return existing ? existing + '\n' + prompts.join('\n') : prompts.join('\n')
-          })
-          toast.success(`Applied ${prompts.length} prompts`)
-        }}
-      />
+      {showBundleDialog && (
+        <Suspense fallback={null}>
+          <InstagramBundleDialog
+            open={showBundleDialog}
+            onClose={() => setShowBundleDialog(false)}
+            highlightNicheId={selectedCharIds.length === 1 ? characters.find(c => c.id === selectedCharIds[0])?.recommendedNicheId : undefined}
+            onApply={(prompts, replace) => {
+              setPromptsRaw(prev => {
+                if (replace) return prompts.join('\n')
+                const existing = prev.trim()
+                return existing ? existing + '\n' + prompts.join('\n') : prompts.join('\n')
+              })
+              toast.success(`Applied ${prompts.length} prompts`)
+            }}
+          />
+        </Suspense>
+      )}
     </div>
   )
 }

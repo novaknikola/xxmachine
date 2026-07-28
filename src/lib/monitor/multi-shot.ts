@@ -8,6 +8,7 @@ import { one, query } from '@/lib/db'
 import { uploadBuffer } from '@/lib/supabase-storage'
 import { generateReplicaVideo } from './replicate'
 import { notifyReplicationDone } from './notify'
+import { archiveDiscoveryItem } from '@/lib/drive-archive/from-discovery-item'
 import {
   downloadToFile,
   expandRefsForMotion,
@@ -255,6 +256,9 @@ export async function processMultiShotJob(opts: {
         WHERE id = $1`,
       [input.discoveryItemId, finalUrl, 'multi_shot+kling-motion-control'],
     )
+
+    await archiveDiscoveryItem(input.discoveryItemId)
+      .catch(err => console.error('[monitor/multi-shot] drive archive failed:', err))
 
     if (item) {
       await notifyReplicationDone({

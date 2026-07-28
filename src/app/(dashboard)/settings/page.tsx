@@ -1,10 +1,8 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { useAuth } from '@/contexts/auth-context'
-import { Button } from '@/components/ui/button'
+import { Button, buttonVariants } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Badge } from '@/components/ui/badge'
 import { toast } from 'sonner'
 import {
   User,
@@ -17,6 +15,9 @@ import {
   XCircle,
   Zap,
   Circle,
+  HardDrive,
+  ExternalLink,
+  Unplug,
 } from 'lucide-react'
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -452,12 +453,231 @@ function ContentEngineTab() {
   )
 }
 
+// ─── Drive Archive Tab ────────────────────────────────────────────
+
+interface DriveArchiveStatus {
+  connected: boolean
+  autoArchive: boolean
+  rootFolderId: string | null
+  rootFolderUrl: string | null
+  pendingExports: number
+}
+
+function DriveArchiveTab() {
+  const [status, setStatus] = useState<DriveArchiveStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+
+  async function load() {
+    setLoading(true)
+    try {
+      const res = await fetch('/api/settings/drive-archive')
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to load')
+      setStatus(data)
+    } catch (err) {
+      toast.error(String(err))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    load()
+  }, [])
+
+  async function toggleArchive(enabled: boolean) {
+    setBusy(true)
+    try {
+      const res = await fetch('/api/settings/drive-archive', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'toggle', autoArchive: enabled }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      setStatus(s => (s ? { ...s, autoArchive: data.autoArchive } : s))
+      toast.success(enabled ? 'Auto-archive enabled' : 'Auto-archive disabled')
+    } catch (err) {
+      toast.error(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function disconnect() {
+    setBusy(true)
+    try {
+      const res = await fetch('/api/settings/drive-archive', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'disconnect' }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      setStatus({
+        connected: false,
+        autoArchive: false,
+        rootFolderId: null,
+        rootFolderUrl: null,
+        pendingExports: 0,
+      })
+      toast.success('Google Drive disconnected')
+    } catch (err) {
+      toast.error(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function ensureRoot() {
+    setBusy(true)
+    try {
+      const res = await fetch('/api/settings/drive-archive', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'ensure_root' }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      setStatus(s =>
+        s
+          ? {
+              ...s,
+              rootFolderId: data.rootFolderId,
+              rootFolderUrl: data.rootFolderUrl,
+            }
+          : s,
+      )
+      toast.success('Archive folder ready')
+    } catch (err) {
+      toast.error(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-16">
+        <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="glass-card rounded-2xl p-6 space-y-5">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+            <HardDrive className="w-4 h-4 text-primary" /> Google Drive archive
+          </h3>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Automatically copy finished generations into your Drive under
+            {' '}<span className="text-foreground">XXMachine Archives</span>
+            {' '}(by character → type → AI model). Uploads run in the background — no local download needed.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+              status?.connected
+                ? 'bg-emerald-500/15 text-emerald-400'
+                : 'bg-secondary text-muted-foreground'
+            }`}
+          >
+            {status?.connected ? 'Connected' : 'Not connected'}
+          </span>
+          {status?.connected && (
+            <span className="text-[10px] text-muted-foreground">
+              {status.pendingExports} pending upload{status.pendingExports === 1 ? '' : 's'}
+            </span>
+          )}
+        </div>
+
+        {!status?.connected ? (
+          <a
+            href="/api/google/auth?purpose=archive"
+            className={buttonVariants({ size: 'sm', className: 'h-8' })}
+          >
+            Connect Google Drive
+          </a>
+        ) : (
+          <div className="space-y-4">
+            <label className="flex items-start gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                className="mt-0.5 accent-primary"
+                checked={status.autoArchive}
+                disabled={busy}
+                onChange={e => toggleArchive(e.target.checked)}
+              />
+              <span>
+                <span className="text-sm text-foreground">Auto-archive generations</span>
+                <span className="block text-xs text-muted-foreground mt-0.5">
+                  When on, finished Image Studio and Copy-Paste outputs are uploaded to Drive in the background.
+                </span>
+              </span>
+            </label>
+
+            <div className="flex flex-wrap gap-2">
+              {status.rootFolderUrl ? (
+                <a
+                  href={status.rootFolderUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={buttonVariants({ size: 'sm', variant: 'outline', className: 'h-8' })}
+                >
+                  <ExternalLink className="w-3.5 h-3.5 mr-1.5" />
+                  Open archive folder
+                </a>
+              ) : (
+                <Button size="sm" variant="outline" className="h-8" disabled={busy} onClick={ensureRoot}>
+                  {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" /> : null}
+                  Create archive folder
+                </Button>
+              )}
+              <a
+                href="/api/google/auth?purpose=archive"
+                className={buttonVariants({ size: 'sm', variant: 'outline', className: 'h-8' })}
+              >
+                Reconnect
+              </a>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 text-destructive hover:text-destructive"
+                disabled={busy}
+                onClick={disconnect}
+              >
+                <Unplug className="w-3.5 h-3.5 mr-1.5" />
+                Disconnect
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="glass-card rounded-2xl p-5 space-y-2 text-xs text-muted-foreground">
+        <p className="font-semibold text-foreground text-sm">How it works</p>
+        <ul className="space-y-1.5">
+          <li>• Files stay in app storage; Drive gets a copy after generation finishes.</li>
+          <li>• Folder layout: character → stories/carousels/reels → ready|raw → AI model.</li>
+          <li>• Pick Story / Carousel / Video when generating — that chooses the folder + repurpose profile.</li>
+          <li>• Images and Copy-Paste videos auto-repurpose into ready/; originals only in raw/. Failures retry then skip (never original in ready/).</li>
+          <li>• Uploads run on the server (cron + kick after enqueue).</li>
+        </ul>
+      </div>
+    </div>
+  )
+}
+
 // ─── Main Page ────────────────────────────────────────────────────
 
-type Tab = 'profile' | 'api_keys' | 'content_engine'
+type Tab = 'profile' | 'api_keys' | 'content_engine' | 'drive'
 
 export default function SettingsPage() {
-  const { user } = useAuth()
   const [tab, setTab] = useState<Tab>('profile')
   const [data, setData] = useState<SettingsData | null>(null)
   const [loading, setLoading] = useState(true)
@@ -470,13 +690,27 @@ export default function SettingsPage() {
       .finally(() => setLoading(false))
   }, [])
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('tab') === 'drive') setTab('drive')
+    if (params.get('google_connected') === '1') {
+      toast.success('Google Drive connected — auto-archive enabled')
+      window.history.replaceState({}, '', '/settings?tab=drive')
+    }
+    const err = params.get('google_error')
+    if (err) {
+      toast.error(`Google Drive: ${err}`)
+      window.history.replaceState({}, '', '/settings?tab=drive')
+    }
+  }, [])
+
   return (
     <div className="max-w-2xl mx-auto px-4 py-6 sm:px-6 space-y-6">
       {/* Header */}
       <div>
         <h1 className="text-2xl font-bold text-foreground">Settings</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Manage your profile and API keys
+          Manage your profile, API keys, and Drive archive
         </p>
       </div>
 
@@ -485,6 +719,7 @@ export default function SettingsPage() {
         <TabButton active={tab === 'profile'} onClick={() => setTab('profile')} icon={User} label="Profile" />
         <TabButton active={tab === 'api_keys'} onClick={() => setTab('api_keys')} icon={Key} label="API Keys" />
         <TabButton active={tab === 'content_engine'} onClick={() => setTab('content_engine')} icon={Zap} label="Content Engine" />
+        <TabButton active={tab === 'drive'} onClick={() => setTab('drive')} icon={HardDrive} label="Drive" />
       </div>
 
       {/* Content */}
@@ -499,6 +734,7 @@ export default function SettingsPage() {
           {tab === 'profile' && <ProfileTab initialData={data.profile} />}
           {tab === 'api_keys' && <ApiKeysTab initialPresence={data.apiKeys} />}
           {tab === 'content_engine' && <ContentEngineTab />}
+          {tab === 'drive' && <DriveArchiveTab />}
         </>
       )}
     </div>

@@ -28,6 +28,11 @@ import {
   applyText, renderToBlob, renderAugmented, randomTransform,
   TEXT_STYLE_OPTIONS, POSITION_OPTIONS, TextPosition, TextStyle,
 } from '@/lib/canvas-utils'
+import {
+  CONTENT_FORMATS,
+  suggestedDimensionForFormat,
+  type ContentFormat,
+} from '@/lib/drive-archive/content-format'
 
 const BATCH_OPTIONS = [1, 2, 3, 4, 5]
 const PAGE_SIZE = 10
@@ -410,6 +415,7 @@ export function GenerateTab() {
   const [prompt, setPrompt] = useState('')
   const [dimension, setDimension] = useState('9:16')
   const [batch, setBatch] = useState(1)
+  const [contentFormat, setContentFormat] = useState<ContentFormat>('stories')
   const [loading, setLoading] = useState(false)
 
   const [slides, setSlides] = useState<Slide[]>([])
@@ -487,7 +493,17 @@ export function GenerateTab() {
       const res = await fetch('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: fullPrompt, dimension, batch, loraUrl: character.loraUrl, loraScale: character.loraScale, characterId, characterName: character.name, userId: user?.id }),
+        body: JSON.stringify({
+          prompt: fullPrompt,
+          dimension,
+          batch,
+          loraUrl: character.loraUrl,
+          loraScale: character.loraScale,
+          characterId,
+          characterName: character.name,
+          userId: user?.id,
+          contentFormat,
+        }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'API error')
@@ -571,6 +587,41 @@ export function GenerateTab() {
                 <p className="text-xs text-muted-foreground line-clamp-3">{selectedChar.story || 'No character description.'}</p>
               </div>
             )}
+          </div>
+
+          <Separator className="bg-border/50" />
+
+          <div className="space-y-1.5">
+            <Label className="text-xs text-muted-foreground uppercase tracking-wider">
+              For (Drive folder)
+            </Label>
+            <div className="grid grid-cols-3 gap-1.5">
+              {CONTENT_FORMATS.map(f => (
+                <button
+                  key={f.id}
+                  type="button"
+                  title={f.hint}
+                  onClick={() => {
+                    setContentFormat(f.id)
+                    setDimension(suggestedDimensionForFormat(f.id))
+                  }}
+                  className={`py-2 rounded-md text-xs font-medium border transition-colors ${
+                    contentFormat === f.id
+                      ? 'bg-primary text-primary-foreground border-primary'
+                      : 'bg-secondary border-border text-muted-foreground hover:text-foreground hover:border-border/80'
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+            <p className="text-[10px] text-muted-foreground/80 leading-snug">
+              Auto-repurpose → Drive{' '}
+              <span className="font-mono text-foreground/80">
+                {selectedChar?.name || 'Model'}/{contentFormat}/ready/…
+              </span>
+              {' '}(originals also saved under raw/).
+            </p>
           </div>
 
           <Separator className="bg-border/50" />

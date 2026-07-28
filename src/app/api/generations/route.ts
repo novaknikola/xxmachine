@@ -12,6 +12,7 @@ interface SaveBody {
   batch?: number
   wavespeedUrls: string[]
   userId?: string
+  contentFormat?: string
 }
 
 export interface HistoryRecord {
@@ -53,6 +54,7 @@ export async function POST(req: NextRequest) {
       batch: body.batch ?? 1,
       wavespeedUrls: body.wavespeedUrls,
       userId: auth.id,
+      contentFormat: body.contentFormat ?? null,
     })
 
     return NextResponse.json({ ok: true, id: saved.id, imageUrls: saved.imageUrls })

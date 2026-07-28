@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { rows, one, query } from '@/lib/db'
 import { fetchAllStats } from '@/lib/stats'
 import { runDueProfileScans } from '@/lib/monitor/process-item'
+import { processDriveExports } from '@/lib/drive-archive/process'
 
 const CRON_SECRET = process.env.CRON_SECRET
 const QUEUE_CONCURRENCY = 2
@@ -168,11 +169,26 @@ export async function GET(req: NextRequest) {
     console.error('[cron/tick] monitor scan error:', err)
   }
 
+  // ── Google Drive auto-archive uploads ─────────────────────────
+  let driveArchive: Awaited<ReturnType<typeof processDriveExports>> | { error: string } = {
+    processed: 0,
+    done: 0,
+    failed: 0,
+    skipped: 0,
+  }
+  try {
+    driveArchive = await processDriveExports({ limit: 5 })
+  } catch (err) {
+    console.error('[cron/tick] drive archive error:', err)
+    driveArchive = { error: err instanceof Error ? err.message : String(err) }
+  }
+
   return NextResponse.json({
     posts: { processed: due.length, results: postResults.map(r => r.status) },
     reels: { processed: dueReels.length, results: reelResults.map(r => r.status) },
     stats: statsResult,
     queue: { started: queueStarted, comfyuiStarted: comfyStarted },
     monitor: monitorScans,
+    driveArchive,
   })
 }

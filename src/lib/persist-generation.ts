@@ -1,5 +1,10 @@
 import { query } from '@/lib/db'
 import { uploadImagesFromUrls } from '@/lib/supabase-storage'
+import {
+  normalizeContentFormat,
+  type ContentFormat,
+} from '@/lib/drive-archive/content-format'
+import { repurposeImageUrls } from '@/lib/drive-archive/image-repurpose'
 
 export interface PersistGenerationInput {
   kind: string
@@ -10,6 +15,10 @@ export interface PersistGenerationInput {
   characterName?: string | null
   dimension?: string | null
   batch?: number
+  /** Publish destination: stories | carousels | reels */
+  contentFormat?: ContentFormat | string | null
+  /** Skip auto-repurpose (rare). Default false. */
+  skipRepurpose?: boolean
   /** Override the row timestamp — used when recovering older provider outputs. */
   createdAt?: Date | string | null
 }
@@ -17,11 +26,12 @@ export interface PersistGenerationInput {
 export interface PersistGenerationResult {
   id: string
   imageUrls: string[]
+  readyUrls: string[]
 }
 
 /**
  * Upload Wavespeed outputs to durable storage and insert a `generations` row.
- * Used by Image Studio / Seedream so History does not depend on self-HTTP to BASE_URL.
+ * Then auto-repurpose into format-specific variants and enqueue Drive raw/ + ready/.
  */
 export async function persistGeneration(
   input: PersistGenerationInput,
@@ -38,12 +48,14 @@ export async function persistGeneration(
 
   const genId = crypto.randomUUID()
   const basePath = `${input.userId}/${genId}`
+  const contentFormat = normalizeContentFormat(input.contentFormat)
+  const characterKey = input.characterName ?? input.characterId ?? '_none'
+  const modelKey = input.kind || 'text2img'
 
   let permanentUrls: string[]
   try {
     permanentUrls = await uploadImagesFromUrls(input.wavespeedUrls, basePath)
   } catch (err) {
-    // Still record history with temporary Wavespeed URLs if Storage is down.
     console.error('[persist-generation] storage upload failed, keeping source URLs:', err)
     permanentUrls = input.wavespeedUrls
   }
@@ -71,11 +83,56 @@ export async function persistGeneration(
   try {
     await insert(characterId)
   } catch (err) {
-    // A stale/foreign character id must not cost us the history row.
     if (!characterId) throw err
     console.error('[persist-generation] insert failed, retrying without character_id:', err)
     await insert(null)
   }
 
-  return { id: genId, imageUrls: permanentUrls }
+  // Auto-repurpose → ready URLs only. Never put originals in ready/ (retry then skip).
+  let readyUrls: string[] = []
+  if (!input.skipRepurpose) {
+    try {
+      const result = await repurposeImageUrls({
+        urls: permanentUrls,
+        format: contentFormat,
+        basePath,
+      })
+      readyUrls = result.readyUrls
+      if (result.skipped) {
+        console.warn(
+          `[persist-generation] repurpose skipped ${result.skipped}/${permanentUrls.length} (no ready fallback)`,
+        )
+      }
+    } catch (err) {
+      console.error('[persist-generation] repurpose failed entirely — ready/ not enqueued:', err)
+      readyUrls = []
+    }
+  }
+
+  const { enqueueDriveArchive } = await import('@/lib/drive-archive/enqueue')
+  const driveMeta = {
+    userId: input.userId,
+    sourceType: 'generation' as const,
+    sourceId: genId,
+    characterKey,
+    kind: contentFormat,
+    modelKey,
+  }
+
+  // Originals → raw/ only. Ready variants → ready/ (VA) — only successful repurposes.
+  await enqueueDriveArchive({
+    ...driveMeta,
+    urls: permanentUrls,
+    stage: 'raw',
+  }).catch(err => console.error('[persist-generation] drive raw enqueue failed:', err))
+
+  if (readyUrls.length) {
+    await enqueueDriveArchive({
+      ...driveMeta,
+      urls: readyUrls,
+      stage: 'ready',
+    }).catch(err => console.error('[persist-generation] drive ready enqueue failed:', err))
+  }
+
+  return { id: genId, imageUrls: permanentUrls, readyUrls }
 }

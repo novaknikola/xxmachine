@@ -74,6 +74,7 @@ interface EditImageJsonBody {
   kind?: string
   characterId?: string
   characterName?: string
+  contentFormat?: string
 }
 
 async function saveToHistory(opts: {
@@ -84,6 +85,7 @@ async function saveToHistory(opts: {
   userId: string
   characterId?: string | null
   characterName?: string | null
+  contentFormat?: string | null
 }) {
   if (!opts.wavespeedUrls.length) return
   try {
@@ -96,6 +98,7 @@ async function saveToHistory(opts: {
       userId: opts.userId,
       characterId: opts.characterId ?? null,
       characterName: opts.characterName ?? null,
+      contentFormat: opts.contentFormat ?? null,
     })
   } catch (e) {
     // History is best-effort: never fail the edit because of it.
@@ -148,6 +151,7 @@ export async function POST(req: NextRequest) {
           userId: auth.id,
           characterId: body.characterId ?? null,
           characterName: body.characterName ?? null,
+          contentFormat: body.contentFormat ?? null,
         })
       }
 
@@ -223,6 +227,7 @@ export async function POST(req: NextRequest) {
         userId: auth.id,
         characterId: (form.get('characterId') as string | null) || null,
         characterName: (form.get('characterName') as string | null) || null,
+        contentFormat: (form.get('contentFormat') as string | null) || null,
       })
     }
 

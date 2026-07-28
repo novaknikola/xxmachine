@@ -63,7 +63,7 @@ export async function POST(req: NextRequest) {
 
     if (!API_KEY) return NextResponse.json({ error: 'WAVESPEED_API_KEY is not configured' }, { status: 500 })
 
-    const { prompt, dimension, batch, loraUrl, loraScale, characterId, characterName } = await req.json()
+    const { prompt, dimension, batch, loraUrl, loraScale, characterId, characterName, contentFormat } = await req.json()
 
     if (!prompt) return NextResponse.json({ error: 'Missing prompt' }, { status: 400 })
 
@@ -109,6 +109,7 @@ export async function POST(req: NextRequest) {
           batch: batch ?? 1,
           wavespeedUrls: allUrls,
           userId: auth.id,
+          contentFormat: contentFormat ?? null,
         })
       } catch (e) {
         console.error('[generate] history persist failed:', e)

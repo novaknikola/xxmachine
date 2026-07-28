@@ -32,6 +32,7 @@ import { enqueueMultiShotJob } from './multi-shot'
 import { normalizeSoundMode, type SoundMode } from './cost-estimate'
 import { getTechnique, resolveExecutable } from './techniques'
 import { notifyReplicationDone, notifyReplicationFailed } from './notify'
+import { archiveDiscoveryItem } from '@/lib/drive-archive/from-discovery-item'
 import type {
   CharacterLora,
   DiscoveryItemRow,
@@ -461,6 +462,10 @@ export async function replicateDiscoveryItem(
         `UPDATE discovery_items SET replicate_status = 'image_done', replicate_error = NULL WHERE id = $1`,
         [itemId],
       )
+      await archiveDiscoveryItem(itemId, {
+        characterName: character.name,
+        imagesOnly: true,
+      }).catch(err => console.error('[monitor/replicate] drive archive failed:', err))
       return {
         ok: true,
         stoppedAfterImage: true,
@@ -573,6 +578,8 @@ export async function replicateDiscoveryItem(
           WHERE id = $1`,
         [itemId, finalVideoUrl, videoModel, result.technique, muxNote],
       )
+      await archiveDiscoveryItem(itemId, { characterName: character.name })
+        .catch(err => console.error('[monitor/replicate] drive archive failed:', err))
       await notifyReplicationDone({
         userId,
         profile: item.profile,
@@ -596,6 +603,8 @@ export async function replicateDiscoveryItem(
       `UPDATE discovery_items SET replicate_status = 'done', replicate_error = NULL WHERE id = $1`,
       [itemId],
     )
+    await archiveDiscoveryItem(itemId, { characterName: character.name })
+      .catch(err => console.error('[monitor/replicate] drive archive failed:', err))
     await notifyReplicationDone({
       userId,
       profile: item.profile,

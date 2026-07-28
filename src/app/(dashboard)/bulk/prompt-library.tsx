@@ -6,7 +6,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Plus, Sparkles, Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { bundleTags, GLOBAL_CHARACTER_ID } from '@/lib/prompt-library-tags'
-import { NICHE_DEFINITIONS, resolveNichePrompts, nicheLibraryTags, nicheAiLibraryTags, getNicheHairDefault } from '@/lib/niche-prompts'
+import { NICHE_DEFINITIONS, resolveNichePrompts, nicheLibraryTags, nicheAiLibraryTags, getNicheHairDefault, MYGIF_NICHE_DEFINITIONS, getMyGifNicheById } from '@/lib/niche-prompts'
 
 function sampleExamples(examples: readonly string[], n: number): string[] {
   if (examples.length <= n) return [...examples]
@@ -497,6 +497,13 @@ export const NICHE_BUNDLES: InstagramBundle[] = NICHE_DEFINITIONS.map(niche => (
   nicheId: niche.id,
 }))
 
+/** MyGIF scrapes — separate namespace; never mixed into brand niches / Admin picker. */
+export const MYGIF_BUNDLES: InstagramBundle[] = MYGIF_NICHE_DEFINITIONS.map(niche => ({
+  label: niche.label,
+  description: niche.description,
+  nicheId: niche.id,
+}))
+
 export const INSTAGRAM_BUNDLES: InstagramBundle[] = [
   {
     label: 'Beach & Bikini',
@@ -751,7 +758,8 @@ export async function generateNicheAiVariety(
   count = 40,
   onProgress?: VarietyProgress,
 ): Promise<string[]> {
-  const niche = NICHE_DEFINITIONS.find(n => n.id === nicheId)
+  const niche =
+    NICHE_DEFINITIONS.find(n => n.id === nicheId) ?? getMyGifNicheById(nicheId)
   if (!niche?.prompts.length) return []
 
   return collectVariants(
@@ -909,6 +917,42 @@ export function InstagramBundleDialog({
           </div>
 
           <div>
+            <p className="text-[10px] font-semibold uppercase tracking-widest text-amber-700/80 dark:text-amber-400/90 mb-1">
+              MyGIF scrapes ({MYGIF_NICHE_DEFINITIONS.length})
+            </p>
+            <p className="text-[10px] text-muted-foreground mb-2">
+              Separate from brand niches — tagged <span className="font-mono">mygif</span> in the library. Rewrite of scraped OF-strict prompts.
+            </p>
+            <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+              {MYGIF_BUNDLES.map(bundle => {
+                const count = resolveBundle(bundle).length
+                const niche = MYGIF_NICHE_DEFINITIONS.find(n => n.id === bundle.nicheId)
+                const anyBusy = generatingLabel !== null
+                return (
+                  <div
+                    key={bundle.label}
+                    className="flex items-start gap-3 p-3 rounded-xl border border-amber-500/25 bg-amber-500/5 hover:border-amber-500/40 transition-colors"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <p className="text-sm font-medium">{niche?.label ?? bundle.label}</p>
+                        <span className="text-[9px] font-medium text-amber-700/90 dark:text-amber-400/90 border border-amber-500/30 rounded px-1">
+                          MyGIF
+                        </span>
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">{bundle.description}</p>
+                      <p className="text-[10px] text-muted-foreground/70 mt-1">{count} static prompts</p>
+                    </div>
+                    <Button size="sm" disabled={anyBusy} onClick={() => handleApply(bundle)}>
+                      <Plus className="w-3.5 h-3.5 mr-1" />Apply
+                    </Button>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+
+          <div>
             <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground mb-2">Curated & full feeds</p>
             <div className="space-y-2">
           {INSTAGRAM_BUNDLES.map(bundle => {
@@ -982,6 +1026,7 @@ export function PromptHelpDialog({
     { id: 'niche-goth-girl', label: 'Goth' },
     { id: 'niche-lux-glam', label: 'Lux Glam' },
     { id: 'niche-alternative-girl', label: 'Alt' },
+    { id: 'mygif', label: 'MyGIF' },
     { id: 'grok-generated', label: 'Grok generated' },
     { id: 'static-bundle', label: 'Static bundles' },
     { id: 'full-feed-balanced', label: 'Full Feed Balanced' },

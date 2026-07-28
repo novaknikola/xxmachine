@@ -66,7 +66,9 @@ server.listen(port, () => {
 })
 
 async function warmRoutes(base) {
-  const routes = ['/bulk', '/reels', '/socials', '/motion', '/schedule']
+  // Keep this light — /bulk pulls a huge client graph and thrashing it on boot
+  // saturates the Turbopack compile queue. Warm smaller shells instead.
+  const routes = ['/settings', '/copy-paste', '/history']
   console.log('> Pre-warming routes...')
   for (const route of routes) {
     fetch(`${base}${route}`).catch(() => {})
