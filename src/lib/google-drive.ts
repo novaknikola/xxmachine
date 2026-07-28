@@ -103,36 +103,78 @@ export async function createDriveFolder(
   return { id: data.id, link: data.webViewLink ?? `https://drive.google.com/drive/folders/${data.id}` }
 }
 
-/** Finds a direct child folder by exact name, or null. */
-export async function findChildFolder(
+/** Finds all direct child folders with an exact name (oldest first). */
+export async function findChildFolders(
   parentId: string,
   name: string,
   accessToken?: string,
-): Promise<string | null> {
+): Promise<Array<{ id: string; createdTime?: string }>> {
   const token = await resolveAccessToken(accessToken)
   const escaped = name.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
   const q = encodeURIComponent(
     `'${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and name='${escaped}' and trashed=false`,
   )
   const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&pageSize=1`,
+    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,createdTime)&orderBy=createdTime&pageSize=100`,
     { headers: { Authorization: `Bearer ${token}` } },
   )
   const data = await res.json()
   if (!res.ok) throw new Error(data.error?.message ?? 'Drive find folder failed')
-  return data.files?.[0]?.id ?? null
+  return data.files ?? []
 }
 
-/** Find or create a child folder under parentId. */
+/** Finds a direct child folder by exact name, or null. Prefers the oldest if duplicates exist. */
+export async function findChildFolder(
+  parentId: string,
+  name: string,
+  accessToken?: string,
+): Promise<string | null> {
+  const matches = await findChildFolders(parentId, name, accessToken)
+  return matches[0]?.id ?? null
+}
+
+async function trashDriveFile(fileId: string, accessToken?: string): Promise<void> {
+  const token = await resolveAccessToken(accessToken)
+  await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ trashed: true }),
+  }).catch(() => {})
+}
+
+/**
+ * Find or create a child folder under parentId.
+ * Drive allows duplicate folder names, so after create we re-list and keep the
+ * oldest match (trashing newer duplicates from races / search lag).
+ */
 export async function ensureChildFolder(
   parentId: string,
   name: string,
   accessToken?: string,
 ): Promise<string> {
-  const existing = await findChildFolder(parentId, name, accessToken)
-  if (existing) return existing
+  const existing = await findChildFolders(parentId, name, accessToken)
+  if (existing.length > 0) {
+    for (const dup of existing.slice(1)) {
+      void trashDriveFile(dup.id, accessToken)
+    }
+    return existing[0]!.id
+  }
+
   const created = await createDriveFolder(name, parentId, accessToken)
-  return created.id
+
+  // Drive search can lag briefly after create; re-list and dedupe.
+  await new Promise(r => setTimeout(r, 400))
+  const again = await findChildFolders(parentId, name, accessToken)
+  if (again.length <= 1) return created.id
+
+  const keepId = again[0]!.id
+  for (const dup of again.slice(1)) {
+    void trashDriveFile(dup.id, accessToken)
+  }
+  return keepId
 }
 
 const MULTIPART_MAX_BYTES = 4 * 1024 * 1024
