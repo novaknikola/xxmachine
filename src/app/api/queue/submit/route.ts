@@ -125,7 +125,6 @@ export interface MyPodTalkJobInput {
 const MAX_CAPTION_ITEMS = 200
 const MAX_TRANSCRIBE_ITEMS = 200
 const MAX_OCR_ITEMS = 200
-const MAX_COMFYUI_ITEMS = 50
 const MAX_SHUFFLE_ITEMS = 5000
 const MAX_GENERATE_COUNT = 5000
 const MAX_GENERATE_EXAMPLES = 2000
@@ -406,7 +405,7 @@ export async function POST(req: NextRequest) {
     )
     if (!template) return NextResponse.json({ error: 'Template not found' }, { status: 404 })
 
-    const cleanPrompts = prompts.map(p => p.trim()).filter(Boolean).slice(0, MAX_COMFYUI_ITEMS)
+    const cleanPrompts = prompts.map(p => p.trim()).filter(Boolean)
 
     const driveToken = await requireUserDriveToken(user.id)
     if (driveToken instanceof NextResponse) return driveToken
@@ -467,7 +466,7 @@ export async function POST(req: NextRequest) {
     }
     if (!files.length) return NextResponse.json({ error: 'Input Drive folder has no image files' }, { status: 400 })
 
-    const items = files.slice(0, MAX_COMFYUI_ITEMS).map(f => ({
+    const items = files.map(f => ({
       driveFileId: f.id,
       name: f.name,
       prompt: prompt?.trim() || undefined,
@@ -514,7 +513,7 @@ export async function POST(req: NextRequest) {
     if (!videos.length) return NextResponse.json({ error: 'Input folder needs at least one driving video' }, { status: 400 })
 
     const ref = images[0]
-    const items = videos.slice(0, MAX_COMFYUI_ITEMS).map(f => ({ driveFileId: f.id, name: f.name }))
+    const items = videos.map(f => ({ driveFileId: f.id, name: f.name }))
     const input: MyPodAnimateJobInput = {
       inputDriveFolderId: inputDriveFolderId.trim(),
       outputDriveFolderId: outputDriveFolderId.trim(),
@@ -544,7 +543,6 @@ export async function POST(req: NextRequest) {
     const cleanTexts = (Array.isArray(texts) ? texts : [])
       .map(t => (typeof t === 'string' ? t.trim() : ''))
       .filter(Boolean)
-      .slice(0, MAX_COMFYUI_ITEMS)
     if (!cleanTexts.length) {
       return NextResponse.json({ error: 'At least one text line required' }, { status: 400 })
     }
@@ -576,7 +574,7 @@ export async function POST(req: NextRequest) {
       ? spokenTexts.map(t => (typeof t === 'string' ? t.trim() : ''))
       : []
 
-    const count = Math.min(MAX_COMFYUI_ITEMS, Math.max(cleanTexts.length, files.length))
+    const count = Math.max(cleanTexts.length, files.length)
     const items = Array.from({ length: count }, (_, i) => {
       const file = files[i % files.length]
       const text = cleanTexts[i % cleanTexts.length]

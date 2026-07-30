@@ -301,7 +301,7 @@ export function GenerateTab() {
                 className="resize-none font-mono text-sm"
               />
               <p className="text-xs text-muted-foreground">
-                {textLines.length} line{textLines.length !== 1 ? 's' : ''} · paired with images (cycled if counts differ) · max 50
+                {textLines.length} line{textLines.length !== 1 ? 's' : ''} · paired with images (cycled if counts differ)
               </p>
             </CardContent>
           </Card>
@@ -341,7 +341,7 @@ export function GenerateTab() {
               placeholder={'sitting on a beach, golden hour\nworking in a café…'}
               className="resize-none font-mono text-sm"
             />
-            <p className="text-xs text-muted-foreground">{textLines.length} prompt{textLines.length !== 1 ? 's' : ''} · max 50</p>
+            <p className="text-xs text-muted-foreground">{textLines.length} prompt{textLines.length !== 1 ? 's' : ''}</p>
           </CardContent>
         </Card>
       )}
