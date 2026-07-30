@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireUser } from '@/lib/session'
 import { one } from '@/lib/db'
 import { listDriveFiles } from '@/lib/google-drive'
+import { getUserGoogleAccessToken } from '@/lib/drive-archive/user-google-auth'
 import type { VideoEffectOpts } from '@/lib/video-ffmpeg'
 import type { CaptionStyle, CaptionCustomStyle } from '@/lib/captions'
 import { dedupeCaptions } from '@/lib/caption-shuffle'
@@ -129,6 +130,22 @@ const MAX_SHUFFLE_ITEMS = 5000
 const MAX_GENERATE_COUNT = 5000
 const MAX_GENERATE_EXAMPLES = 2000
 const MAX_CAROUSEL_ITEMS = 25
+
+/** My Pod Drive I/O must use the user's OAuth — service accounts have no My Drive quota. */
+async function requireUserDriveToken(userId: string): Promise<string | NextResponse> {
+  try {
+    return await getUserGoogleAccessToken(userId)
+  } catch (err) {
+    return NextResponse.json(
+      {
+        error: err instanceof Error
+          ? err.message
+          : 'Google Drive not connected — connect in Settings → Drive archive',
+      },
+      { status: 400 },
+    )
+  }
+}
 
 // Only RunPod's own HTTP proxy domain is accepted — hard SSRF guard, no exceptions.
 const RUNPOD_POD_URL_RE = /^https:\/\/[a-z0-9-]+-\d+\.proxy\.runpod\.net\/?$/i
@@ -391,6 +408,9 @@ export async function POST(req: NextRequest) {
 
     const cleanPrompts = prompts.map(p => p.trim()).filter(Boolean).slice(0, MAX_COMFYUI_ITEMS)
 
+    const driveToken = await requireUserDriveToken(user.id)
+    if (driveToken instanceof NextResponse) return driveToken
+
     let items: ComfyUIPodBulkItem[]
     if (template.image_node_id) {
       if (!inputDriveFolderId?.trim()) {
@@ -398,7 +418,7 @@ export async function POST(req: NextRequest) {
       }
       let files
       try {
-        files = await listDriveFiles(inputDriveFolderId.trim(), 'image/')
+        files = await listDriveFiles(inputDriveFolderId.trim(), 'image/', driveToken)
       } catch (err) {
         return NextResponse.json({ error: `Could not read input Drive folder: ${err instanceof Error ? err.message : 'failed'}` }, { status: 400 })
       }
@@ -436,9 +456,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: err instanceof Error ? err.message : 'Pod session required' }, { status: 400 })
     }
 
+    const driveToken = await requireUserDriveToken(user.id)
+    if (driveToken instanceof NextResponse) return driveToken
+
     let files
     try {
-      files = await listDriveFiles(inputDriveFolderId.trim(), 'image/')
+      files = await listDriveFiles(inputDriveFolderId.trim(), 'image/', driveToken)
     } catch (err) {
       return NextResponse.json({ error: `Could not read input Drive folder: ${err instanceof Error ? err.message : 'failed'}` }, { status: 400 })
     }
@@ -476,9 +499,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: err instanceof Error ? err.message : 'Pod session required' }, { status: 400 })
     }
 
+    const driveToken = await requireUserDriveToken(user.id)
+    if (driveToken instanceof NextResponse) return driveToken
+
     let allFiles
     try {
-      allFiles = await listDriveFiles(inputDriveFolderId.trim())
+      allFiles = await listDriveFiles(inputDriveFolderId.trim(), undefined, driveToken)
     } catch (err) {
       return NextResponse.json({ error: `Could not read input Drive folder: ${err instanceof Error ? err.message : 'failed'}` }, { status: 400 })
     }
@@ -535,9 +561,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: err instanceof Error ? err.message : 'Pod session required' }, { status: 400 })
     }
 
+    const driveToken = await requireUserDriveToken(user.id)
+    if (driveToken instanceof NextResponse) return driveToken
+
     let files
     try {
-      files = await listDriveFiles(inputDriveFolderId.trim(), 'image/')
+      files = await listDriveFiles(inputDriveFolderId.trim(), 'image/', driveToken)
     } catch (err) {
       return NextResponse.json({ error: `Could not read input Drive folder: ${err instanceof Error ? err.message : 'failed'}` }, { status: 400 })
     }

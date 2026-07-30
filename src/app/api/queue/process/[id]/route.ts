@@ -12,6 +12,7 @@ import {
   rewriteCaptionsBatch, SHUFFLE_BATCH_SIZE, generateCaptionsBatch, filterNewCaptions, sampleExamples,
 } from '@/lib/caption-shuffle'
 import { downloadDriveFile, uploadToDriveFolder } from '@/lib/google-drive'
+import { getUserGoogleAccessToken } from '@/lib/drive-archive/user-google-auth'
 import { writeFileSync, readFileSync, unlinkSync } from 'fs'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
@@ -565,6 +566,9 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const health = await probeComfyHealth(comfyUrl, apiToken)
       if (!health.ok) throw new Error(`Pod offline — ${health.error}`)
 
+      // Uploads must use user OAuth — SA has no My Drive storage quota.
+      const driveToken = await getUserGoogleAccessToken(job.user_id)
+
       let remoteJobDir: string | null = null
       if (session) {
         try {
@@ -613,7 +617,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
           if (template.image_node_id && item.driveFileId) {
             await persist('uploading')
-            const buf = await downloadDriveFile(item.driveFileId)
+            const buf = await downloadDriveFile(item.driveFileId, driveToken)
             let uploadedName: string
             try {
               uploadedName = await uploadImageToComfy(comfyUrl, buf, `input_${i}.png`, apiToken)
@@ -645,7 +649,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             }
             const ext = outputs[f].filename.split('.').pop() ?? 'png'
             const mime = ext === 'mp4' ? 'video/mp4' : ext === 'webp' ? 'image/webp' : 'image/png'
-            const uploaded = await uploadToDriveFolder(outputDriveFolderId, `${i + 1}_${f + 1}.${ext}`, buf, mime)
+            const uploaded = await uploadToDriveFolder(outputDriveFolderId, `${i + 1}_${f + 1}.${ext}`, buf, mime, driveToken)
             lastLink = uploaded.link
           }
           comfyuiRows.push({ prompt: item.prompt, status: 'done', stage: 'done', driveLink: lastLink })
@@ -680,6 +684,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const health = await probeComfyHealth(session.comfyBaseUrl, session.comfyApiToken)
       if (!health.ok) throw new Error(`Pod offline — ${health.error}`)
 
+      const driveToken = await getUserGoogleAccessToken(job.user_id)
       const { remoteJobDir } = await ensureRemoteWorkDir(session.ssh, session.remoteWorkRoot, id)
       const rows: MyPodRow[] = job.output?.myPodRows ? [...job.output.myPodRows] : []
       let doneCount = job.done_items
@@ -691,7 +696,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'downloading_inputs'), done_items=$2, progress=$3 WHERE id=$4`,
             [JSON.stringify(rows), doneCount, Math.round((doneCount / input.items.length) * 100), id],
           )
-          const imgBuf = await downloadDriveFile(item.driveFileId)
+          const imgBuf = await downloadDriveFile(item.driveFileId, driveToken)
           await query(
             `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'running') WHERE id=$2`,
             [JSON.stringify(rows), id],
@@ -711,6 +716,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             `${item.name.replace(/\.[^.]+$/, '')}_output.${ext}`,
             result.buffer,
             ext === 'webm' ? 'video/webm' : 'video/mp4',
+            driveToken,
           )
           rows.push({ label: item.name, status: 'done', stage: 'done', driveLink: uploaded.link })
         } catch (err) {
@@ -741,11 +747,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const health = await probeComfyHealth(session.comfyBaseUrl, session.comfyApiToken)
       if (!health.ok) throw new Error(`Pod offline — ${health.error}`)
 
+      const driveToken = await getUserGoogleAccessToken(job.user_id)
       const { remoteJobDir } = await ensureRemoteWorkDir(session.ssh, session.remoteWorkRoot, id)
       const rows: MyPodRow[] = job.output?.myPodRows ? [...job.output.myPodRows] : []
       let doneCount = job.done_items
 
-      const refBuf = await downloadDriveFile(input.referenceImageId)
+      const refBuf = await downloadDriveFile(input.referenceImageId, driveToken)
 
       for (let i = doneCount; i < input.items.length; i++) {
         const item = input.items[i]
@@ -754,7 +761,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'downloading_inputs') WHERE id=$2`,
             [JSON.stringify(rows), id],
           )
-          const vidBuf = await downloadDriveFile(item.driveFileId)
+          const vidBuf = await downloadDriveFile(item.driveFileId, driveToken)
           await query(
             `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'building_graph') WHERE id=$2`,
             [JSON.stringify(rows), id],
@@ -779,6 +786,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             `${item.name.replace(/\.[^.]+$/, '')}_output.${ext}`,
             result.buffer,
             'video/mp4',
+            driveToken,
           )
           rows.push({ label: item.name, status: 'done', stage: 'done', driveLink: uploaded.link })
         } catch (err) {
@@ -812,6 +820,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const fishKey = session.fishApiKey?.trim()
       if (!fishKey) throw new Error('Fish API key missing — reconnect in My Pod → Connection')
 
+      const driveToken = await getUserGoogleAccessToken(job.user_id)
+
       // Talk is fully remote HTTP (like sheets COMFY_REMOTE=1) — SSH disk check is best-effort.
       let remoteJobDir: string | null = null
       try {
@@ -830,7 +840,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'downloading_inputs'), done_items=$2, progress=$3 WHERE id=$4`,
             [JSON.stringify(rows), doneCount, Math.round((doneCount / input.items.length) * 100), id],
           )
-          const imgBuf = await downloadDriveFile(item.driveFileId)
+          const imgBuf = await downloadDriveFile(item.driveFileId, driveToken)
 
           await query(
             `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'fish_tts') WHERE id=$2`,
@@ -863,6 +873,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             `${item.name.replace(/\.[^.]+$/, '')}_talk.${ext}`,
             result.buffer,
             ext === 'webm' ? 'video/webm' : 'video/mp4',
+            driveToken,
           )
           rows.push({ label: item.name, status: 'done', stage: 'done', driveLink: uploaded.link })
         } catch (err) {
