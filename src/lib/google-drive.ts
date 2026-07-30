@@ -22,12 +22,29 @@ export async function listDriveFiles(
   const q = encodeURIComponent(`'${folderId}' in parents and trashed=false${mimeClause}`)
 
   const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime,size)&orderBy=createdTime&pageSize=1000`,
+    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime,size,mimeType)&orderBy=createdTime&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true`,
     { headers: { Authorization: `Bearer ${token}` } },
   )
-  const data = await res.json()
+  const data = await res.json() as {
+    files?: (DriveFile & { mimeType?: string })[]
+    error?: { message?: string }
+  }
   if (!res.ok) throw new Error(data.error?.message ?? 'Drive list failed')
   return data.files ?? []
+}
+
+/**
+ * List images in a folder. Prefer mime filter; if empty, fall back to extension match
+ * (some shared / shortcut layouts omit a useful mimeType for list queries).
+ */
+export async function listDriveImages(
+  folderId: string,
+  accessToken?: string,
+): Promise<DriveFile[]> {
+  const byMime = await listDriveFiles(folderId, 'image/', accessToken)
+  if (byMime.length) return byMime
+  const all = await listDriveFiles(folderId, undefined, accessToken)
+  return all.filter(f => /\.(png|jpe?g|webp|gif|heic|bmp)$/i.test(f.name))
 }
 
 /** Downloads a Drive file's raw bytes. */

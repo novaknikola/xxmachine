@@ -617,7 +617,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
           if (template.image_node_id && item.driveFileId) {
             await persist('uploading')
-            const buf = await downloadDriveFile(item.driveFileId, driveToken)
+            const buf = await downloadDriveFile(item.driveFileId)
             let uploadedName: string
             try {
               uploadedName = await uploadImageToComfy(comfyUrl, buf, `input_${i}.png`, apiToken)
@@ -696,7 +696,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'downloading_inputs'), done_items=$2, progress=$3 WHERE id=$4`,
             [JSON.stringify(rows), doneCount, Math.round((doneCount / input.items.length) * 100), id],
           )
-          const imgBuf = await downloadDriveFile(item.driveFileId, driveToken)
+          const imgBuf = await downloadDriveFile(item.driveFileId)
           await query(
             `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'running') WHERE id=$2`,
             [JSON.stringify(rows), id],
@@ -752,7 +752,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const rows: MyPodRow[] = job.output?.myPodRows ? [...job.output.myPodRows] : []
       let doneCount = job.done_items
 
-      const refBuf = await downloadDriveFile(input.referenceImageId, driveToken)
+      const refBuf = await downloadDriveFile(input.referenceImageId)
 
       for (let i = doneCount; i < input.items.length; i++) {
         const item = input.items[i]
@@ -761,7 +761,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'downloading_inputs') WHERE id=$2`,
             [JSON.stringify(rows), id],
           )
-          const vidBuf = await downloadDriveFile(item.driveFileId, driveToken)
+          const vidBuf = await downloadDriveFile(item.driveFileId)
           await query(
             `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'building_graph') WHERE id=$2`,
             [JSON.stringify(rows), id],
@@ -840,7 +840,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'downloading_inputs'), done_items=$2, progress=$3 WHERE id=$4`,
             [JSON.stringify(rows), doneCount, Math.round((doneCount / input.items.length) * 100), id],
           )
-          const imgBuf = await downloadDriveFile(item.driveFileId, driveToken)
+          const imgBuf = await downloadDriveFile(item.driveFileId)
 
           await query(
             `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'fish_tts') WHERE id=$2`,
