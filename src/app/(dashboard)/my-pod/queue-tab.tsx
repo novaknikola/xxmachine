@@ -24,6 +24,8 @@ interface JobInput {
   style?: string
   items?: unknown[]
   texts?: string[]
+  itemCount?: number
+  textCount?: number
 }
 
 interface Job {
@@ -107,7 +109,9 @@ function JobCard({
   const currentStage = job.output?.stage
     ?? rows.find(r => r.stage && r.status !== 'done' && r.status !== 'error')?.stage
   const textCount = job.input?.texts?.length
+    ?? job.input?.textCount
     ?? (Array.isArray(job.input?.items) ? job.input.items.length : undefined)
+    ?? job.input?.itemCount
 
   const filtered = rows.filter(r => {
     if (filter === 'done') return r.status === 'done'
@@ -312,12 +316,17 @@ export function QueueTab() {
 
   const fetchJobs = useCallback(async () => {
     try {
-      const res = await fetch('/api/queue/list')
-      if (res.ok) {
-        const data = await res.json()
-        const all = (data.jobs ?? []) as Job[]
-        setJobs(all.filter(j => MY_POD_TYPES.has(j.job_type)))
+      const res = await fetch('/api/queue/list?scope=my-pod')
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        toast.error(typeof data.error === 'string' ? data.error : 'Could not load queue')
+        return
       }
+      const data = await res.json()
+      const all = (data.jobs ?? []) as Job[]
+      setJobs(all.filter(j => MY_POD_TYPES.has(j.job_type)))
+    } catch {
+      toast.error('Could not load queue')
     } finally {
       setLoading(false)
     }
