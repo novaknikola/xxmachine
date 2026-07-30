@@ -253,3 +253,43 @@ async function uploadResumableToDriveFolder(
   if (!put.ok) throw new Error(data.error?.message ?? `Drive resumable upload failed: ${put.status}`)
   return { id: data.id, link: data.webViewLink ?? `https://drive.google.com/file/d/${data.id}/view` }
 }
+
+const DRIVE_UPLOAD_RETRYABLE = /invalid authentication|invalid_grant|unauthorized|login cookie|401|ECONNRESET|ETIMEDOUT|fetch failed|503|429|socket hang up/i
+
+/**
+ * Upload as the user with fresh OAuth each attempt.
+ * On auth / transient errors: force-refresh token and retry (keeps buffer — no re-render).
+ */
+export async function uploadToDriveFolderResilient(
+  userId: string,
+  folderId: string,
+  filename: string,
+  buffer: Buffer,
+  mimeType: string,
+  maxAttempts = 3,
+): Promise<{ id: string; link: string }> {
+  const {
+    getUserGoogleAccessToken,
+    forceRefreshUserGoogleAccessToken,
+  } = await import('@/lib/drive-archive/user-google-auth')
+
+  let lastErr: Error | null = null
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const token = attempt === 0
+        ? await getUserGoogleAccessToken(userId)
+        : await forceRefreshUserGoogleAccessToken(userId)
+      return await uploadBufferToDriveFolder(folderId, filename, buffer, mimeType, token)
+    } catch (err) {
+      lastErr = err instanceof Error ? err : new Error(String(err))
+      const retryable = DRIVE_UPLOAD_RETRYABLE.test(lastErr.message)
+      if (!retryable || attempt >= maxAttempts - 1) throw lastErr
+      console.warn(
+        `[drive] upload retry ${attempt + 1}/${maxAttempts - 1} for ${filename}:`,
+        lastErr.message.slice(0, 200),
+      )
+      await new Promise(r => setTimeout(r, 1500 * (attempt + 1)))
+    }
+  }
+  throw lastErr ?? new Error('Drive upload failed')
+}

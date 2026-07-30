@@ -32,7 +32,23 @@ export async function getUserGoogleAccessToken(userId: string): Promise<string> 
     return row.google_access_token
   }
 
-  const tokens = await refreshUserGoogleToken(row.google_refresh_token)
+  return persistRefreshedToken(userId, row.google_refresh_token)
+}
+
+/** Always refresh — use after a Drive 401 so long My Pod batches don't keep a dead access token. */
+export async function forceRefreshUserGoogleAccessToken(userId: string): Promise<string> {
+  const row = await one<{ google_refresh_token: string | null }>(
+    `SELECT google_refresh_token FROM users WHERE id = $1`,
+    [userId],
+  )
+  if (!row?.google_refresh_token) {
+    throw new Error('Google Drive not connected — reconnect in Settings')
+  }
+  return persistRefreshedToken(userId, row.google_refresh_token)
+}
+
+async function persistRefreshedToken(userId: string, refreshToken: string): Promise<string> {
+  const tokens = await refreshUserGoogleToken(refreshToken)
   await query(
     `UPDATE users
         SET google_access_token = $2,

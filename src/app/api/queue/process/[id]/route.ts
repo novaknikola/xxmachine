@@ -11,7 +11,7 @@ import { extractOnScreenText } from '@/lib/ocr'
 import {
   rewriteCaptionsBatch, SHUFFLE_BATCH_SIZE, generateCaptionsBatch, filterNewCaptions, sampleExamples,
 } from '@/lib/caption-shuffle'
-import { downloadDriveFile, uploadToDriveFolder } from '@/lib/google-drive'
+import { downloadDriveFile, uploadToDriveFolderResilient } from '@/lib/google-drive'
 import { getUserGoogleAccessToken } from '@/lib/drive-archive/user-google-auth'
 import { writeFileSync, readFileSync, unlinkSync } from 'fs'
 import { execFile } from 'child_process'
@@ -566,8 +566,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const health = await probeComfyHealth(comfyUrl, apiToken)
       if (!health.ok) throw new Error(`Pod offline — ${health.error}`)
 
-      // Uploads must use user OAuth — SA has no My Drive storage quota.
-      const driveToken = await getUserGoogleAccessToken(job.user_id)
+      // Fail-fast: user must have Google connected (uploads use resilient OAuth per file).
+      await getUserGoogleAccessToken(job.user_id)
 
       let remoteJobDir: string | null = null
       if (session) {
@@ -649,7 +649,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             }
             const ext = outputs[f].filename.split('.').pop() ?? 'png'
             const mime = ext === 'mp4' ? 'video/mp4' : ext === 'webp' ? 'image/webp' : 'image/png'
-            const uploaded = await uploadToDriveFolder(outputDriveFolderId, `${i + 1}_${f + 1}.${ext}`, buf, mime, driveToken)
+            const uploaded = await uploadToDriveFolderResilient(
+              job.user_id,
+              outputDriveFolderId,
+              `${i + 1}_${f + 1}.${ext}`,
+              buf,
+              mime,
+            )
             lastLink = uploaded.link
           }
           comfyuiRows.push({ prompt: item.prompt, status: 'done', stage: 'done', driveLink: lastLink })
@@ -684,7 +690,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const health = await probeComfyHealth(session.comfyBaseUrl, session.comfyApiToken)
       if (!health.ok) throw new Error(`Pod offline — ${health.error}`)
 
-      const driveToken = await getUserGoogleAccessToken(job.user_id)
+      await getUserGoogleAccessToken(job.user_id)
       const { remoteJobDir } = await ensureRemoteWorkDir(session.ssh, session.remoteWorkRoot, id)
       const rows: MyPodRow[] = job.output?.myPodRows ? [...job.output.myPodRows] : []
       let doneCount = job.done_items
@@ -711,12 +717,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             jobId: `${id}_${i}`,
           })
           const ext = result.filename.split('.').pop() ?? 'mp4'
-          const uploaded = await uploadToDriveFolder(
+          const uploaded = await uploadToDriveFolderResilient(
+            job.user_id,
             input.outputDriveFolderId,
             `${item.name.replace(/\.[^.]+$/, '')}_output.${ext}`,
             result.buffer,
             ext === 'webm' ? 'video/webm' : 'video/mp4',
-            driveToken,
           )
           rows.push({ label: item.name, status: 'done', stage: 'done', driveLink: uploaded.link })
         } catch (err) {
@@ -747,7 +753,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const health = await probeComfyHealth(session.comfyBaseUrl, session.comfyApiToken)
       if (!health.ok) throw new Error(`Pod offline — ${health.error}`)
 
-      const driveToken = await getUserGoogleAccessToken(job.user_id)
+      await getUserGoogleAccessToken(job.user_id)
       const { remoteJobDir } = await ensureRemoteWorkDir(session.ssh, session.remoteWorkRoot, id)
       const rows: MyPodRow[] = job.output?.myPodRows ? [...job.output.myPodRows] : []
       let doneCount = job.done_items
@@ -781,12 +787,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             jobId: `${id}_${i}`,
           })
           const ext = result.filename.split('.').pop() ?? 'mp4'
-          const uploaded = await uploadToDriveFolder(
+          const uploaded = await uploadToDriveFolderResilient(
+            job.user_id,
             input.outputDriveFolderId,
             `${item.name.replace(/\.[^.]+$/, '')}_output.${ext}`,
             result.buffer,
             'video/mp4',
-            driveToken,
           )
           rows.push({ label: item.name, status: 'done', stage: 'done', driveLink: uploaded.link })
         } catch (err) {
@@ -820,7 +826,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const fishKey = session.fishApiKey?.trim()
       if (!fishKey) throw new Error('Fish API key missing — reconnect in My Pod → Connection')
 
-      const driveToken = await getUserGoogleAccessToken(job.user_id)
+      await getUserGoogleAccessToken(job.user_id)
 
       // Talk is fully remote HTTP (like sheets COMFY_REMOTE=1) — SSH disk check is best-effort.
       let remoteJobDir: string | null = null
@@ -868,12 +874,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             jobId: `${id}_${i}`,
           })
           const ext = result.filename.split('.').pop() ?? 'mp4'
-          const uploaded = await uploadToDriveFolder(
+          const uploaded = await uploadToDriveFolderResilient(
+            job.user_id,
             input.outputDriveFolderId,
             `${item.name.replace(/\.[^.]+$/, '')}_talk.${ext}`,
             result.buffer,
             ext === 'webm' ? 'video/webm' : 'video/mp4',
-            driveToken,
           )
           rows.push({ label: item.name, status: 'done', stage: 'done', driveLink: uploaded.link })
         } catch (err) {
