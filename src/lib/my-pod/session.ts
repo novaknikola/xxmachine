@@ -1,9 +1,12 @@
 import { one, query } from '@/lib/db'
 import { encryptSecret, decryptSecret, MY_POD_SECRET_PURPOSE } from '@/lib/secret-crypto'
 import { normalizeComfyUrl, maskHost, probeComfyHealth, RUNPOD_SSH_HOST_RE } from '@/lib/my-pod/comfy'
+import { parseRunpodSshCommand } from '@/lib/my-pod/parse-ssh'
+import { resolvePlatformSshPrivateKey } from '@/lib/my-pod/platform-ssh-key'
 import { probeSsh, ensureRemoteWorkDir, type SshAuth } from '@/lib/my-pod/ssh'
 
 const SESSION_TTL_HOURS = 24
+const DEFAULT_WORK_ROOT = '/workspace/xxmachine'
 
 export interface PodSessionPublic {
   connected: boolean
@@ -41,26 +44,23 @@ interface PodSessionRow {
   expires_at: Date
 }
 
+/** Only what the user pastes from RunPod Connect. */
 export interface SavePodSessionInput {
   comfyBaseUrl: string
-  sshHost: string
-  sshPort?: number
-  sshUser?: string
-  sshAuthType: 'password' | 'private_key'
-  sshSecret: string
-  comfyApiToken?: string
-  remoteWorkRoot?: string
+  sshCommand: string
 }
 
 function rowToSecrets(row: PodSessionRow): PodSessionSecrets {
+  // Always use the VPS platform key — user never pastes a key in the UI.
+  const secret = resolvePlatformSshPrivateKey()
   return {
     comfyBaseUrl: row.comfy_base_url.replace(/\/+$/, ''),
     ssh: {
       host: row.ssh_host,
       port: row.ssh_port,
       username: row.ssh_user,
-      authType: row.ssh_auth_type,
-      secret: decryptSecret(row.ssh_auth_enc, MY_POD_SECRET_PURPOSE),
+      authType: 'private_key',
+      secret,
     },
     comfyApiToken: row.comfy_api_token_enc
       ? decryptSecret(row.comfy_api_token_enc, MY_POD_SECRET_PURPOSE)
@@ -132,6 +132,12 @@ export async function validatePodConnection(input: {
   comfyApiToken?: string | null
   remoteWorkRoot: string
 }): Promise<{ ok: true } | { ok: false; error: string }> {
+  // Comfy HTTP is required for all job I/O (RunPod SSH has no SFTP).
+  const comfy = await probeComfyHealth(input.comfyBaseUrl, input.comfyApiToken)
+  if (!comfy.ok) return { ok: false, error: comfy.error }
+
+  // SSH is best-effort (shell probe / mkdir). RunPod gateway often rejects PTY;
+  // do not block Connect if Comfy is healthy.
   const ssh = await probeSsh({
     host: input.sshHost,
     port: input.sshPort,
@@ -139,27 +145,24 @@ export async function validatePodConnection(input: {
     authType: input.sshAuthType,
     secret: input.sshSecret,
   })
-  if (!ssh.ok) return { ok: false, error: `SSH: ${ssh.error}` }
-
-  try {
-    await ensureRemoteWorkDir(
-      {
-        host: input.sshHost,
-        port: input.sshPort,
-        username: input.sshUser,
-        authType: input.sshAuthType,
-        secret: input.sshSecret,
-      },
-      input.remoteWorkRoot,
-    )
-  } catch (err) {
-    // Shell mkdir/df may fail on some templates; Comfy HTTP is enough for file transfer
-    // (RunPod SSH often has no SCP/SFTP). Soft-warn but continue if SSH probe already passed.
-    console.warn('[my-pod] remote work dir check:', err instanceof Error ? err.message : err)
+  if (!ssh.ok) {
+    console.warn('[my-pod] SSH probe soft-fail (Comfy OK):', ssh.error)
+  } else {
+    try {
+      await ensureRemoteWorkDir(
+        {
+          host: input.sshHost,
+          port: input.sshPort,
+          username: input.sshUser,
+          authType: input.sshAuthType,
+          secret: input.sshSecret,
+        },
+        input.remoteWorkRoot,
+      )
+    } catch (err) {
+      console.warn('[my-pod] remote work dir check:', err instanceof Error ? err.message : err)
+    }
   }
-
-  const comfy = await probeComfyHealth(input.comfyBaseUrl, input.comfyApiToken)
-  if (!comfy.ok) return { ok: false, error: comfy.error }
 
   return { ok: true }
 }
@@ -169,41 +172,44 @@ export async function savePodSession(
   input: SavePodSessionInput,
 ): Promise<PodSessionPublic> {
   const comfyBaseUrl = normalizeComfyUrl(input.comfyBaseUrl)
-  const sshHost = input.sshHost.trim().toLowerCase()
+  const parsed = parseRunpodSshCommand(input.sshCommand ?? '')
+  if (!parsed) {
+    throw new Error(
+      'Paste the full SSH line from RunPod Connect, e.g. ssh user@ssh.runpod.io -i ~/.ssh/id_ed25519',
+    )
+  }
+  const sshHost = parsed.sshHost.trim().toLowerCase()
   if (!RUNPOD_SSH_HOST_RE.test(sshHost) && !/^[a-z0-9.-]+$/i.test(sshHost)) {
-    throw new Error('Invalid SSH host')
+    throw new Error('Invalid SSH host in command')
   }
-  const sshPort = input.sshPort && input.sshPort > 0 ? input.sshPort : 22
-  const sshUser = (input.sshUser?.trim() || 'root')
-  const sshSecret = input.sshSecret.trim()
-  if (!sshSecret) throw new Error('SSH password or private key required')
-  if (input.sshAuthType !== 'password' && input.sshAuthType !== 'private_key') {
-    throw new Error('sshAuthType must be password or private_key')
-  }
-  const remoteWorkRoot = (input.remoteWorkRoot?.trim() || '/workspace/xxmachine').replace(/\/+$/, '')
-  const comfyApiToken = input.comfyApiToken?.trim() || null
+  const sshPort = parsed.sshPort > 0 ? parsed.sshPort : 22
+  const sshUser = parsed.sshUser.trim()
+  if (!sshUser) throw new Error('SSH user missing from command')
+
+  const sshSecret = resolvePlatformSshPrivateKey()
+  const remoteWorkRoot = DEFAULT_WORK_ROOT
 
   const probe = await validatePodConnection({
     comfyBaseUrl,
     sshHost,
     sshPort,
     sshUser,
-    sshAuthType: input.sshAuthType,
+    sshAuthType: 'private_key',
     sshSecret,
-    comfyApiToken,
+    comfyApiToken: null,
     remoteWorkRoot,
   })
   if (!probe.ok) throw new Error(probe.error)
 
   const expiresAt = new Date(Date.now() + SESSION_TTL_HOURS * 3600_000)
-  const sshAuthEnc = encryptSecret(sshSecret, MY_POD_SECRET_PURPOSE)
-  const tokenEnc = comfyApiToken ? encryptSecret(comfyApiToken, MY_POD_SECRET_PURPOSE) : null
+  // Placeholder only — runtime always uses resolvePlatformSshPrivateKey()
+  const sshAuthEnc = encryptSecret('platform', MY_POD_SECRET_PURPOSE)
 
   await query(
     `INSERT INTO pod_sessions (
        user_id, comfy_base_url, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_auth_enc,
        comfy_api_token_enc, remote_work_root, last_ok_at, last_error, expires_at, updated_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now(), NULL, $10, now())
+     ) VALUES ($1,$2,$3,$4,$5,'private_key',$6,NULL,$7, now(), NULL, $8, now())
      ON CONFLICT (user_id) DO UPDATE SET
        comfy_base_url = EXCLUDED.comfy_base_url,
        ssh_host = EXCLUDED.ssh_host,
@@ -211,15 +217,15 @@ export async function savePodSession(
        ssh_user = EXCLUDED.ssh_user,
        ssh_auth_type = EXCLUDED.ssh_auth_type,
        ssh_auth_enc = EXCLUDED.ssh_auth_enc,
-       comfy_api_token_enc = EXCLUDED.comfy_api_token_enc,
+       comfy_api_token_enc = NULL,
        remote_work_root = EXCLUDED.remote_work_root,
        last_ok_at = now(),
        last_error = NULL,
        expires_at = EXCLUDED.expires_at,
        updated_at = now()`,
     [
-      userId, comfyBaseUrl, sshHost, sshPort, sshUser, input.sshAuthType, sshAuthEnc,
-      tokenEnc, remoteWorkRoot, expiresAt.toISOString(),
+      userId, comfyBaseUrl, sshHost, sshPort, sshUser, sshAuthEnc,
+      remoteWorkRoot, expiresAt.toISOString(),
     ],
   )
 

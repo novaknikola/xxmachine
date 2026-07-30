@@ -42,7 +42,7 @@ export async function sshExec(auth: SshAuth, command: string, timeoutMs = 30_000
   return withSsh(auth, client =>
     new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('SSH command timed out')), timeoutMs)
-      client.exec(command, (err, stream) => {
+      client.exec(command, { pty: false }, (err, stream) => {
         if (err) {
           clearTimeout(timer)
           reject(err)

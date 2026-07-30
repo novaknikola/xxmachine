@@ -4,7 +4,6 @@ import {
   getPodSessionPublic,
   savePodSession,
   deletePodSession,
-  type SavePodSessionInput,
 } from '@/lib/my-pod/session'
 
 export async function GET(req: NextRequest) {
@@ -18,17 +17,14 @@ export async function POST(req: NextRequest) {
   const user = await requireUser(req)
   if (user instanceof NextResponse) return user
 
-  const body = await req.json().catch(() => ({})) as Partial<SavePodSessionInput>
+  const body = await req.json().catch(() => ({})) as {
+    comfyBaseUrl?: string
+    sshCommand?: string
+  }
   try {
     const session = await savePodSession(user.id, {
       comfyBaseUrl: body.comfyBaseUrl ?? '',
-      sshHost: body.sshHost ?? '',
-      sshPort: body.sshPort,
-      sshUser: body.sshUser,
-      sshAuthType: body.sshAuthType === 'private_key' ? 'private_key' : 'password',
-      sshSecret: body.sshSecret ?? '',
-      comfyApiToken: body.comfyApiToken,
-      remoteWorkRoot: body.remoteWorkRoot,
+      sshCommand: body.sshCommand ?? '',
     })
     return NextResponse.json({ session })
   } catch (err) {

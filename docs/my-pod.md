@@ -1,9 +1,11 @@
 # My Pod — SSH + ComfyUI control plane
 
 xxmachine is the **control plane**. Your RunPod GPU pod is an ephemeral worker.
-You paste SSH + ComfyUI URL once, queue jobs from the dashboard, and outputs land in **Google Drive**.
+You paste **only** the ComfyUI URL + SSH command from RunPod Connect. Outputs land in **Google Drive**.
 
 UI: `/my-pod` (legacy `/comfyui` redirects here).
+
+The RunPod SSH private key lives **on the xxmachine VPS** (`/root/.ssh/runpod_ed25519` or `MY_POD_SSH_PRIVATE_KEY`) — never typed in the dashboard.
 
 ## Architecture
 
@@ -60,10 +62,11 @@ Network volume `/workspace` for models is fine; session `remote_work_root` defau
 ### 4. Connect in UI
 
 1. Open **My Pod → Connection**
-2. Paste ComfyUI URL (`https://<id>-8188.proxy.runpod.net`)
-3. Paste SSH host / port / user + password or private key
-4. **Connect & validate** (SSH `echo ok` + Comfy `/system_stats` + disk check)
-5. Generate uses this session — no per-job URL paste
+2. Paste **ComfyUI URL** from RunPod Connect (HTTP Services → comfy / 8188)
+3. Paste the full **SSH** line from RunPod Connect
+4. Click **Connect**
+
+Nothing else is typed. The VPS uses `/root/.ssh/runpod_ed25519` (or `MY_POD_SSH_PRIVATE_KEY`) for SSH.
 
 ## Job modes
 
