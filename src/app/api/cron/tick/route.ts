@@ -89,34 +89,36 @@ export async function GET(req: NextRequest) {
         AND job_type NOT IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk')`,
   ).catch(err => console.error('[cron/tick] reset stuck queue jobs:', err))
 
-  // My Pod: fail jobs with no progress for > 10 minutes (don't silently requeue forever)
+  // My Pod resume lease: worker heartbeats progressAt ~every 60s during Comfy/Python work.
+  // If heartbeat stops (deploy/crash), requeue to pending and continue from done_items.
+  // Exhausted attempts → fail instead of looping forever.
   await query(
     `UPDATE generation_queue
-        SET status = 'failed',
-            error = COALESCE(error, 'No progress for 10+ minutes — pod may be offline'),
-            finished_at = now()
+        SET status = 'pending',
+            started_at = NULL,
+            error = NULL
       WHERE status = 'processing'
         AND job_type IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk')
-        AND started_at < now() - interval '10 minutes'
-        AND (
-          output IS NULL
-          OR NOT (output ? 'stage')
-          OR (output->>'stage') IN ('validating', 'uploading', 'downloading_inputs', 'building_graph', 'fish_tts')
-        )
-        AND done_items = 0`,
-  ).catch(err => console.error('[cron/tick] fail stuck my-pod jobs:', err))
+        AND attempts < max_attempts
+        AND COALESCE(
+              NULLIF(output->>'progressAt', '')::timestamptz,
+              started_at
+            ) < now() - interval '25 minutes'`,
+  ).catch(err => console.error('[cron/tick] requeue stale my-pod jobs:', err))
 
-  // Long-running My Pod renders can exceed 10 min once stage=running — only fail if done_items
-  // hasn't moved for 90 minutes wall time.
   await query(
     `UPDATE generation_queue
         SET status = 'failed',
-            error = COALESCE(error, 'My Pod job exceeded 90 minutes — marked failed'),
+            error = COALESCE(error, 'My Pod job stalled — no heartbeat after max attempts'),
             finished_at = now()
       WHERE status = 'processing'
         AND job_type IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk')
-        AND started_at < now() - interval '90 minutes'`,
-  ).catch(err => console.error('[cron/tick] fail long my-pod jobs:', err))
+        AND attempts >= max_attempts
+        AND COALESCE(
+              NULLIF(output->>'progressAt', '')::timestamptz,
+              started_at
+            ) < now() - interval '25 minutes'`,
+  ).catch(err => console.error('[cron/tick] fail exhausted my-pod jobs:', err))
 
   let queueStarted = 0
   try {

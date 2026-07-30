@@ -120,15 +120,26 @@ export async function submitComfyPrompt(
 export async function pollComfyResult(
   comfyBaseUrl: string,
   promptId: string,
-  opts?: { apiToken?: string | null; maxAttempts?: number; intervalMs?: number; preferNodeId?: string },
+  opts?: {
+    apiToken?: string | null
+    maxAttempts?: number
+    intervalMs?: number
+    preferNodeId?: string
+    onHeartbeat?: () => void | Promise<void>
+  },
 ): Promise<PodOutputFile[]> {
   const base = comfyBaseUrl.replace(/\/+$/, '')
   const maxAttempts = opts?.maxAttempts ?? 120
   const interval = opts?.intervalMs ?? 3000
   const token = opts?.apiToken
+  let lastBeat = 0
 
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise(r => setTimeout(r, interval))
+    if (opts?.onHeartbeat && Date.now() - lastBeat > 60_000) {
+      lastBeat = Date.now()
+      await opts.onHeartbeat().catch(() => {})
+    }
     const res = await fetch(`${base}/history/${promptId}`, {
       headers: comfyHeaders(token),
     }).catch(() => null)

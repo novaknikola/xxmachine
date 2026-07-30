@@ -67,6 +67,23 @@ const GENERATE_BATCH_SIZE = 20
 const EXAMPLE_SAMPLE_SIZE = 25
 const CAROUSEL_BATCH_SIZE = 2
 
+/** Lease heartbeat so cron can requeue zombie My Pod workers after deploy/crash. */
+function packMyPodOutput(rows: MyPodRow[], stage: string) {
+  return JSON.stringify({
+    myPodRows: rows,
+    stage,
+    progressAt: new Date().toISOString(),
+  })
+}
+
+function packComfyOutput(rows: ComfyUIRow[], stage: string) {
+  return JSON.stringify({
+    comfyuiRows: rows,
+    stage,
+    progressAt: new Date().toISOString(),
+  })
+}
+
 type RouteParams = { params: Promise<{ id: string }> }
 
 interface JobRow {
@@ -599,9 +616,9 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         const progress = Math.round((doneCount / items.length) * 100)
         await query(
           `UPDATE generation_queue
-              SET done_items=$1, progress=$2, output=jsonb_build_object('comfyuiRows', $3::jsonb, 'stage', $4::text)
-            WHERE id=$5`,
-          [doneCount, progress, JSON.stringify(comfyuiRows), stage, id],
+              SET done_items=$1, progress=$2, output=$3::jsonb
+            WHERE id=$4`,
+          [doneCount, progress, packComfyOutput(comfyuiRows, stage), id],
         )
       }
 
@@ -700,19 +717,25 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       }
       const rows: MyPodRow[] = job.output?.myPodRows ? [...job.output.myPodRows] : []
       let doneCount = job.done_items
+      let leaseStage = 'running'
+      const touchLease = async () => {
+        await query(
+          `UPDATE generation_queue SET output = $1::jsonb WHERE id=$2`,
+          [packMyPodOutput(rows, leaseStage), id],
+        )
+      }
 
       for (let i = doneCount; i < input.items.length; i++) {
         const item = input.items[i]
         try {
+          leaseStage = 'downloading_inputs'
           await query(
-            `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'downloading_inputs'), done_items=$2, progress=$3 WHERE id=$4`,
-            [JSON.stringify(rows), doneCount, Math.round((doneCount / input.items.length) * 100), id],
+            `UPDATE generation_queue SET output = $1::jsonb, done_items=$2, progress=$3 WHERE id=$4`,
+            [packMyPodOutput(rows, leaseStage), doneCount, Math.round((doneCount / input.items.length) * 100), id],
           )
           const imgBuf = await downloadDriveFile(item.driveFileId)
-          await query(
-            `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'running') WHERE id=$2`,
-            [JSON.stringify(rows), id],
-          )
+          leaseStage = 'running'
+          await touchLease()
           const result = await runI2vItem({
             comfyBaseUrl: session.comfyBaseUrl,
             apiToken: session.comfyApiToken,
@@ -721,6 +744,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             imageName: item.name,
             prompt: item.prompt ?? input.prompt,
             jobId: `${id}_${i}`,
+            onHeartbeat: touchLease,
           })
           const ext = result.filename.split('.').pop() ?? 'mp4'
           const uploaded = await uploadToDriveFolderResilient(
@@ -739,9 +763,9 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         doneCount++
         await query(
           `UPDATE generation_queue
-              SET done_items=$1, progress=$2, output=jsonb_build_object('myPodRows', $3::jsonb, 'stage', $4::text)
-            WHERE id=$5`,
-          [doneCount, Math.round((doneCount / input.items.length) * 100), JSON.stringify(rows), 'uploading', id],
+              SET done_items=$1, progress=$2, output=$3::jsonb
+            WHERE id=$4`,
+          [doneCount, Math.round((doneCount / input.items.length) * 100), packMyPodOutput(rows, 'uploading'), id],
         )
       }
 
@@ -771,23 +795,24 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       let doneCount = job.done_items
 
       const refBuf = await downloadDriveFile(input.referenceImageId)
+      let leaseStage = 'running_windows'
+      const touchLease = async () => {
+        await query(
+          `UPDATE generation_queue SET output = $1::jsonb WHERE id=$2`,
+          [packMyPodOutput(rows, leaseStage), id],
+        )
+      }
 
       for (let i = doneCount; i < input.items.length; i++) {
         const item = input.items[i]
         try {
-          await query(
-            `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'downloading_inputs') WHERE id=$2`,
-            [JSON.stringify(rows), id],
-          )
+          leaseStage = 'downloading_inputs'
+          await touchLease()
           const vidBuf = await downloadDriveFile(item.driveFileId)
-          await query(
-            `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'building_graph') WHERE id=$2`,
-            [JSON.stringify(rows), id],
-          )
-          await query(
-            `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'running_windows') WHERE id=$2`,
-            [JSON.stringify(rows), id],
-          )
+          leaseStage = 'building_graph'
+          await touchLease()
+          leaseStage = 'running_windows'
+          await touchLease()
           const result = await runAnimateItem({
             comfyBaseUrl: session.comfyBaseUrl,
             apiToken: session.comfyApiToken,
@@ -797,6 +822,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             videoBuffer: vidBuf,
             videoName: item.name,
             jobId: `${id}_${i}`,
+            onHeartbeat: touchLease,
           })
           const ext = result.filename.split('.').pop() ?? 'mp4'
           const uploaded = await uploadToDriveFolderResilient(
@@ -815,9 +841,9 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         doneCount++
         await query(
           `UPDATE generation_queue
-              SET done_items=$1, progress=$2, output=jsonb_build_object('myPodRows', $3::jsonb, 'stage', 'uploading')
+              SET done_items=$1, progress=$2, output=$3::jsonb
             WHERE id=$4`,
-          [doneCount, Math.round((doneCount / input.items.length) * 100), JSON.stringify(rows), id],
+          [doneCount, Math.round((doneCount / input.items.length) * 100), packMyPodOutput(rows, 'uploading'), id],
         )
       }
 
@@ -850,20 +876,26 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       }
       const rows: MyPodRow[] = job.output?.myPodRows ? [...job.output.myPodRows] : []
       let doneCount = job.done_items
+      let leaseStage = 'running'
+      const touchLease = async () => {
+        await query(
+          `UPDATE generation_queue SET output = $1::jsonb WHERE id=$2`,
+          [packMyPodOutput(rows, leaseStage), id],
+        )
+      }
 
       for (let i = doneCount; i < input.items.length; i++) {
         const item = input.items[i]
         try {
+          leaseStage = 'downloading_inputs'
           await query(
-            `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'downloading_inputs'), done_items=$2, progress=$3 WHERE id=$4`,
-            [JSON.stringify(rows), doneCount, Math.round((doneCount / input.items.length) * 100), id],
+            `UPDATE generation_queue SET output = $1::jsonb, done_items=$2, progress=$3 WHERE id=$4`,
+            [packMyPodOutput(rows, leaseStage), doneCount, Math.round((doneCount / input.items.length) * 100), id],
           )
           const imgBuf = await downloadDriveFile(item.driveFileId)
 
-          await query(
-            `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'fish_tts') WHERE id=$2`,
-            [JSON.stringify(rows), id],
-          )
+          leaseStage = 'fish_tts'
+          await touchLease()
           const speechSource = item.spokenText?.trim() || item.text
           const audioBuf = await fishTts({
             apiKey: fishKey,
@@ -872,10 +904,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             style: input.style,
           })
 
-          await query(
-            `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'running') WHERE id=$2`,
-            [JSON.stringify(rows), id],
-          )
+          leaseStage = 'running'
+          await touchLease()
           const result = await runTalkItem({
             comfyBaseUrl: session.comfyBaseUrl,
             apiToken: session.comfyApiToken,
@@ -884,6 +914,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             imageName: item.name,
             audioBuffer: audioBuf,
             jobId: `${id}_${i}`,
+            onHeartbeat: touchLease,
           })
           const ext = result.filename.split('.').pop() ?? 'mp4'
           const uploaded = await uploadToDriveFolderResilient(
@@ -902,9 +933,9 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         doneCount++
         await query(
           `UPDATE generation_queue
-              SET done_items=$1, progress=$2, output=jsonb_build_object('myPodRows', $3::jsonb, 'stage', 'uploading')
+              SET done_items=$1, progress=$2, output=$3::jsonb
             WHERE id=$4`,
-          [doneCount, Math.round((doneCount / input.items.length) * 100), JSON.stringify(rows), id],
+          [doneCount, Math.round((doneCount / input.items.length) * 100), packMyPodOutput(rows, 'uploading'), id],
         )
       }
 

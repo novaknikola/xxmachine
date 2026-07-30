@@ -74,7 +74,12 @@ export async function probeDrivingFrames(videoBuffer: Buffer): Promise<number> {
   return 362
 }
 
-function runPython(script: string, env: Record<string, string>, timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
+function runPython(
+  script: string,
+  env: Record<string, string>,
+  timeoutMs: number,
+  onHeartbeat?: () => void | Promise<void>,
+): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.env.MY_POD_PYTHON || 'python3', [script], {
       env: { ...process.env, ...env },
@@ -82,6 +87,9 @@ function runPython(script: string, env: Record<string, string>, timeoutMs: numbe
     })
     let stdout = ''
     let stderr = ''
+    const beat = onHeartbeat
+      ? setInterval(() => { void onHeartbeat().catch(() => {}) }, 60_000)
+      : null
     const timer = setTimeout(() => {
       child.kill('SIGKILL')
       reject(new Error(`Python sidecar timed out after ${timeoutMs}ms`))
@@ -89,10 +97,12 @@ function runPython(script: string, env: Record<string, string>, timeoutMs: numbe
     child.stdout.on('data', (d: Buffer) => { stdout += d.toString() })
     child.stderr.on('data', (d: Buffer) => { stderr += d.toString() })
     child.on('error', err => {
+      if (beat) clearInterval(beat)
       clearTimeout(timer)
       reject(err)
     })
     child.on('close', code => {
+      if (beat) clearInterval(beat)
       clearTimeout(timer)
       if (code !== 0) reject(new Error(stderr.trim() || stdout.trim() || `python exit ${code}`))
       else resolve({ stdout, stderr })
@@ -109,6 +119,7 @@ export async function runI2vItem(opts: {
   imageName: string
   prompt?: string
   jobId: string
+  onHeartbeat?: () => void | Promise<void>
 }): Promise<{ buffer: Buffer; filename: string }> {
   void opts.ssh // reserved for future shell probes; RunPod gateway has no SFTP
   const templatePath = i2vTemplatePath()
@@ -141,6 +152,7 @@ export async function runI2vItem(opts: {
     maxAttempts: 720,
     intervalMs: 5000,
     preferNodeId: ids.save_video,
+    onHeartbeat: opts.onHeartbeat,
   })
   const video = outputs.find(f => /\.(mp4|webm|gif)$/i.test(f.filename)) ?? outputs[0]
   const buffer = await downloadFromComfy(opts.comfyBaseUrl, video, opts.apiToken)
@@ -158,6 +170,7 @@ export async function runAnimateItem(opts: {
   videoName: string
   drivingFrames?: number
   jobId: string
+  onHeartbeat?: () => void | Promise<void>
 }): Promise<{ buffer: Buffer; filename: string }> {
   void opts.ssh
   const workflowPath = animateWorkflowPath()
@@ -189,7 +202,7 @@ export async function runAnimateItem(opts: {
     OUTPUT_PREFIX: `video/xxm_${opts.jobId}`,
     JOB_TIMEOUT_SEC: '3600',
     HTTP_UA: 'xxmachine-my-pod/1.0',
-  }, 3_600_000)
+  }, 3_600_000, opts.onHeartbeat)
 
   const m = stdout.match(/DONE filename=(\S+) subfolder=(\S*)/)
   if (!m) throw new Error(`Animate sidecar unexpected output: ${stdout.slice(-800)}`)
@@ -217,6 +230,7 @@ export async function runTalkItem(opts: {
   imageName: string
   audioBuffer: Buffer
   jobId: string
+  onHeartbeat?: () => void | Promise<void>
 }): Promise<{ buffer: Buffer; filename: string }> {
   void opts.ssh
   const workflowPath = talkWorkflowPath()
@@ -242,7 +256,7 @@ export async function runTalkItem(opts: {
     INPUT_AUDIO: audioRemote,
     OUTPUT_PREFIX: `video/xxm_talk_${opts.jobId}`,
     JOB_TIMEOUT_SEC: '900',
-  }, 960_000)
+  }, 960_000, opts.onHeartbeat)
 
   const m = stdout.match(/DONE filename=(\S+) subfolder=(\S*)/)
   if (!m) throw new Error(`Talk sidecar unexpected output: ${stdout.slice(-800)}`)
