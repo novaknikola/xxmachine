@@ -16,14 +16,17 @@ BUILD_SCRIPT = os.path.join(os.path.dirname(__file__), "build_api.py")
 POLL_INTERVAL_SEC = 5
 TIMEOUT_SEC = int(os.environ.get("JOB_TIMEOUT_SEC", "3600"))
 FINAL_SAVEVIDEO_NODE_ID = "9999"
+UA = os.environ.get("HTTP_UA", "xxmachine-my-pod/1.0")
 
 
 def _req(url, data=None, method=None):
-    headers = {"Content-Type": "application/json"} if data is not None else {}
+    headers = {"User-Agent": UA}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
     if COMFY_API_TOKEN:
         headers["Authorization"] = f"Bearer {COMFY_API_TOKEN}"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    return urllib.request.urlopen(req, timeout=30)
+    return urllib.request.urlopen(req, timeout=60)
 
 
 def build_prompt():

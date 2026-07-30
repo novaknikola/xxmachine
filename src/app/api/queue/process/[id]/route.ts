@@ -691,7 +691,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       if (!health.ok) throw new Error(`Pod offline — ${health.error}`)
 
       await getUserGoogleAccessToken(job.user_id)
-      const { remoteJobDir } = await ensureRemoteWorkDir(session.ssh, session.remoteWorkRoot, id)
+      let remoteJobDir: string | null = null
+      try {
+        const d = await ensureRemoteWorkDir(session.ssh, session.remoteWorkRoot, id)
+        remoteJobDir = d.remoteJobDir
+      } catch (err) {
+        console.warn('[my_pod_i2v] SSH workdir skipped:', err instanceof Error ? err.message : err)
+      }
       const rows: MyPodRow[] = job.output?.myPodRows ? [...job.output.myPodRows] : []
       let doneCount = job.done_items
 
@@ -739,7 +745,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         )
       }
 
-      await cleanupRemoteJobDir(session.ssh, remoteJobDir)
+      if (remoteJobDir) await cleanupRemoteJobDir(session.ssh, remoteJobDir)
       await query(`UPDATE generation_queue SET status='done', finished_at=now(), progress=100 WHERE id=$1`, [id])
       return NextResponse.json({ ok: true, done: doneCount })
     }
@@ -754,7 +760,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       if (!health.ok) throw new Error(`Pod offline — ${health.error}`)
 
       await getUserGoogleAccessToken(job.user_id)
-      const { remoteJobDir } = await ensureRemoteWorkDir(session.ssh, session.remoteWorkRoot, id)
+      let remoteJobDir: string | null = null
+      try {
+        const d = await ensureRemoteWorkDir(session.ssh, session.remoteWorkRoot, id)
+        remoteJobDir = d.remoteJobDir
+      } catch (err) {
+        console.warn('[my_pod_animate] SSH workdir skipped:', err instanceof Error ? err.message : err)
+      }
       const rows: MyPodRow[] = job.output?.myPodRows ? [...job.output.myPodRows] : []
       let doneCount = job.done_items
 
@@ -790,7 +802,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           const uploaded = await uploadToDriveFolderResilient(
             job.user_id,
             input.outputDriveFolderId,
-            `${item.name.replace(/\.[^.]+$/, '')}_output.${ext}`,
+            `${item.name.replace(/\.[^.]+$/, '')}_animate.${ext}`,
             result.buffer,
             'video/mp4',
           )
@@ -809,7 +821,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         )
       }
 
-      await cleanupRemoteJobDir(session.ssh, remoteJobDir)
+      if (remoteJobDir) await cleanupRemoteJobDir(session.ssh, remoteJobDir)
       await query(`UPDATE generation_queue SET status='done', finished_at=now(), progress=100 WHERE id=$1`, [id])
       return NextResponse.json({ ok: true, done: doneCount })
     }

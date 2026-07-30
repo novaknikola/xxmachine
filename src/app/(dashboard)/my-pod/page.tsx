@@ -9,7 +9,7 @@ import { Loader2, Server } from 'lucide-react'
 
 const TABS = [
   { id: 'connection', label: 'Connection' },
-  { id: 'generate', label: 'Generate' },
+  { id: 'workflows', label: 'Workflows' },
   { id: 'queue', label: 'Queue' },
 ] as const
 
@@ -27,7 +27,7 @@ function MyPodInner() {
 
   useEffect(() => {
     if (isTab(tabParam)) setTab(tabParam)
-    else if (tabParam === 'templates') setTab('generate')
+    else if (tabParam === 'generate' || tabParam === 'templates') setTab('workflows')
   }, [tabParam])
 
   function go(id: TabId) {
@@ -43,7 +43,7 @@ function MyPodInner() {
             <Server className="w-5 h-5 text-primary" /> My Pod
           </h1>
           <p className="text-sm text-muted-foreground">
-            Connect your RunPod, run InfiniteTalk batches, watch progress in Queue.
+            Connect your RunPod, pick a workflow, watch progress in Queue.
           </p>
         </div>
 
@@ -65,7 +65,7 @@ function MyPodInner() {
         </div>
 
         {tab === 'connection' && <ConnectionTab />}
-        {tab === 'generate' && <GenerateTab />}
+        {tab === 'workflows' && <GenerateTab />}
         {tab === 'queue' && <QueueTab />}
       </div>
     </div>

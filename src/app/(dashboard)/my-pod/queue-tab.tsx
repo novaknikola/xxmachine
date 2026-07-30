@@ -351,7 +351,7 @@ export function QueueTab() {
         <div className="text-center py-16 text-muted-foreground">
           <ListTodo className="w-12 h-12 mx-auto mb-3 opacity-15" />
           <p className="text-sm font-medium">No My Pod jobs yet</p>
-          <p className="text-xs mt-1 opacity-70">Submit from the Generate tab</p>
+          <p className="text-xs mt-1 opacity-70">Submit from the Workflows tab</p>
         </div>
       ) : (
         <div className="space-y-3">

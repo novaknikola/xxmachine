@@ -1,6 +1,8 @@
-import { spawn } from 'node:child_process'
-import { readFileSync, existsSync } from 'node:fs'
+import { spawn, execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { readFileSync, existsSync, writeFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import {
   uploadFileToComfy,
@@ -10,6 +12,7 @@ import {
 } from '@/lib/my-pod/comfy'
 import type { SshAuth } from '@/lib/my-pod/ssh'
 
+const execFileAsync = promisify(execFile)
 const WORKERS_DIR = join(process.cwd(), 'workers', 'my_pod')
 
 export function i2vTemplatePath(): string {
@@ -33,6 +36,43 @@ const I2V_NODE_IDS = {
 }
 
 export const DEFAULT_I2V_PROMPT = 'woman smiling and tilting head slowly, subtle natural movement'
+
+/** Probe driving video frame count for WAN Animate window chain (fallback 362). */
+export async function probeDrivingFrames(videoBuffer: Buffer): Promise<number> {
+  const tmp = join(tmpdir(), `xxm_anim_probe_${randomUUID().slice(0, 8)}.mp4`)
+  writeFileSync(tmp, videoBuffer)
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'quiet',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=nb_frames,r_frame_rate,duration',
+      '-of', 'json',
+      tmp,
+    ], { timeout: 30_000 })
+    const json = JSON.parse(stdout) as {
+      streams?: { nb_frames?: string; r_frame_rate?: string; duration?: string }[]
+    }
+    const stream = json.streams?.[0]
+    if (!stream) return 362
+
+    const nb = Number.parseInt(stream.nb_frames ?? '', 10)
+    if (Number.isFinite(nb) && nb > 0) return nb
+
+    const duration = Number.parseFloat(stream.duration ?? '')
+    const rateParts = (stream.r_frame_rate ?? '').split('/')
+    const num = Number.parseFloat(rateParts[0] ?? '')
+    const den = Number.parseFloat(rateParts[1] ?? '1') || 1
+    const fps = num / den
+    if (Number.isFinite(duration) && duration > 0 && Number.isFinite(fps) && fps > 0) {
+      return Math.max(1, Math.round(duration * fps))
+    }
+  } catch (err) {
+    console.warn('[my-pod] ffprobe driving frames failed, using 362:', err instanceof Error ? err.message : err)
+  } finally {
+    try { unlinkSync(tmp) } catch { /* ignore */ }
+  }
+  return 362
+}
 
 function runPython(script: string, env: Record<string, string>, timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
@@ -137,15 +177,18 @@ export async function runAnimateItem(opts: {
   await uploadFileToComfy(opts.comfyBaseUrl, opts.imageBuffer, imgRemote, opts.apiToken)
   await uploadFileToComfy(opts.comfyBaseUrl, opts.videoBuffer, vidRemote, opts.apiToken)
 
+  const drivingFrames = opts.drivingFrames ?? await probeDrivingFrames(opts.videoBuffer)
+
   const { stdout } = await runPython(runScript, {
     COMFY_URL: opts.comfyBaseUrl,
     COMFY_API_TOKEN: opts.apiToken ?? '',
     WORKFLOW_PATH: workflowPath,
     IMAGE_FILE: imgRemote,
     DRIVING_FILE: vidRemote,
-    DRIVING_FRAMES: String(opts.drivingFrames ?? 362),
+    DRIVING_FRAMES: String(drivingFrames),
     OUTPUT_PREFIX: `video/xxm_${opts.jobId}`,
     JOB_TIMEOUT_SEC: '3600',
+    HTTP_UA: 'xxmachine-my-pod/1.0',
   }, 3_600_000)
 
   const m = stdout.match(/DONE filename=(\S+) subfolder=(\S*)/)

@@ -81,6 +81,7 @@ COMFY_API_TOKEN = os.environ.get("COMFY_API_TOKEN", "").strip()
 
 def _comfy_req(path: str):
     req = urllib.request.Request(f"{COMFY_URL}{path}")
+    req.add_header("User-Agent", os.environ.get("HTTP_UA", "xxmachine-my-pod/1.0"))
     if COMFY_API_TOKEN:
         req.add_header("Authorization", f"Bearer {COMFY_API_TOKEN}")
     return req

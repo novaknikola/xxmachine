@@ -18,9 +18,11 @@ interface PodSession {
   lastError: string | null
 }
 
+type Workflow = 'infinitetalk' | 'animate'
+
 export function GenerateTab() {
   const router = useRouter()
-  const [workflow, setWorkflow] = useState('infinitetalk')
+  const [workflow, setWorkflow] = useState<Workflow>('infinitetalk')
   const [session, setSession] = useState<PodSession | null>(null)
   const [inputFolderId, setInputFolderId] = useState('')
   const [outputFolderId, setOutputFolderId] = useState('')
@@ -48,33 +50,23 @@ export function GenerateTab() {
       toast.error('Pod offline — connect & Test in Connection tab')
       return
     }
-    if (workflow !== 'infinitetalk') {
-      toast.error('This workflow is not available here yet')
-      return
-    }
     if (!outputFolderId.trim()) {
       toast.error('Output Drive folder ID required')
       return
     }
     if (!inputFolderId.trim()) {
-      toast.error('Input Drive folder with images required')
-      return
-    }
-    if (!fishVoiceId.trim()) {
-      toast.error('FishVoiceID required')
-      return
-    }
-    if (textLines.length === 0) {
-      toast.error('Add at least one Text line')
+      toast.error('Input Drive folder required')
       return
     }
 
     setSubmitting(true)
     try {
-      const res = await fetch('/api/queue/submit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      let body: Record<string, unknown>
+
+      if (workflow === 'infinitetalk') {
+        if (!fishVoiceId.trim()) throw new Error('FishVoiceID required')
+        if (textLines.length === 0) throw new Error('Add at least one Text line')
+        body = {
           job_type: 'my_pod_talk',
           input: {
             inputDriveFolderId: inputFolderId.trim(),
@@ -84,17 +76,36 @@ export function GenerateTab() {
             texts: textLines,
             spokenTexts: spokenLines.some(Boolean) ? spokenLines : undefined,
           },
-        }),
+        }
+      } else {
+        body = {
+          job_type: 'my_pod_animate',
+          input: {
+            inputDriveFolderId: inputFolderId.trim(),
+            outputDriveFolderId: outputFolderId.trim(),
+          },
+        }
+      }
+
+      const res = await fetch('/api/queue/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Submit failed')
 
-      toast.success(`${textLines.length} InfiniteTalk clip(s) queued`, {
+      const label = workflow === 'infinitetalk'
+        ? `${textLines.length} InfiniteTalk clip(s)`
+        : 'WAN Animate batch'
+      toast.success(`${label} queued`, {
         description: 'Runs on your pod — results land in Drive',
         action: { label: 'Open Queue', onClick: () => router.push('/my-pod?tab=queue') },
       })
-      setPrompts('')
-      setSpokenTexts('')
+      if (workflow === 'infinitetalk') {
+        setPrompts('')
+        setSpokenTexts('')
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed')
     } finally {
@@ -126,14 +137,22 @@ export function GenerateTab() {
           <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">Workflow</CardTitle>
         </CardHeader>
         <CardContent>
-          <Select value={workflow} onValueChange={v => { if (v) setWorkflow(v) }}>
+          <Select
+            value={workflow}
+            onValueChange={v => {
+              if (v === 'infinitetalk' || v === 'animate') setWorkflow(v)
+            }}
+          >
             <SelectTrigger className="h-10 text-xs"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="infinitetalk">InfiniteTalk — Fish + Comfy</SelectItem>
+              <SelectItem value="animate">WAN Animate — image + driving video</SelectItem>
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground mt-2">
-            Drive image → Fish TTS → InfiniteTalk → Drive video. Other workflows will get their own pages later.
+            {workflow === 'infinitetalk'
+              ? 'Drive image → Fish TTS → InfiniteTalk → Drive video.'
+              : 'One reference image + driving videos in the input folder → WAN Animate → Drive video.'}
           </p>
         </CardContent>
       </Card>
@@ -145,7 +164,12 @@ export function GenerateTab() {
         <CardContent className="space-y-3">
           <div className="space-y-1">
             <Label className="text-xs text-muted-foreground">
-              Input folder ID <span className="opacity-60">(portrait images, flat)</span>
+              Input folder ID{' '}
+              <span className="opacity-60">
+                {workflow === 'animate'
+                  ? '(1 reference image + driving videos, flat)'
+                  : '(portrait images, flat)'}
+              </span>
             </Label>
             <Input
               value={inputFolderId}
@@ -166,78 +190,99 @@ export function GenerateTab() {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">Fish Audio</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="space-y-1">
-            <Label className="text-xs text-muted-foreground">FishVoiceID</Label>
-            <Input
-              value={fishVoiceId}
-              onChange={e => setFishVoiceId(e.target.value)}
-              placeholder="voice reference_id from Fish"
-              className="h-10 text-sm font-mono"
-            />
-          </div>
-          <div className="space-y-1">
-            <Label className="text-xs text-muted-foreground">
-              Style <span className="opacity-60 font-normal">(optional — e.g. [soft tone])</span>
-            </Label>
-            <Input
-              value={style}
-              onChange={e => setStyle(e.target.value)}
-              placeholder="[soft tone]"
-              className="h-10 text-sm"
-            />
-          </div>
-        </CardContent>
-      </Card>
+      {workflow === 'infinitetalk' && (
+        <>
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">Fish Audio</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="space-y-1">
+                <Label className="text-xs text-muted-foreground">FishVoiceID</Label>
+                <Input
+                  value={fishVoiceId}
+                  onChange={e => setFishVoiceId(e.target.value)}
+                  placeholder="voice reference_id from Fish"
+                  className="h-10 text-sm font-mono"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs text-muted-foreground">
+                  Style <span className="opacity-60 font-normal">(optional — e.g. [soft tone])</span>
+                </Label>
+                <Input
+                  value={style}
+                  onChange={e => setStyle(e.target.value)}
+                  placeholder="[soft tone]"
+                  className="h-10 text-sm"
+                />
+              </div>
+            </CardContent>
+          </Card>
 
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">
-            Text (1 per line)
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <Textarea
-            value={prompts}
-            onChange={e => setPrompts(e.target.value)}
-            rows={8}
-            placeholder={'Hey… come closer.\nI missed you today.'}
-            className="resize-none font-mono text-sm"
-          />
-          <p className="text-xs text-muted-foreground">
-            {textLines.length} line{textLines.length !== 1 ? 's' : ''} · paired with images (cycled if counts differ)
-          </p>
-        </CardContent>
-      </Card>
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">
+                Text (1 per line)
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <Textarea
+                value={prompts}
+                onChange={e => setPrompts(e.target.value)}
+                rows={8}
+                placeholder={'Hey… come closer.\nI missed you today.'}
+                className="resize-none font-mono text-sm"
+              />
+              <p className="text-xs text-muted-foreground">
+                {textLines.length} line{textLines.length !== 1 ? 's' : ''} · paired with images (cycled if counts differ)
+              </p>
+            </CardContent>
+          </Card>
 
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">
-            SpokenText <span className="opacity-60 font-normal">(optional, 1 per line)</span>
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <Textarea
-            value={spokenTexts}
-            onChange={e => setSpokenTexts(e.target.value)}
-            rows={4}
-            placeholder="Leave blank to speak Text as-is. Use commas / ellipses for pacing…"
-            className="resize-none font-mono text-sm"
-          />
-          <p className="text-xs text-muted-foreground">
-            Overrides Text for TTS only (caption stays as Text). Blank line = use Text.
-          </p>
-        </CardContent>
-      </Card>
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">
+                SpokenText <span className="opacity-60 font-normal">(optional, 1 per line)</span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <Textarea
+                value={spokenTexts}
+                onChange={e => setSpokenTexts(e.target.value)}
+                rows={4}
+                placeholder="Leave blank to speak Text as-is. Use commas / ellipses for pacing…"
+                className="resize-none font-mono text-sm"
+              />
+              <p className="text-xs text-muted-foreground">
+                Overrides Text for TTS only (caption stays as Text). Blank line = use Text.
+              </p>
+            </CardContent>
+          </Card>
+        </>
+      )}
+
+      {workflow === 'animate' && (
+        <Card>
+          <CardContent className="pt-4">
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Put <span className="text-foreground">one</span> reference portrait (png/jpg) and one or more
+              driving videos (mp4/webm) in the input folder. Each video becomes one Animate job using that
+              same face. Frame count is probed from each video automatically.
+            </p>
+          </CardContent>
+        </Card>
+      )}
 
       <Button className="w-full h-10" onClick={submit} disabled={submitting || !session?.healthy}>
         {submitting
           ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Queuing…</>
-          : <><ListTodo className="w-4 h-4 mr-2" />Run InfiniteTalk on My Pod</>}
+          : (
+            <>
+              <ListTodo className="w-4 h-4 mr-2" />
+              {workflow === 'infinitetalk' ? 'Run InfiniteTalk on My Pod' : 'Run WAN Animate on My Pod'}
+            </>
+          )}
       </Button>
     </div>
   )
