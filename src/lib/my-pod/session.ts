@@ -1,4 +1,4 @@
-import { one, query } from '@/lib/db'
+import { one, query, rows } from '@/lib/db'
 import { encryptSecret, decryptSecret, MY_POD_SECRET_PURPOSE } from '@/lib/secret-crypto'
 import { normalizeComfyUrl, maskHost, probeComfyHealth, RUNPOD_SSH_HOST_RE } from '@/lib/my-pod/comfy'
 import { parseRunpodSshCommand } from '@/lib/my-pod/parse-ssh'
@@ -8,7 +8,11 @@ import { probeSsh, ensureRemoteWorkDir, type SshAuth } from '@/lib/my-pod/ssh'
 const SESSION_TTL_HOURS = 24
 const DEFAULT_WORK_ROOT = '/workspace/xxmachine'
 
+export type PodWorkflowKey = 'talk' | 'animate' | 'i2v'
+
 export interface PodSessionPublic {
+  id: string
+  name: string
   connected: boolean
   healthy: boolean
   comfyBaseUrl: string | null
@@ -22,7 +26,15 @@ export interface PodSessionPublic {
   expiresAt: string | null
 }
 
+export interface PodWorkflowDefaultsPublic {
+  talkSessionId: string | null
+  animateSessionId: string | null
+  i2vSessionId: string | null
+}
+
 export interface PodSessionSecrets {
+  id: string
+  name: string
   comfyBaseUrl: string
   ssh: SshAuth
   comfyApiToken: string | null
@@ -32,7 +44,9 @@ export interface PodSessionSecrets {
 }
 
 interface PodSessionRow {
+  id: string
   user_id: string
+  name: string
   comfy_base_url: string
   ssh_host: string
   ssh_port: number
@@ -49,6 +63,9 @@ interface PodSessionRow {
 
 /** Only what the user pastes in My Pod → Connection. */
 export interface SavePodSessionInput {
+  /** Existing session id to update; omit to create. */
+  id?: string
+  name?: string
   comfyBaseUrl: string
   sshCommand: string
   /** Fish Audio API key. Blank keeps existing saved key. */
@@ -56,9 +73,10 @@ export interface SavePodSessionInput {
 }
 
 function rowToSecrets(row: PodSessionRow): PodSessionSecrets {
-  // Always use the VPS platform key — user never pastes a key in the UI.
   const secret = resolvePlatformSshPrivateKey()
   return {
+    id: row.id,
+    name: row.name,
     comfyBaseUrl: row.comfy_base_url.replace(/\/+$/, ''),
     ssh: {
       host: row.ssh_host,
@@ -81,6 +99,8 @@ function rowToSecrets(row: PodSessionRow): PodSessionSecrets {
 export function toPublic(row: PodSessionRow | null, healthyOverride?: boolean): PodSessionPublic {
   if (!row) {
     return {
+      id: '',
+      name: '',
       connected: false,
       healthy: false,
       comfyBaseUrl: null,
@@ -97,6 +117,8 @@ export function toPublic(row: PodSessionRow | null, healthyOverride?: boolean): 
   const expired = new Date(row.expires_at).getTime() < Date.now()
   const healthy = healthyOverride ?? (!!row.last_ok_at && !row.last_error && !expired)
   return {
+    id: row.id,
+    name: row.name,
     connected: true,
     healthy: healthy && !expired,
     comfyBaseUrl: row.comfy_base_url,
@@ -111,8 +133,37 @@ export function toPublic(row: PodSessionRow | null, healthyOverride?: boolean): 
   }
 }
 
+function sanitizeName(raw: string | undefined, fallback: string): string {
+  const n = (raw ?? '').trim().slice(0, 64)
+  return n || fallback
+}
+
+export async function listPodSessionRows(userId: string): Promise<PodSessionRow[]> {
+  return rows<PodSessionRow>(
+    `SELECT * FROM pod_sessions WHERE user_id = $1 ORDER BY created_at ASC`,
+    [userId],
+  )
+}
+
+export async function getPodSessionRowById(
+  userId: string,
+  sessionId: string,
+): Promise<PodSessionRow | null> {
+  return one<PodSessionRow>(
+    `SELECT * FROM pod_sessions WHERE id = $1 AND user_id = $2`,
+    [sessionId, userId],
+  )
+}
+
+/** Legacy helper: first session for user (oldest). */
 export async function getPodSessionRow(userId: string): Promise<PodSessionRow | null> {
-  return one<PodSessionRow>(`SELECT * FROM pod_sessions WHERE user_id = $1`, [userId])
+  const list = await listPodSessionRows(userId)
+  return list[0] ?? null
+}
+
+export async function listPodSessions(userId: string): Promise<PodSessionPublic[]> {
+  const list = await listPodSessionRows(userId)
+  return list.map(r => toPublic(r))
 }
 
 export async function getPodSessionPublic(userId: string): Promise<PodSessionPublic> {
@@ -120,9 +171,96 @@ export async function getPodSessionPublic(userId: string): Promise<PodSessionPub
   return toPublic(row)
 }
 
+export async function getWorkflowDefaults(userId: string): Promise<PodWorkflowDefaultsPublic> {
+  const row = await one<{
+    default_talk_session_id: string | null
+    default_animate_session_id: string | null
+    default_i2v_session_id: string | null
+  }>(
+    `SELECT default_talk_session_id, default_animate_session_id, default_i2v_session_id
+       FROM pod_workflow_defaults WHERE user_id = $1`,
+    [userId],
+  )
+  return {
+    talkSessionId: row?.default_talk_session_id ?? null,
+    animateSessionId: row?.default_animate_session_id ?? null,
+    i2vSessionId: row?.default_i2v_session_id ?? null,
+  }
+}
+
+export async function setWorkflowDefault(
+  userId: string,
+  workflow: PodWorkflowKey,
+  sessionId: string | null,
+): Promise<PodWorkflowDefaultsPublic> {
+  if (sessionId) {
+    const owned = await getPodSessionRowById(userId, sessionId)
+    if (!owned) throw new Error('Pod not found')
+  }
+  const col =
+    workflow === 'talk'
+      ? 'default_talk_session_id'
+      : workflow === 'animate'
+        ? 'default_animate_session_id'
+        : 'default_i2v_session_id'
+
+  await query(
+    `INSERT INTO pod_workflow_defaults (user_id, ${col}, updated_at)
+     VALUES ($1, $2, now())
+     ON CONFLICT (user_id) DO UPDATE SET
+       ${col} = EXCLUDED.${col},
+       updated_at = now()`,
+    [userId, sessionId],
+  )
+  return getWorkflowDefaults(userId)
+}
+
+/** Resolve which pod to use for a workflow submit. */
+export async function resolvePodSessionId(
+  userId: string,
+  workflow: PodWorkflowKey,
+  preferredId?: string | null,
+): Promise<string> {
+  if (preferredId?.trim()) {
+    const row = await getPodSessionRowById(userId, preferredId.trim())
+    if (!row) throw new Error('Selected pod not found — reconnect in My Pod → Connection')
+    return row.id
+  }
+  const defaults = await getWorkflowDefaults(userId)
+  const fromDefault =
+    workflow === 'talk'
+      ? defaults.talkSessionId
+      : workflow === 'animate'
+        ? defaults.animateSessionId
+        : defaults.i2vSessionId
+  if (fromDefault) {
+    const row = await getPodSessionRowById(userId, fromDefault)
+    if (row) return row.id
+  }
+  const list = await listPodSessionRows(userId)
+  if (list.length === 1) return list[0].id
+  if (list.length === 0) throw new Error('Pod offline — connect SSH + ComfyUI URL in My Pod → Connection')
+  throw new Error('Select which pod to use — you have multiple pods connected')
+}
+
 /** Returns decrypted secrets if session exists and is not expired. */
-export async function getPodSessionSecrets(userId: string): Promise<PodSessionSecrets | null> {
-  const row = await getPodSessionRow(userId)
+export async function getPodSessionSecrets(
+  userId: string,
+  sessionId?: string | null,
+): Promise<PodSessionSecrets | null> {
+  let row: PodSessionRow | null = null
+  if (sessionId) {
+    row = await getPodSessionRowById(userId, sessionId)
+  } else {
+    // Legacy jobs: prefer sole session, else most recently updated.
+    const list = await listPodSessionRows(userId)
+    if (list.length === 1) row = list[0]
+    else if (list.length > 1) {
+      row = [...list].sort(
+        (a, b) => new Date(b.expires_at).getTime() - new Date(a.expires_at).getTime(),
+      )[0] ?? null
+    }
+  }
   if (!row) return null
   if (new Date(row.expires_at).getTime() < Date.now()) return null
   try {
@@ -142,12 +280,9 @@ export async function validatePodConnection(input: {
   comfyApiToken?: string | null
   remoteWorkRoot: string
 }): Promise<{ ok: true } | { ok: false; error: string }> {
-  // Comfy HTTP is required for all job I/O (RunPod SSH has no SFTP).
   const comfy = await probeComfyHealth(input.comfyBaseUrl, input.comfyApiToken)
   if (!comfy.ok) return { ok: false, error: comfy.error }
 
-  // SSH is best-effort (shell probe / mkdir). RunPod gateway often rejects PTY;
-  // do not block Connect if Comfy is healthy.
   const ssh = await probeSsh({
     host: input.sshHost,
     port: input.sshPort,
@@ -212,10 +347,16 @@ export async function savePodSession(
   if (!probe.ok) throw new Error(probe.error)
 
   const expiresAt = new Date(Date.now() + SESSION_TTL_HOURS * 3600_000)
-  // Placeholder only — runtime always uses resolvePlatformSshPrivateKey()
   const sshAuthEnc = encryptSecret('platform', MY_POD_SECRET_PURPOSE)
 
-  const existing = await getPodSessionRow(userId)
+  let existing: PodSessionRow | null = null
+  if (input.id?.trim()) {
+    existing = await getPodSessionRowById(userId, input.id.trim())
+    if (!existing) throw new Error('Pod not found')
+  }
+
+  const name = sanitizeName(input.name, existing?.name || 'Default')
+
   const fishIncoming = input.fishApiKey?.trim() ?? ''
   let fishEnc: string | null
   if (fishIncoming) {
@@ -226,42 +367,68 @@ export async function savePodSession(
     fishEnc = null
   }
 
-  await query(
+  if (existing) {
+    await query(
+      `UPDATE pod_sessions SET
+         name = $2,
+         comfy_base_url = $3,
+         ssh_host = $4,
+         ssh_port = $5,
+         ssh_user = $6,
+         ssh_auth_type = 'private_key',
+         ssh_auth_enc = $7,
+         comfy_api_token_enc = NULL,
+         fish_api_key_enc = $8,
+         remote_work_root = $9,
+         last_ok_at = now(),
+         last_error = NULL,
+         expires_at = $10,
+         updated_at = now()
+       WHERE id = $1 AND user_id = $11`,
+      [
+        existing.id, name, comfyBaseUrl, sshHost, sshPort, sshUser, sshAuthEnc,
+        fishEnc, remoteWorkRoot, expiresAt.toISOString(), userId,
+      ],
+    )
+    return toPublic(await getPodSessionRowById(userId, existing.id), true)
+  }
+
+  // Unique name: if taken, append short suffix
+  let finalName = name
+  const clash = await one<{ id: string }>(
+    `SELECT id FROM pod_sessions WHERE user_id = $1 AND name = $2`,
+    [userId, finalName],
+  )
+  if (clash) {
+    finalName = sanitizeName(`${name} ${Date.now().toString(36).slice(-4)}`, 'Pod')
+  }
+
+  const inserted = await one<{ id: string }>(
     `INSERT INTO pod_sessions (
-       user_id, comfy_base_url, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_auth_enc,
+       user_id, name, comfy_base_url, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_auth_enc,
        comfy_api_token_enc, fish_api_key_enc, remote_work_root, last_ok_at, last_error, expires_at, updated_at
-     ) VALUES ($1,$2,$3,$4,$5,'private_key',$6,NULL,$7,$8, now(), NULL, $9, now())
-     ON CONFLICT (user_id) DO UPDATE SET
-       comfy_base_url = EXCLUDED.comfy_base_url,
-       ssh_host = EXCLUDED.ssh_host,
-       ssh_port = EXCLUDED.ssh_port,
-       ssh_user = EXCLUDED.ssh_user,
-       ssh_auth_type = EXCLUDED.ssh_auth_type,
-       ssh_auth_enc = EXCLUDED.ssh_auth_enc,
-       comfy_api_token_enc = NULL,
-       fish_api_key_enc = EXCLUDED.fish_api_key_enc,
-       remote_work_root = EXCLUDED.remote_work_root,
-       last_ok_at = now(),
-       last_error = NULL,
-       expires_at = EXCLUDED.expires_at,
-       updated_at = now()`,
+     ) VALUES ($1,$2,$3,$4,$5,$6,'private_key',$7,NULL,$8,$9, now(), NULL, $10, now())
+     RETURNING id`,
     [
-      userId, comfyBaseUrl, sshHost, sshPort, sshUser, sshAuthEnc,
+      userId, finalName, comfyBaseUrl, sshHost, sshPort, sshUser, sshAuthEnc,
       fishEnc, remoteWorkRoot, expiresAt.toISOString(),
     ],
   )
-
-  const row = await getPodSessionRow(userId)
-  return toPublic(row, true)
+  return toPublic(await getPodSessionRowById(userId, inserted!.id), true)
 }
 
-export async function testPodSession(userId: string): Promise<PodSessionPublic> {
-  const row = await getPodSessionRow(userId)
+export async function testPodSession(
+  userId: string,
+  sessionId?: string | null,
+): Promise<PodSessionPublic> {
+  const row = sessionId
+    ? await getPodSessionRowById(userId, sessionId)
+    : await getPodSessionRow(userId)
   if (!row) throw new Error('No pod session saved — connect first')
   if (new Date(row.expires_at).getTime() < Date.now()) {
     await query(
-      `UPDATE pod_sessions SET last_error = $2, updated_at = now() WHERE user_id = $1`,
-      [userId, 'Session expired — reconnect with SSH + ComfyUI URL'],
+      `UPDATE pod_sessions SET last_error = $2, updated_at = now() WHERE id = $1`,
+      [row.id, 'Session expired — reconnect with SSH + ComfyUI URL'],
     )
     throw new Error('Session expired — reconnect with SSH + ComfyUI URL')
   }
@@ -286,8 +453,8 @@ export async function testPodSession(userId: string): Promise<PodSessionPublic> 
 
   if (!probe.ok) {
     await query(
-      `UPDATE pod_sessions SET last_error = $2, updated_at = now() WHERE user_id = $1`,
-      [userId, probe.error],
+      `UPDATE pod_sessions SET last_error = $2, updated_at = now() WHERE id = $1`,
+      [row.id, probe.error],
     )
     throw new Error(probe.error)
   }
@@ -296,20 +463,25 @@ export async function testPodSession(userId: string): Promise<PodSessionPublic> 
   await query(
     `UPDATE pod_sessions
         SET last_ok_at = now(), last_error = NULL, expires_at = $2, updated_at = now()
-      WHERE user_id = $1`,
-    [userId, expiresAt.toISOString()],
+      WHERE id = $1`,
+    [row.id, expiresAt.toISOString()],
   )
-  return toPublic(await getPodSessionRow(userId), true)
+  return toPublic(await getPodSessionRowById(userId, row.id), true)
 }
 
 /** Lightweight health for cron: HTTP first, SSH only if HTTP fails. */
-export async function refreshPodSessionHealth(userId: string): Promise<void> {
-  const row = await getPodSessionRow(userId)
+export async function refreshPodSessionHealth(
+  userId: string,
+  sessionId?: string | null,
+): Promise<void> {
+  const row = sessionId
+    ? await getPodSessionRowById(userId, sessionId)
+    : await getPodSessionRow(userId)
   if (!row) return
   if (new Date(row.expires_at).getTime() < Date.now()) {
     await query(
-      `UPDATE pod_sessions SET last_error = $2, updated_at = now() WHERE user_id = $1`,
-      [userId, 'Session expired'],
+      `UPDATE pod_sessions SET last_error = $2, updated_at = now() WHERE id = $1`,
+      [row.id, 'Session expired'],
     )
     return
   }
@@ -319,8 +491,8 @@ export async function refreshPodSessionHealth(userId: string): Promise<void> {
     secrets = rowToSecrets(row)
   } catch {
     await query(
-      `UPDATE pod_sessions SET last_error = $2, updated_at = now() WHERE user_id = $1`,
-      [userId, 'Decrypt failed'],
+      `UPDATE pod_sessions SET last_error = $2, updated_at = now() WHERE id = $1`,
+      [row.id, 'Decrypt failed'],
     )
     return
   }
@@ -328,47 +500,49 @@ export async function refreshPodSessionHealth(userId: string): Promise<void> {
   const comfy = await probeComfyHealth(secrets.comfyBaseUrl, secrets.comfyApiToken, 45_000)
   if (comfy.ok) {
     await query(
-      `UPDATE pod_sessions SET last_ok_at = now(), last_error = NULL, updated_at = now() WHERE user_id = $1`,
-      [userId],
+      `UPDATE pod_sessions SET last_ok_at = now(), last_error = NULL, updated_at = now() WHERE id = $1`,
+      [row.id],
     )
     return
   }
 
   const ssh = await probeSsh(secrets.ssh)
   if (ssh.ok) {
-    // SSH up but Comfy down
     await query(
-      `UPDATE pod_sessions SET last_error = $2, updated_at = now() WHERE user_id = $1`,
-      [userId, `ComfyUI down (SSH ok): ${comfy.error}`],
+      `UPDATE pod_sessions SET last_error = $2, updated_at = now() WHERE id = $1`,
+      [row.id, `ComfyUI down (SSH ok): ${comfy.error}`],
     )
     return
   }
 
   await query(
-    `UPDATE pod_sessions SET last_error = $2, updated_at = now() WHERE user_id = $1`,
-    [userId, `Pod offline — ${comfy.error}; SSH: ${ssh.error}`],
+    `UPDATE pod_sessions SET last_error = $2, updated_at = now() WHERE id = $1`,
+    [row.id, `Pod offline — ${comfy.error}; SSH: ${ssh.error}`],
   )
 }
 
-export async function deletePodSession(userId: string): Promise<void> {
+export async function deletePodSession(userId: string, sessionId?: string | null): Promise<void> {
+  if (sessionId?.trim()) {
+    await query(`DELETE FROM pod_sessions WHERE id = $1 AND user_id = $2`, [sessionId.trim(), userId])
+    return
+  }
+  // Legacy: delete all pods for user
   await query(`DELETE FROM pod_sessions WHERE user_id = $1`, [userId])
 }
 
 /** Require a healthy non-expired session for job submit. */
-export async function requireHealthyPodSession(userId: string): Promise<PodSessionSecrets> {
-  const secrets = await getPodSessionSecrets(userId)
+export async function requireHealthyPodSession(
+  userId: string,
+  sessionId?: string | null,
+): Promise<PodSessionSecrets> {
+  const secrets = await getPodSessionSecrets(userId, sessionId)
   if (!secrets) throw new Error('Pod offline — connect SSH + ComfyUI URL in My Pod → Connection')
-
-  const row = await getPodSessionRow(userId)
-  if (row?.last_error) {
-    // Allow submit but prefer a fresh probe for generate
-  }
 
   const comfy = await probeComfyHealth(secrets.comfyBaseUrl, secrets.comfyApiToken, 45_000)
   if (!comfy.ok) {
     await query(
-      `UPDATE pod_sessions SET last_error = $2, updated_at = now() WHERE user_id = $1`,
-      [userId, comfy.error],
+      `UPDATE pod_sessions SET last_error = $2, updated_at = now() WHERE id = $1`,
+      [secrets.id, comfy.error],
     )
     throw new Error(`Pod offline — ${comfy.error}. Test connection in My Pod.`)
   }

@@ -105,6 +105,7 @@ interface JobRow {
   max_attempts: number
   done_items: number
   total_items: number
+  pod_session_id: string | null
 }
 
 export async function POST(req: NextRequest, { params }: RouteParams) {
@@ -120,7 +121,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   const { id } = await params
 
   const job = await one<JobRow>(
-    `SELECT id, user_id, status, job_type, input, output, attempts, max_attempts, done_items, total_items
+    `SELECT id, user_id, status, job_type, input, output, attempts, max_attempts, done_items, total_items,
+            pod_session_id
        FROM generation_queue WHERE id = $1`,
     [id],
   )
@@ -576,7 +578,11 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const { podUrl, templateId, outputDriveFolderId, items } = job.input as unknown as ComfyUIPodBulkJobInput
       if (!items?.length) throw new Error('No items in job input')
 
-      const session = await getPodSessionSecrets(job.user_id)
+      const session = await getPodSessionSecrets(
+        job.user_id,
+        job.pod_session_id
+          ?? (typeof job.input?.podSessionId === 'string' ? job.input.podSessionId : null),
+      )
       const comfyUrl = (session?.comfyBaseUrl || podUrl).replace(/\/+$/, '')
       const apiToken = session?.comfyApiToken ?? null
 
@@ -701,7 +707,11 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     // ── my_pod_i2v ─────────────────────────────────────────────────────────────
     if (job.job_type === 'my_pod_i2v') {
       const input = job.input as unknown as MyPodI2vJobInput
-      const session = await getPodSessionSecrets(job.user_id)
+      const session = await getPodSessionSecrets(
+        job.user_id,
+        job.pod_session_id
+          ?? (typeof job.input?.podSessionId === 'string' ? job.input.podSessionId : null),
+      )
       if (!session) throw new Error('Pod session expired — reconnect in My Pod')
 
       const health = await probeComfyHealth(session.comfyBaseUrl, session.comfyApiToken)
@@ -777,7 +787,11 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     // ── my_pod_animate ─────────────────────────────────────────────────────────
     if (job.job_type === 'my_pod_animate') {
       const input = job.input as unknown as MyPodAnimateJobInput
-      const session = await getPodSessionSecrets(job.user_id)
+      const session = await getPodSessionSecrets(
+        job.user_id,
+        job.pod_session_id
+          ?? (typeof job.input?.podSessionId === 'string' ? job.input.podSessionId : null),
+      )
       if (!session) throw new Error('Pod session expired — reconnect in My Pod')
 
       const health = await probeComfyHealth(session.comfyBaseUrl, session.comfyApiToken)
@@ -855,7 +869,11 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     // ── my_pod_talk (InfiniteTalk + Fish TTS) ──────────────────────────────────
     if (job.job_type === 'my_pod_talk') {
       const input = job.input as unknown as MyPodTalkJobInput
-      const session = await getPodSessionSecrets(job.user_id)
+      const session = await getPodSessionSecrets(
+        job.user_id,
+        job.pod_session_id
+          ?? (typeof job.input?.podSessionId === 'string' ? job.input.podSessionId : null),
+      )
       if (!session) throw new Error('Pod session expired — reconnect in My Pod')
 
       const health = await probeComfyHealth(session.comfyBaseUrl, session.comfyApiToken)

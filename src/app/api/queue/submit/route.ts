@@ -98,6 +98,7 @@ export interface MyPodI2vJobInput {
   inputDriveFolderId: string
   outputDriveFolderId: string
   prompt?: string
+  podSessionId?: string
   items: { driveFileId: string; name: string; prompt?: string }[]
 }
 
@@ -106,6 +107,7 @@ export interface MyPodAnimateJobInput {
   outputDriveFolderId: string
   referenceImageId: string
   referenceImageName: string
+  podSessionId?: string
   items: { driveFileId: string; name: string }[]
 }
 
@@ -114,6 +116,7 @@ export interface MyPodTalkJobInput {
   outputDriveFolderId: string
   fishVoiceId: string
   style?: string
+  podSessionId?: string
   items: {
     driveFileId: string
     name: string
@@ -165,6 +168,7 @@ export type QueueSubmitBody =
       input: {
         podUrl?: string
         usePodSession?: boolean
+        podSessionId?: string
         templateId: string
         inputDriveFolderId?: string
         outputDriveFolderId: string
@@ -173,11 +177,11 @@ export type QueueSubmitBody =
     }
   | {
       job_type: 'my_pod_i2v'
-      input: { inputDriveFolderId: string; outputDriveFolderId: string; prompt?: string }
+      input: { inputDriveFolderId: string; outputDriveFolderId: string; prompt?: string; podSessionId?: string }
     }
   | {
       job_type: 'my_pod_animate'
-      input: { inputDriveFolderId: string; outputDriveFolderId: string }
+      input: { inputDriveFolderId: string; outputDriveFolderId: string; podSessionId?: string }
     }
   | {
       job_type: 'my_pod_talk'
@@ -186,6 +190,7 @@ export type QueueSubmitBody =
         outputDriveFolderId: string
         fishVoiceId: string
         style?: string
+        podSessionId?: string
         /** One caption/script per line; paired with images (cycled if counts differ). */
         texts: string[]
         /** Optional spoken overrides (1 per line); blank line = use Text. */
@@ -379,14 +384,19 @@ export async function POST(req: NextRequest) {
   }
 
   if (body.job_type === 'comfyui_pod_bulk') {
-    const { podUrl, usePodSession, templateId, inputDriveFolderId, outputDriveFolderId, prompts } = body.input ?? {}
+    const { podUrl, usePodSession, podSessionId, templateId, inputDriveFolderId, outputDriveFolderId, prompts } = body.input ?? {}
 
     let resolvedPodUrl = podUrl?.trim() ?? ''
-    if (usePodSession || !resolvedPodUrl) {
+    let pinnedPodSessionId: string | null = null
+    if (usePodSession || !resolvedPodUrl || podSessionId) {
       try {
-        const { requireHealthyPodSession } = await import('@/lib/my-pod/session')
-        const secrets = await requireHealthyPodSession(user.id)
+        const {
+          resolvePodSessionId, requireHealthyPodSession, setWorkflowDefault,
+        } = await import('@/lib/my-pod/session')
+        pinnedPodSessionId = await resolvePodSessionId(user.id, 'i2v', podSessionId)
+        const secrets = await requireHealthyPodSession(user.id, pinnedPodSessionId)
         resolvedPodUrl = secrets.comfyBaseUrl
+        await setWorkflowDefault(user.id, 'i2v', pinnedPodSessionId).catch(() => {})
       } catch (err) {
         return NextResponse.json(
           { error: err instanceof Error ? err.message : 'Pod session required' },
@@ -439,22 +449,27 @@ export async function POST(req: NextRequest) {
     }
 
     const row = await one<{ id: string }>(
-      `INSERT INTO generation_queue (user_id, job_type, input, total_items)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO generation_queue (user_id, job_type, input, total_items, pod_session_id)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING id`,
-      [user.id, body.job_type, JSON.stringify(input), items.length],
+      [user.id, body.job_type, JSON.stringify({ ...input, podSessionId: pinnedPodSessionId }), items.length, pinnedPodSessionId],
     )
     return NextResponse.json({ id: row!.id })
   }
 
   if (body.job_type === 'my_pod_i2v') {
-    const { inputDriveFolderId, outputDriveFolderId, prompt } = body.input ?? {}
+    const { inputDriveFolderId, outputDriveFolderId, prompt, podSessionId } = body.input ?? {}
     if (!inputDriveFolderId?.trim() || !outputDriveFolderId?.trim()) {
       return NextResponse.json({ error: 'inputDriveFolderId and outputDriveFolderId required' }, { status: 400 })
     }
+    let pinnedPodSessionId: string
     try {
-      const { requireHealthyPodSession } = await import('@/lib/my-pod/session')
-      await requireHealthyPodSession(user.id)
+      const {
+        resolvePodSessionId, requireHealthyPodSession, setWorkflowDefault,
+      } = await import('@/lib/my-pod/session')
+      pinnedPodSessionId = await resolvePodSessionId(user.id, 'i2v', podSessionId)
+      await requireHealthyPodSession(user.id, pinnedPodSessionId)
+      await setWorkflowDefault(user.id, 'i2v', pinnedPodSessionId).catch(() => {})
     } catch (err) {
       return NextResponse.json({ error: err instanceof Error ? err.message : 'Pod session required' }, { status: 400 })
     }
@@ -480,24 +495,30 @@ export async function POST(req: NextRequest) {
       outputDriveFolderId: outputDriveFolderId.trim(),
       prompt: prompt?.trim() || undefined,
       items,
+      podSessionId: pinnedPodSessionId,
     }
     const row = await one<{ id: string }>(
-      `INSERT INTO generation_queue (user_id, job_type, input, total_items)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO generation_queue (user_id, job_type, input, total_items, pod_session_id)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING id`,
-      [user.id, body.job_type, JSON.stringify(input), items.length],
+      [user.id, body.job_type, JSON.stringify(input), items.length, pinnedPodSessionId],
     )
     return NextResponse.json({ id: row!.id })
   }
 
   if (body.job_type === 'my_pod_animate') {
-    const { inputDriveFolderId, outputDriveFolderId } = body.input ?? {}
+    const { inputDriveFolderId, outputDriveFolderId, podSessionId } = body.input ?? {}
     if (!inputDriveFolderId?.trim() || !outputDriveFolderId?.trim()) {
       return NextResponse.json({ error: 'inputDriveFolderId and outputDriveFolderId required' }, { status: 400 })
     }
+    let pinnedPodSessionId: string
     try {
-      const { requireHealthyPodSession } = await import('@/lib/my-pod/session')
-      await requireHealthyPodSession(user.id)
+      const {
+        resolvePodSessionId, requireHealthyPodSession, setWorkflowDefault,
+      } = await import('@/lib/my-pod/session')
+      pinnedPodSessionId = await resolvePodSessionId(user.id, 'animate', podSessionId)
+      await requireHealthyPodSession(user.id, pinnedPodSessionId)
+      await setWorkflowDefault(user.id, 'animate', pinnedPodSessionId).catch(() => {})
     } catch (err) {
       return NextResponse.json({ error: err instanceof Error ? err.message : 'Pod session required' }, { status: 400 })
     }
@@ -524,19 +545,20 @@ export async function POST(req: NextRequest) {
       referenceImageId: ref.id,
       referenceImageName: ref.name,
       items,
+      podSessionId: pinnedPodSessionId,
     }
     const row = await one<{ id: string }>(
-      `INSERT INTO generation_queue (user_id, job_type, input, total_items)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO generation_queue (user_id, job_type, input, total_items, pod_session_id)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING id`,
-      [user.id, body.job_type, JSON.stringify(input), items.length],
+      [user.id, body.job_type, JSON.stringify(input), items.length, pinnedPodSessionId],
     )
     return NextResponse.json({ id: row!.id })
   }
 
   if (body.job_type === 'my_pod_talk') {
     const {
-      inputDriveFolderId, outputDriveFolderId, fishVoiceId, style, texts, spokenTexts,
+      inputDriveFolderId, outputDriveFolderId, fishVoiceId, style, texts, spokenTexts, podSessionId,
     } = body.input ?? {}
     if (!inputDriveFolderId?.trim() || !outputDriveFolderId?.trim()) {
       return NextResponse.json({ error: 'inputDriveFolderId and outputDriveFolderId required' }, { status: 400 })
@@ -550,15 +572,20 @@ export async function POST(req: NextRequest) {
     if (!cleanTexts.length) {
       return NextResponse.json({ error: 'At least one text line required' }, { status: 400 })
     }
+    let pinnedPodSessionId: string
     try {
-      const { requireHealthyPodSession } = await import('@/lib/my-pod/session')
-      const secrets = await requireHealthyPodSession(user.id)
+      const {
+        resolvePodSessionId, requireHealthyPodSession, setWorkflowDefault,
+      } = await import('@/lib/my-pod/session')
+      pinnedPodSessionId = await resolvePodSessionId(user.id, 'talk', podSessionId)
+      const secrets = await requireHealthyPodSession(user.id, pinnedPodSessionId)
       if (!secrets.fishApiKey?.trim()) {
         return NextResponse.json(
-          { error: 'Fish API key required — paste it in My Pod → Connection' },
+          { error: 'Fish API key required — paste it on this pod in My Pod → Connection' },
           { status: 400 },
         )
       }
+      await setWorkflowDefault(user.id, 'talk', pinnedPodSessionId).catch(() => {})
     } catch (err) {
       return NextResponse.json({ error: err instanceof Error ? err.message : 'Pod session required' }, { status: 400 })
     }
@@ -597,12 +624,13 @@ export async function POST(req: NextRequest) {
       fishVoiceId: fishVoiceId.trim(),
       style: style?.trim() || undefined,
       items,
+      podSessionId: pinnedPodSessionId,
     }
     const row = await one<{ id: string }>(
-      `INSERT INTO generation_queue (user_id, job_type, input, total_items)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO generation_queue (user_id, job_type, input, total_items, pod_session_id)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING id`,
-      [user.id, body.job_type, JSON.stringify(input), items.length],
+      [user.id, body.job_type, JSON.stringify(input), items.length, pinnedPodSessionId],
     )
     return NextResponse.json({ id: row!.id })
   }

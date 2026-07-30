@@ -12,10 +12,19 @@ import { toast } from 'sonner'
 import { Loader2, ListTodo, AlertCircle, CheckCircle2, XCircle } from 'lucide-react'
 
 interface PodSession {
+  id: string
+  name: string
   connected: boolean
   healthy: boolean
   comfyBaseUrl: string | null
   lastError: string | null
+  hasFishApiKey?: boolean
+}
+
+interface Defaults {
+  talkSessionId: string | null
+  animateSessionId: string | null
+  i2vSessionId: string | null
 }
 
 type Workflow = 'infinitetalk' | 'animate'
@@ -23,7 +32,9 @@ type Workflow = 'infinitetalk' | 'animate'
 export function GenerateTab() {
   const router = useRouter()
   const [workflow, setWorkflow] = useState<Workflow>('infinitetalk')
-  const [session, setSession] = useState<PodSession | null>(null)
+  const [sessions, setSessions] = useState<PodSession[]>([])
+  const [defaults, setDefaults] = useState<Defaults | null>(null)
+  const [podSessionId, setPodSessionId] = useState('')
   const [inputFolderId, setInputFolderId] = useState('')
   const [outputFolderId, setOutputFolderId] = useState('')
   const [prompts, setPrompts] = useState('')
@@ -36,18 +47,35 @@ export function GenerateTab() {
     const sRes = await fetch('/api/my-pod/session').catch(() => null)
     if (sRes?.ok) {
       const d = await sRes.json()
-      setSession(d.session)
+      setSessions(Array.isArray(d.sessions) ? d.sessions : [])
+      setDefaults(d.defaults ?? null)
     }
   }, [])
 
   useEffect(() => { fetchMeta() }, [fetchMeta])
 
+  // Prefer workflow default when workflow or sessions change
+  useEffect(() => {
+    const preferred = workflow === 'infinitetalk'
+      ? defaults?.talkSessionId
+      : defaults?.animateSessionId
+    if (preferred && sessions.some(s => s.id === preferred)) {
+      setPodSessionId(preferred)
+      return
+    }
+    const healthy = sessions.find(s => s.healthy)
+    if (healthy) setPodSessionId(healthy.id)
+    else if (sessions[0]) setPodSessionId(sessions[0].id)
+    else setPodSessionId('')
+  }, [workflow, sessions, defaults])
+
+  const selected = sessions.find(s => s.id === podSessionId) ?? null
   const textLines = prompts.split('\n').map(l => l.trim()).filter(Boolean)
   const spokenLines = spokenTexts.split('\n').map(l => l.trim())
 
   async function submit() {
-    if (!session?.connected || !session.healthy) {
-      toast.error('Pod offline — connect & Test in Connection tab')
+    if (!selected?.connected || !selected.healthy) {
+      toast.error('Select a healthy pod — connect & Test in Connection')
       return
     }
     if (!outputFolderId.trim()) {
@@ -75,6 +103,7 @@ export function GenerateTab() {
             style: style.trim() || undefined,
             texts: textLines,
             spokenTexts: spokenLines.some(Boolean) ? spokenLines : undefined,
+            podSessionId,
           },
         }
       } else {
@@ -83,6 +112,7 @@ export function GenerateTab() {
           input: {
             inputDriveFolderId: inputFolderId.trim(),
             outputDriveFolderId: outputFolderId.trim(),
+            podSessionId,
           },
         }
       }
@@ -98,14 +128,15 @@ export function GenerateTab() {
       const label = workflow === 'infinitetalk'
         ? `${textLines.length} InfiniteTalk clip(s)`
         : 'WAN Animate batch'
-      toast.success(`${label} queued`, {
-        description: 'Runs on your pod — results land in Drive',
+      toast.success(`${label} queued on ${selected.name}`, {
+        description: 'Results land in Drive',
         action: { label: 'Open Queue', onClick: () => router.push('/my-pod?tab=queue') },
       })
       if (workflow === 'infinitetalk') {
         setPrompts('')
         setSpokenTexts('')
       }
+      fetchMeta()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed')
     } finally {
@@ -115,20 +146,20 @@ export function GenerateTab() {
 
   return (
     <div className="max-w-xl mx-auto space-y-4">
-      {!session?.connected ? (
+      {sessions.length === 0 ? (
         <div className="flex items-center gap-2 p-3 rounded-xl border border-amber-500/30 bg-amber-500/10 text-sm text-amber-400">
           <AlertCircle className="w-4 h-4 shrink-0" />
           Connect a pod in the Connection tab first.
         </div>
-      ) : session.healthy ? (
+      ) : selected?.healthy ? (
         <div className="flex items-center gap-2 p-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-sm text-emerald-400">
           <CheckCircle2 className="w-4 h-4 shrink-0" />
-          Pod online · {session.comfyBaseUrl}
+          {selected.name} online · {selected.comfyBaseUrl}
         </div>
       ) : (
         <div className="flex items-center gap-2 p-3 rounded-xl border border-destructive/30 bg-destructive/10 text-sm text-destructive">
           <XCircle className="w-4 h-4 shrink-0" />
-          Pod unhealthy — {session.lastError ?? 'Test connection'}
+          {selected ? `${selected.name} unhealthy — ${selected.lastError ?? 'Test connection'}` : 'Select a pod'}
         </div>
       )}
 
@@ -136,7 +167,7 @@ export function GenerateTab() {
         <CardHeader className="pb-3">
           <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">Workflow</CardTitle>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-3">
           <Select
             value={workflow}
             onValueChange={v => {
@@ -149,10 +180,26 @@ export function GenerateTab() {
               <SelectItem value="animate">WAN Animate — image + driving video</SelectItem>
             </SelectContent>
           </Select>
-          <p className="text-xs text-muted-foreground mt-2">
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">Pod</Label>
+            <Select
+              value={podSessionId || undefined}
+              onValueChange={v => { if (v) setPodSessionId(v) }}
+            >
+              <SelectTrigger className="h-10 text-xs"><SelectValue placeholder="Select pod" /></SelectTrigger>
+              <SelectContent>
+                {sessions.map(s => (
+                  <SelectItem key={s.id} value={s.id}>
+                    {s.name}{s.healthy ? '' : ' (unhealthy)'}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <p className="text-xs text-muted-foreground">
             {workflow === 'infinitetalk'
-              ? 'Drive image → Fish TTS → InfiniteTalk → Drive video.'
-              : 'One reference image + driving videos in the input folder → WAN Animate → Drive video.'}
+              ? 'Drive image → Fish TTS → InfiniteTalk → Drive video. Talk + Animate can run in parallel on different pods.'
+              : 'One reference image + driving videos → WAN Animate → Drive video.'}
           </p>
         </CardContent>
       </Card>
@@ -274,7 +321,7 @@ export function GenerateTab() {
         </Card>
       )}
 
-      <Button className="w-full h-10" onClick={submit} disabled={submitting || !session?.healthy}>
+      <Button className="w-full h-10" onClick={submit} disabled={submitting || !selected?.healthy}>
         {submitting
           ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Queuing…</>
           : (

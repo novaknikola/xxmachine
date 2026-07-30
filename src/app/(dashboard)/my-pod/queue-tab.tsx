@@ -42,6 +42,8 @@ interface Job {
   input: JobInput | null
   created_at: string
   started_at?: string | null
+  pod_session_id?: string | null
+  pod_name?: string | null
 }
 
 type RowFilter = 'all' | 'done' | 'failed'
@@ -137,7 +139,9 @@ function JobCard({
               )}
             </div>
             <p className="text-xs text-muted-foreground">
-              {new Date(job.created_at).toLocaleString()} · {job.total_items} item{job.total_items !== 1 ? 's' : ''}
+              {new Date(job.created_at).toLocaleString()}
+              {' · '}{job.total_items} item{job.total_items !== 1 ? 's' : ''}
+              {job.pod_name ? ` · ${job.pod_name}` : ''}
             </p>
           </div>
           {job.status === 'pending' && (

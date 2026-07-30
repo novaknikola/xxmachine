@@ -160,24 +160,25 @@ export async function GET(req: NextRequest) {
     console.error('[cron/tick] queue processing error:', err)
   }
 
-  // ── My Pod jobs (bulk + i2v + animate + talk) — 1 concurrent per user ──
+  // ── My Pod jobs — 1 concurrent per pod (fallback: per user if no pod pin) ──
   let comfyStarted = 0
   try {
     const myPodTypes = `('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk')`
-    const pendingComfy = await rows<{ id: string; user_id: string }>(
-      `SELECT id, user_id FROM generation_queue
+    const pendingComfy = await rows<{ id: string; user_id: string; pod_session_id: string | null }>(
+      `SELECT id, user_id, pod_session_id FROM generation_queue
         WHERE status = 'pending' AND job_type IN ${myPodTypes}
         ORDER BY created_at`,
     )
-    const busyUsers = new Set(
-      (await rows<{ user_id: string }>(
-        `SELECT DISTINCT user_id FROM generation_queue
+    const busyKeys = new Set(
+      (await rows<{ user_id: string; pod_session_id: string | null }>(
+        `SELECT user_id, pod_session_id FROM generation_queue
           WHERE status = 'processing' AND job_type IN ${myPodTypes}`,
-      )).map(r => r.user_id),
+      )).map(r => r.pod_session_id ?? `user:${r.user_id}`),
     )
 
     for (const job of pendingComfy) {
-      if (busyUsers.has(job.user_id)) continue
+      const key = job.pod_session_id ?? `user:${job.user_id}`
+      if (busyKeys.has(key)) continue
       const claimed = await one<{ id: string }>(
         `UPDATE generation_queue
             SET status = 'processing', started_at = now(), attempts = attempts + 1
@@ -186,7 +187,7 @@ export async function GET(req: NextRequest) {
         [job.id],
       )
       if (claimed) {
-        busyUsers.add(job.user_id)
+        busyKeys.add(key)
         comfyStarted++
         fetch(`${base}/api/queue/process/${job.id}`, {
           method: 'POST',
@@ -198,16 +199,16 @@ export async function GET(req: NextRequest) {
     console.error('[cron/tick] my-pod queue processing error:', err)
   }
 
-  // ── My Pod session health (HTTP every tick; ~5 min cadence if cron is 5 min) ──
+  // ── My Pod session health — all non-expired sessions ──
   let podHealthChecked = 0
   try {
-    const sessions = await rows<{ user_id: string }>(
-      `SELECT user_id FROM pod_sessions WHERE expires_at > now()`,
+    const sessions = await rows<{ id: string; user_id: string }>(
+      `SELECT id, user_id FROM pod_sessions WHERE expires_at > now()`,
     )
     const { refreshPodSessionHealth } = await import('@/lib/my-pod/session')
     for (const s of sessions) {
-      await refreshPodSessionHealth(s.user_id).catch(err =>
-        console.error('[cron/tick] pod health', s.user_id, err),
+      await refreshPodSessionHealth(s.user_id, s.id).catch(err =>
+        console.error('[cron/tick] pod health', s.id, err),
       )
       podHealthChecked++
     }

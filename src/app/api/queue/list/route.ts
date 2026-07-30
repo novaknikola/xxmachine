@@ -7,11 +7,14 @@ export async function GET(req: NextRequest) {
   if (user instanceof NextResponse) return user
 
   const jobs = await rows(
-    `SELECT id, job_type, status, total_items, done_items, progress,
-            error, output, input, attempts, created_at, started_at, finished_at
-       FROM generation_queue
-      WHERE user_id = $1
-      ORDER BY created_at DESC
+    `SELECT g.id, g.job_type, g.status, g.total_items, g.done_items, g.progress,
+            g.error, g.output, g.input, g.attempts, g.created_at, g.started_at, g.finished_at,
+            g.pod_session_id,
+            ps.name AS pod_name
+       FROM generation_queue g
+       LEFT JOIN pod_sessions ps ON ps.id = g.pod_session_id
+      WHERE g.user_id = $1
+      ORDER BY g.created_at DESC
       LIMIT 50`,
     [user.id],
   )
