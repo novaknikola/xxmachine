@@ -221,11 +221,15 @@ obj_info = {}
 # 127.0.0.1, Cloudflare answers Python's default "Python-urllib/3.x" with 403.
 # That would be silent here -- the except below only warns -- so every node type
 # would drop out and the workflow would be assembled against an empty schema.
-UA = os.environ.get("HTTP_UA", "infinitetalk-poller/1.0")
+UA = os.environ.get("HTTP_UA", "xxmachine-my-pod/1.0")
+COMFY_API_TOKEN = os.environ.get("COMFY_API_TOKEN", "").strip()
 for t in types_needed:
     try:
-        req = urllib.request.Request(f"{COMFY_URL}/object_info/{t}", headers={"User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=10) as r:
+        headers = {"User-Agent": UA}
+        if COMFY_API_TOKEN:
+            headers["Authorization"] = f"Bearer {COMFY_API_TOKEN}"
+        req = urllib.request.Request(f"{COMFY_URL}/object_info/{t}", headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as r:
             data = json.loads(r.read())
             if t in data:
                 obj_info[t] = data[t]
@@ -240,6 +244,23 @@ if types_needed and not obj_info:
         f"ERROR: /object_info returned nothing for any of the {len(types_needed)} node types at "
         f"{COMFY_URL}. Check the URL is reachable and, if it is a proxy, that the request is not "
         f"being rejected (403) -- refusing to build a workflow against an empty schema.")
+
+# Node 194 = MultiTalkWav2VecEmbeds — silent skip used to KeyError at audio_1 rewire.
+_REQUIRED_TYPES = (
+    "MultiTalkWav2VecEmbeds",
+    "WanVideoImageToVideoMultiTalk",
+    "LoadAudio",
+    "LoadImage",
+    "VHS_VideoCombine",
+)
+_missing_types = [t for t in _REQUIRED_TYPES if t not in obj_info]
+if _missing_types:
+    raise SystemExit(
+        "Missing Comfy node types for InfiniteTalk: "
+        + ", ".join(_missing_types)
+        + ". Need kijai/ComfyUI-WanVideoWrapper on this pod "
+        "(xxmachine auto-installs it when SSH works)."
+    )
 
 
 def resolve_source(origin_id, origin_slot, depth=0):
@@ -318,7 +339,15 @@ for n in nodes:
     api[str(n["id"])] = {"class_type": ntype, "inputs": node_inputs}
 
 # ---- rewire the skipped vocal-isolation pass straight to LoadAudio ----
-api[str(MULTITALK_EMBEDS_NODE)]["inputs"]["audio_1"] = [str(LOAD_AUDIO_NODE), 0]
+_embeds_key = str(MULTITALK_EMBEDS_NODE)
+if _embeds_key not in api:
+    raise SystemExit(
+        f"ERROR: MultiTalkWav2VecEmbeds node {_embeds_key} missing from API graph "
+        f"(type not registered on pod). Install ComfyUI-WanVideoWrapper / use a Talk pod."
+    )
+if str(LOAD_AUDIO_NODE) not in api:
+    raise SystemExit(f"ERROR: LoadAudio node {LOAD_AUDIO_NODE} missing from API graph")
+api[_embeds_key]["inputs"]["audio_1"] = [str(LOAD_AUDIO_NODE), 0]
 
 # ---- per-job overrides (all key names verified against /object_info, see
 # module docstring) ----

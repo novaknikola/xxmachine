@@ -1,38 +1,56 @@
 /**
- * Ensure WAN Animate Comfy custom nodes exist on the user's pod.
- * Probes /object_info; if DWPreprocessor (etc.) is missing, installs via SSH
- * into ComfyUI/custom_nodes and waits for Comfy to come back.
+ * Probe Comfy /object_info for required node types; auto-install missing
+ * custom_nodes packs over SSH; restart Comfy; re-test.
  */
 import { comfyHeaders } from '@/lib/my-pod/comfy'
 import { sshExec, type SshAuth } from '@/lib/my-pod/ssh'
 
-/** Class types the Animate builder must see on the pod. */
+export interface NodePack {
+  provides: string[]
+  repo: string
+  dir: string
+}
+
 export const ANIMATE_REQUIRED_NODE_TYPES = [
   'DWPreprocessor',
   'WanAnimateToVideo',
   'SaveVideo',
 ] as const
 
-/** Optional face-crop helpers (newer Comfy built-ins; warn only if missing). */
-const ANIMATE_OPTIONAL_NODE_TYPES = [
-  'SDPoseFaceBBoxes',
-  'CropByBBoxes',
+export const TALK_REQUIRED_NODE_TYPES = [
+  'MultiTalkWav2VecEmbeds',
+  'WanVideoImageToVideoMultiTalk',
+  'WanVideoSampler',
+  'VHS_VideoCombine',
+  'LoadAudio',
+  'LoadImage',
 ] as const
 
-interface NodePack {
-  /** Node class_types this pack provides */
-  provides: string[]
-  /** git clone URL */
-  repo: string
-  /** directory name under custom_nodes */
-  dir: string
-}
+const ANIMATE_OPTIONAL = ['SDPoseFaceBBoxes', 'CropByBBoxes'] as const
 
-const INSTALLABLE_PACKS: NodePack[] = [
+const ANIMATE_PACKS: NodePack[] = [
   {
     provides: ['DWPreprocessor'],
     repo: 'https://github.com/Fannovel16/comfyui_controlnet_aux.git',
     dir: 'comfyui_controlnet_aux',
+  },
+]
+
+/** kijai wrapper provides InfiniteTalk / MultiTalkWav2VecEmbeds + WanVideo* nodes. */
+const TALK_PACKS: NodePack[] = [
+  {
+    provides: [
+      'MultiTalkWav2VecEmbeds',
+      'WanVideoImageToVideoMultiTalk',
+      'WanVideoSampler',
+    ],
+    repo: 'https://github.com/kijai/ComfyUI-WanVideoWrapper.git',
+    dir: 'ComfyUI-WanVideoWrapper',
+  },
+  {
+    provides: ['VHS_VideoCombine'],
+    repo: 'https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git',
+    dir: 'ComfyUI-VideoHelperSuite',
   },
 ]
 
@@ -60,18 +78,20 @@ async function probeNodeType(
   }
 }
 
-export async function probeAnimateNodeTypes(
+async function probeTypes(
   comfyBaseUrl: string,
-  apiToken?: string | null,
+  apiToken: string | null | undefined,
+  required: readonly string[],
+  optional: readonly string[] = [],
 ): Promise<{ present: string[]; missing: string[]; optionalMissing: string[] }> {
   const present: string[] = []
   const missing: string[] = []
-  for (const t of ANIMATE_REQUIRED_NODE_TYPES) {
+  for (const t of required) {
     if (await probeNodeType(comfyBaseUrl, t, apiToken)) present.push(t)
     else missing.push(t)
   }
   const optionalMissing: string[] = []
-  for (const t of ANIMATE_OPTIONAL_NODE_TYPES) {
+  for (const t of optional) {
     if (!(await probeNodeType(comfyBaseUrl, t, apiToken))) optionalMissing.push(t)
   }
   return { present, missing, optionalMissing }
@@ -84,19 +104,17 @@ async function waitForComfy(
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    const ok = await probeNodeType(comfyBaseUrl, 'SaveVideo', apiToken, 15_000)
-      .catch(() => false)
+    const ok = await probeNodeType(comfyBaseUrl, 'LoadImage', apiToken, 15_000).catch(() => false)
     if (ok) return true
     await new Promise(r => setTimeout(r, 5_000))
   }
   return false
 }
 
-function packsForMissing(missing: string[]): NodePack[] {
-  return INSTALLABLE_PACKS.filter(p => p.provides.some(n => missing.includes(n)))
+function packsForMissing(missing: string[], packs: NodePack[]): NodePack[] {
+  return packs.filter(p => p.provides.some(n => missing.includes(n)))
 }
 
-/** Find ComfyUI root that has custom_nodes on the pod. */
 async function findComfyRoot(ssh: SshAuth): Promise<string> {
   const { stdout, code } = await sshExec(
     ssh,
@@ -112,22 +130,21 @@ async function findComfyRoot(ssh: SshAuth): Promise<string> {
   const root = stdout.trim().split('\n').filter(Boolean).pop()
   if (code !== 0 || !root) {
     throw new Error(
-      'Could not find ComfyUI/custom_nodes on the pod via SSH. Install DWPreprocessor (comfyui_controlnet_aux) manually.',
+      'Could not find ComfyUI/custom_nodes on the pod via SSH. Install the required custom nodes manually.',
     )
   }
   return root
 }
 
-async function installPacks(ssh: SshAuth, packs: NodePack[]): Promise<string[]> {
+async function installPacks(ssh: SshAuth, packs: NodePack[]): Promise<void> {
   const root = await findComfyRoot(ssh)
-  const logs: string[] = []
   for (const pack of packs) {
     const dest = `${root}/custom_nodes/${pack.dir}`
     const script = [
       'set -e',
-      `ROOT=${JSON.stringify(root)}`,
       `DEST=${JSON.stringify(dest)}`,
       `REPO=${JSON.stringify(pack.repo)}`,
+      `ROOT=${JSON.stringify(root)}`,
       'if [ -d "$DEST/.git" ]; then',
       '  echo "updating $DEST"',
       '  git -C "$DEST" pull --ff-only || true',
@@ -146,7 +163,6 @@ async function installPacks(ssh: SshAuth, packs: NodePack[]): Promise<string[]> 
     ].join('\n')
     console.log(`[my-pod] installing ${pack.dir} into ${root}/custom_nodes`)
     const { stdout, stderr, code } = await sshExec(ssh, script, 600_000)
-    logs.push(`${pack.dir}: exit=${code}\n${stdout.slice(-800)}\n${stderr.slice(-400)}`)
     if (code !== 0 || !stdout.includes('INSTALLED_OK')) {
       throw new Error(
         `Failed to install ${pack.dir} on pod: ${(stderr || stdout).slice(-600)}`,
@@ -154,7 +170,6 @@ async function installPacks(ssh: SshAuth, packs: NodePack[]): Promise<string[]> 
     }
   }
 
-  // Restart Comfy so new nodes register (Manager reboot if present, else soft kill).
   const restart = [
     'set +e',
     'curl -sS -m 10 -X POST http://127.0.0.1:8188/manager/reboot >/tmp/xxm_reboot.out 2>&1 && echo REBOOT_API_OK',
@@ -164,12 +179,10 @@ async function installPacks(ssh: SshAuth, packs: NodePack[]): Promise<string[]> 
     'fi',
     'echo RESTART_TRIGGERED',
   ].join('\n')
-  const r = await sshExec(ssh, restart, 60_000)
-  logs.push(`restart: ${r.stdout.slice(-400)}`)
-  return logs
+  await sshExec(ssh, restart, 60_000)
 }
 
-export type EnsureAnimateResult = {
+export type EnsureNodesResult = {
   ok: true
   installed: string[]
   optionalMissing: string[]
@@ -179,41 +192,45 @@ export type EnsureAnimateResult = {
   missing: string[]
 }
 
-/**
- * Probe Animate node types; auto-install missing installable packs over SSH; re-test.
- */
-export async function ensureAnimateNodes(opts: {
+async function ensureNodePacks(opts: {
+  label: string
   comfyBaseUrl: string
   apiToken?: string | null
   ssh: SshAuth
+  required: readonly string[]
+  optional?: readonly string[]
+  packs: NodePack[]
   onProgress?: (msg: string) => void | Promise<void>
-}): Promise<EnsureAnimateResult> {
+}): Promise<EnsureNodesResult> {
   const log = async (msg: string) => {
-    console.log(`[my-pod/ensure-animate] ${msg}`)
+    console.log(`[my-pod/ensure-${opts.label}] ${msg}`)
     await opts.onProgress?.(msg)
   }
 
-  let probe = await probeAnimateNodeTypes(opts.comfyBaseUrl, opts.apiToken)
+  let probe = await probeTypes(
+    opts.comfyBaseUrl,
+    opts.apiToken,
+    opts.required,
+    opts.optional ?? [],
+  )
   if (probe.optionalMissing.length) {
-    await log(`optional nodes missing (face crop may degrade): ${probe.optionalMissing.join(', ')}`)
+    await log(`optional missing: ${probe.optionalMissing.join(', ')}`)
   }
   if (probe.missing.length === 0) {
-    await log(`all required Animate nodes present: ${probe.present.join(', ')}`)
+    await log(`all required present: ${probe.present.join(', ')}`)
     return { ok: true, installed: [], optionalMissing: probe.optionalMissing }
   }
 
-  await log(`missing required nodes: ${probe.missing.join(', ')}`)
-  const packs = packsForMissing(probe.missing)
-  const unsolved = probe.missing.filter(
-    m => !packs.some(p => p.provides.includes(m)),
-  )
+  await log(`missing required: ${probe.missing.join(', ')}`)
+  const packs = packsForMissing(probe.missing, opts.packs)
+  const unsolved = probe.missing.filter(m => !packs.some(p => p.provides.includes(m)))
   if (unsolved.length) {
     return {
       ok: false,
       missing: probe.missing,
       error:
         `Pod missing Comfy nodes that cannot be auto-installed: ${unsolved.join(', ')}. `
-        + `Install the WAN Animate / WanVideo custom nodes on the pod, then Test connection.`,
+        + `Install them on the pod (or pick a Talk-ready pod), then Test connection.`,
     }
   }
 
@@ -228,33 +245,66 @@ export async function ensureAnimateNodes(opts: {
     }
   }
 
-  await log('waiting for ComfyUI to reload after install…')
+  await log('waiting for ComfyUI to reload…')
   const up = await waitForComfy(opts.comfyBaseUrl, opts.apiToken, 300_000)
   if (!up) {
     return {
       ok: false,
       missing: probe.missing,
-      error: 'Installed custom nodes but ComfyUI did not come back within 5 minutes. Check the pod console.',
+      error: 'Installed custom nodes but ComfyUI did not come back within 5 minutes.',
     }
   }
 
-  // Give node registry a moment after /queue is up
   await new Promise(r => setTimeout(r, 8_000))
-  probe = await probeAnimateNodeTypes(opts.comfyBaseUrl, opts.apiToken)
+  probe = await probeTypes(
+    opts.comfyBaseUrl,
+    opts.apiToken,
+    opts.required,
+    opts.optional ?? [],
+  )
   if (probe.missing.length) {
     return {
       ok: false,
       missing: probe.missing,
       error:
         `Installed packs but still missing: ${probe.missing.join(', ')}. `
-        + `Open ComfyUI on the pod and confirm custom_nodes loaded without errors.`,
+        + `Check Comfy custom_nodes load errors / models on the pod.`,
     }
   }
 
-  await log(`install + re-test OK (${packs.map(p => p.dir).join(', ')})`)
+  await log(`OK installed ${packs.map(p => p.dir).join(', ')}`)
   return {
     ok: true,
     installed: packs.map(p => p.dir),
     optionalMissing: probe.optionalMissing,
   }
+}
+
+export async function ensureAnimateNodes(opts: {
+  comfyBaseUrl: string
+  apiToken?: string | null
+  ssh: SshAuth
+  onProgress?: (msg: string) => void | Promise<void>
+}): Promise<EnsureNodesResult> {
+  return ensureNodePacks({
+    label: 'animate',
+    required: ANIMATE_REQUIRED_NODE_TYPES,
+    optional: ANIMATE_OPTIONAL,
+    packs: ANIMATE_PACKS,
+    ...opts,
+  })
+}
+
+export async function ensureTalkNodes(opts: {
+  comfyBaseUrl: string
+  apiToken?: string | null
+  ssh: SshAuth
+  onProgress?: (msg: string) => void | Promise<void>
+}): Promise<EnsureNodesResult> {
+  return ensureNodePacks({
+    label: 'talk',
+    required: TALK_REQUIRED_NODE_TYPES,
+    packs: TALK_PACKS,
+    ...opts,
+  })
 }

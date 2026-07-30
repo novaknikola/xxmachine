@@ -821,7 +821,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       leaseStage = 'ensuring_nodes'
       await touchLease()
       {
-        const { ensureAnimateNodes } = await import('@/lib/my-pod/ensure-animate-nodes')
+        const { ensureAnimateNodes } = await import('@/lib/my-pod/ensure-comfy-nodes')
         const ensured = await ensureAnimateNodes({
           comfyBaseUrl: session.comfyBaseUrl,
           apiToken: session.comfyApiToken,
@@ -920,6 +920,23 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         )
       }
 
+      // Once per batch: MultiTalkWav2VecEmbeds etc. — auto-install WanVideoWrapper if missing.
+      leaseStage = 'ensuring_nodes'
+      await touchLease()
+      {
+        const { ensureTalkNodes } = await import('@/lib/my-pod/ensure-comfy-nodes')
+        const ensured = await ensureTalkNodes({
+          comfyBaseUrl: session.comfyBaseUrl,
+          apiToken: session.comfyApiToken,
+          ssh: session.ssh,
+          onProgress: async () => { await touchLease() },
+        })
+        if (!ensured.ok) throw new Error(ensured.error)
+        if (ensured.installed.length) {
+          console.log(`[my_pod_talk] auto-installed: ${ensured.installed.join(', ')}`)
+        }
+      }
+
       for (let i = doneCount; i < input.items.length; i++) {
         const item = input.items[i]
         try {
@@ -951,6 +968,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             audioBuffer: audioBuf,
             jobId: `${id}_${i}`,
             onHeartbeat: touchLease,
+            skipEnsureNodes: true,
           })
           const ext = result.filename.split('.').pop() ?? 'mp4'
           const uploaded = await uploadToDriveFolderResilient(

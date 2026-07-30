@@ -57,6 +57,8 @@ Pod must have ComfyUI listening (usually port 8188) with models + custom nodes f
 
 **Talk (InfiniteTalk):** Multitalk / WanVideo InfiniteTalk nodes matching `build_infinitetalk_api.py`, VHS save node `131`.
 
+If `MultiTalkWav2VecEmbeds` (node 194) is missing, My Pod **auto-installs** `kijai/ComfyUI-WanVideoWrapper` over SSH, restarts Comfy, and re-tests. Models (GGUF / VAE / InfiniteTalk weights) still must exist on the pod disk.
+
 **Simple templates:** whatever nodes your saved API JSON needs.
 
 **I2V:** WAN 2.2 I2V checkpoint, VHS, matching node IDs in the API template.

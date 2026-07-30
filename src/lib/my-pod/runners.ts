@@ -188,7 +188,7 @@ export async function runAnimateItem(opts: {
   }
 
   if (!opts.skipEnsureNodes) {
-    const { ensureAnimateNodes } = await import('@/lib/my-pod/ensure-animate-nodes')
+    const { ensureAnimateNodes } = await import('@/lib/my-pod/ensure-comfy-nodes')
     const ensured = await ensureAnimateNodes({
       comfyBaseUrl: opts.comfyBaseUrl,
       apiToken: opts.apiToken,
@@ -245,8 +245,8 @@ export async function runTalkItem(opts: {
   audioBuffer: Buffer
   jobId: string
   onHeartbeat?: () => void | Promise<void>
+  skipEnsureNodes?: boolean
 }): Promise<{ buffer: Buffer; filename: string }> {
-  void opts.ssh
   const workflowPath = talkWorkflowPath()
   if (!existsSync(workflowPath)) {
     throw new Error(`InfiniteTalk template missing at ${workflowPath}`)
@@ -254,6 +254,17 @@ export async function runTalkItem(opts: {
   const runScript = join(WORKERS_DIR, 'talk_run.py')
   if (!existsSync(runScript)) {
     throw new Error('Talk Python sidecar missing: workers/my_pod/talk_run.py')
+  }
+
+  if (!opts.skipEnsureNodes) {
+    const { ensureTalkNodes } = await import('@/lib/my-pod/ensure-comfy-nodes')
+    const ensured = await ensureTalkNodes({
+      comfyBaseUrl: opts.comfyBaseUrl,
+      apiToken: opts.apiToken,
+      ssh: opts.ssh,
+      onProgress: opts.onHeartbeat,
+    })
+    if (!ensured.ok) throw new Error(ensured.error)
   }
 
   const imgRemote = `xxm_talk_${randomUUID().slice(0, 8)}_${opts.imageName.replace(/[^\w.-]/g, '_')}`
@@ -265,6 +276,7 @@ export async function runTalkItem(opts: {
   const { stdout } = await runPython(runScript, {
     COMFY_URL: opts.comfyBaseUrl,
     COMFY_API_TOKEN: opts.apiToken ?? '',
+    HTTP_UA: 'xxmachine-my-pod/1.0',
     WORKFLOW_PATH: workflowPath,
     INPUT_IMAGE: imgRemote,
     INPUT_AUDIO: audioRemote,
