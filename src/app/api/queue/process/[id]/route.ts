@@ -21,8 +21,14 @@ import { randomUUID } from 'crypto'
 import type {
   BulkImageJobItem, VideoRepurposeJobInput, VideoCaptionJobInput, VideoCaptionItem,
   VideoTranscribeJobInput, VideoOcrJobInput, CaptionShuffleJobInput, CaptionGenerateJobInput, ComfyUIPodBulkJobInput,
-  BulkCarouselJobInput,
+  BulkCarouselJobInput, MyPodI2vJobInput, MyPodAnimateJobInput,
 } from '../../submit/route'
+import { getPodSessionSecrets } from '@/lib/my-pod/session'
+import { ensureRemoteWorkDir, cleanupRemoteJobDir } from '@/lib/my-pod/ssh'
+import {
+  uploadImageToComfy, submitComfyPrompt, pollComfyResult, downloadFromComfy, probeComfyHealth,
+} from '@/lib/my-pod/comfy'
+import { runI2vItem, runAnimateItem } from '@/lib/my-pod/runners'
 import {
   processMultiShotJob,
   type MonitorMultiShotJobInput,
@@ -31,7 +37,16 @@ import {
 
 interface ComfyUIRow {
   prompt: string
-  status: 'done' | 'error'
+  status: 'done' | 'error' | 'running'
+  stage?: string
+  driveLink?: string
+  error?: string
+}
+
+interface MyPodRow {
+  label: string
+  status: 'done' | 'error' | 'running'
+  stage?: string
   driveLink?: string
   error?: string
 }
@@ -41,72 +56,6 @@ interface CarouselRow {
   images: string[]
   status: 'done' | 'error'
   error?: string
-}
-
-interface PodOutputFile {
-  filename: string
-  subfolder?: string
-  type?: string
-}
-
-async function uploadImageToPod(podUrl: string, buffer: Buffer, filename: string): Promise<string> {
-  const fd = new FormData()
-  fd.append('image', new Blob([new Uint8Array(buffer)]), filename)
-  const res = await fetch(`${podUrl}/upload/image`, { method: 'POST', body: fd })
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.error ?? `Pod image upload failed: ${res.status}`)
-  return data.subfolder ? `${data.subfolder}/${data.name}` : data.name
-}
-
-async function submitToPod(podUrl: string, workflow: Record<string, unknown>): Promise<string> {
-  const res = await fetch(`${podUrl}/prompt`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: workflow }),
-  })
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.error?.message ?? data.error ?? `Pod rejected prompt: ${res.status}`)
-  const promptId = data.prompt_id
-  if (!promptId) throw new Error('No prompt_id returned from pod')
-  return promptId
-}
-
-async function pollPodResult(podUrl: string, promptId: string): Promise<PodOutputFile[]> {
-  const maxAttempts = 120
-  const interval = 3000
-
-  for (let i = 0; i < maxAttempts; i++) {
-    await new Promise(r => setTimeout(r, interval))
-    const res = await fetch(`${podUrl}/history/${promptId}`).catch(() => null)
-    if (!res?.ok) continue
-    const data = await res.json().catch(() => null)
-    const entry = data?.[promptId]
-    if (!entry) continue
-
-    if (entry.status?.status_str === 'error') {
-      throw new Error('Pod reported a workflow error — check the ComfyUI console on your pod')
-    }
-
-    const outputs = entry.outputs
-    if (outputs && Object.keys(outputs).length > 0) {
-      const files: PodOutputFile[] = []
-      for (const nodeOutput of Object.values(outputs) as Record<string, unknown>[]) {
-        for (const key of ['images', 'gifs', 'videos']) {
-          const list = nodeOutput[key]
-          if (Array.isArray(list)) files.push(...(list as PodOutputFile[]))
-        }
-      }
-      if (files.length) return files
-    }
-  }
-  throw new Error('Timeout while polling ComfyUI pod result')
-}
-
-async function downloadFromPod(podUrl: string, file: PodOutputFile): Promise<Buffer> {
-  const params = new URLSearchParams({ filename: file.filename, subfolder: file.subfolder ?? '', type: file.type ?? 'output' })
-  const res = await fetch(`${podUrl}/view?${params}`)
-  if (!res.ok) throw new Error(`Failed to fetch output from pod: ${res.status}`)
-  return Buffer.from(await res.arrayBuffer())
 }
 
 const execFileAsync = promisify(execFile)
@@ -128,6 +77,8 @@ interface JobRow {
     urls?: string[]
     rows?: { videoName: string; text: string }[]
     comfyuiRows?: ComfyUIRow[]
+    myPodRows?: MyPodRow[]
+    stage?: string
     texts?: string[]
     carouselRows?: CarouselRow[]
   } & MonitorMultiShotJobOutput | null
@@ -606,6 +557,23 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const { podUrl, templateId, outputDriveFolderId, items } = job.input as unknown as ComfyUIPodBulkJobInput
       if (!items?.length) throw new Error('No items in job input')
 
+      const session = await getPodSessionSecrets(job.user_id)
+      const comfyUrl = (session?.comfyBaseUrl || podUrl).replace(/\/+$/, '')
+      const apiToken = session?.comfyApiToken ?? null
+
+      const health = await probeComfyHealth(comfyUrl, apiToken)
+      if (!health.ok) throw new Error(`Pod offline — ${health.error}`)
+
+      let remoteJobDir: string | null = null
+      if (session) {
+        try {
+          const ensured = await ensureRemoteWorkDir(session.ssh, session.remoteWorkRoot, id)
+          remoteJobDir = ensured.remoteJobDir
+        } catch (err) {
+          console.warn('[comfyui_pod_bulk] SSH mkdir skipped:', err instanceof Error ? err.message : err)
+        }
+      }
+
       const template = await one<{
         workflow_json: Record<string, unknown>
         prompt_node_id: string
@@ -622,9 +590,20 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const comfyuiRows: ComfyUIRow[] = job.output?.comfyuiRows ? [...job.output.comfyuiRows] : []
       let doneCount = job.done_items
 
+      const persist = async (stage: string) => {
+        const progress = Math.round((doneCount / items.length) * 100)
+        await query(
+          `UPDATE generation_queue
+              SET done_items=$1, progress=$2, output=jsonb_build_object('comfyuiRows', $3::jsonb, 'stage', $4::text)
+            WHERE id=$5`,
+          [doneCount, progress, JSON.stringify(comfyuiRows), stage, id],
+        )
+      }
+
       for (let i = doneCount; i < items.length; i++) {
         const item = items[i]
         try {
+          await persist('validating')
           const workflow = JSON.parse(JSON.stringify(template.workflow_json)) as Record<string, { inputs: Record<string, unknown> }>
 
           const promptNode = workflow[template.prompt_node_id]
@@ -632,40 +611,55 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           promptNode.inputs[template.prompt_field] = item.prompt
 
           if (template.image_node_id && item.driveFileId) {
+            await persist('uploading')
             const buf = await downloadDriveFile(item.driveFileId)
-            const uploadedName = await uploadImageToPod(podUrl, buf, `input_${i}.png`)
+            let uploadedName: string
+            try {
+              uploadedName = await uploadImageToComfy(comfyUrl, buf, `input_${i}.png`, apiToken)
+            } catch (err) {
+              // one retry
+              await new Promise(r => setTimeout(r, 2000))
+              uploadedName = await uploadImageToComfy(comfyUrl, buf, `input_${i}.png`, apiToken)
+              void err
+            }
             const imageNode = workflow[template.image_node_id]
             if (!imageNode) throw new Error(`Image node "${template.image_node_id}" missing from workflow`)
             imageNode.inputs[template.image_field ?? 'image'] = uploadedName
           }
 
-          const promptId = await submitToPod(podUrl, workflow)
-          const outputs = await pollPodResult(podUrl, promptId)
+          await persist('running')
+          const promptId = await submitComfyPrompt(comfyUrl, workflow, apiToken)
+          const outputs = await pollComfyResult(comfyUrl, promptId, { apiToken })
           if (!outputs.length) throw new Error('Pod returned no output files')
 
+          await persist('downloading')
           let lastLink = ''
           for (let f = 0; f < outputs.length; f++) {
-            const buf = await downloadFromPod(podUrl, outputs[f])
+            let buf: Buffer
+            try {
+              buf = await downloadFromComfy(comfyUrl, outputs[f], apiToken)
+            } catch {
+              await new Promise(r => setTimeout(r, 2000))
+              buf = await downloadFromComfy(comfyUrl, outputs[f], apiToken)
+            }
             const ext = outputs[f].filename.split('.').pop() ?? 'png'
             const mime = ext === 'mp4' ? 'video/mp4' : ext === 'webp' ? 'image/webp' : 'image/png'
             const uploaded = await uploadToDriveFolder(outputDriveFolderId, `${i + 1}_${f + 1}.${ext}`, buf, mime)
             lastLink = uploaded.link
           }
-          comfyuiRows.push({ prompt: item.prompt, status: 'done', driveLink: lastLink })
+          comfyuiRows.push({ prompt: item.prompt, status: 'done', stage: 'done', driveLink: lastLink })
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'failed'
-          comfyuiRows.push({ prompt: item.prompt, status: 'error', error: msg })
+          comfyuiRows.push({ prompt: item.prompt, status: 'error', stage: 'error', error: msg })
           console.error(`[queue/process] comfyui_pod_bulk ${id} item ${i} failed:`, msg)
         }
 
         doneCount++
-        const progress = Math.round((doneCount / items.length) * 100)
-        await query(
-          `UPDATE generation_queue
-              SET done_items=$1, progress=$2, output=jsonb_build_object('comfyuiRows', $3::jsonb)
-            WHERE id=$4`,
-          [doneCount, progress, JSON.stringify(comfyuiRows), id],
-        )
+        await persist(doneCount >= items.length ? 'done' : 'uploading')
+      }
+
+      if (session && remoteJobDir) {
+        await cleanupRemoteJobDir(session.ssh, remoteJobDir)
       }
 
       await query(
@@ -673,6 +667,135 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         [id],
       )
 
+      return NextResponse.json({ ok: true, done: doneCount })
+    }
+
+    // ── my_pod_i2v ─────────────────────────────────────────────────────────────
+    if (job.job_type === 'my_pod_i2v') {
+      const input = job.input as unknown as MyPodI2vJobInput
+      const session = await getPodSessionSecrets(job.user_id)
+      if (!session) throw new Error('Pod session expired — reconnect in My Pod')
+
+      const health = await probeComfyHealth(session.comfyBaseUrl, session.comfyApiToken)
+      if (!health.ok) throw new Error(`Pod offline — ${health.error}`)
+
+      const { remoteJobDir } = await ensureRemoteWorkDir(session.ssh, session.remoteWorkRoot, id)
+      const rows: MyPodRow[] = job.output?.myPodRows ? [...job.output.myPodRows] : []
+      let doneCount = job.done_items
+
+      for (let i = doneCount; i < input.items.length; i++) {
+        const item = input.items[i]
+        try {
+          await query(
+            `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'downloading_inputs'), done_items=$2, progress=$3 WHERE id=$4`,
+            [JSON.stringify(rows), doneCount, Math.round((doneCount / input.items.length) * 100), id],
+          )
+          const imgBuf = await downloadDriveFile(item.driveFileId)
+          await query(
+            `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'running') WHERE id=$2`,
+            [JSON.stringify(rows), id],
+          )
+          const result = await runI2vItem({
+            comfyBaseUrl: session.comfyBaseUrl,
+            apiToken: session.comfyApiToken,
+            ssh: session.ssh,
+            imageBuffer: imgBuf,
+            imageName: item.name,
+            prompt: item.prompt ?? input.prompt,
+            jobId: `${id}_${i}`,
+          })
+          const ext = result.filename.split('.').pop() ?? 'mp4'
+          const uploaded = await uploadToDriveFolder(
+            input.outputDriveFolderId,
+            `${item.name.replace(/\.[^.]+$/, '')}_output.${ext}`,
+            result.buffer,
+            ext === 'webm' ? 'video/webm' : 'video/mp4',
+          )
+          rows.push({ label: item.name, status: 'done', stage: 'done', driveLink: uploaded.link })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'failed'
+          rows.push({ label: item.name, status: 'error', stage: 'error', error: msg })
+          console.error(`[queue/process] my_pod_i2v ${id} item ${i}:`, msg)
+        }
+        doneCount++
+        await query(
+          `UPDATE generation_queue
+              SET done_items=$1, progress=$2, output=jsonb_build_object('myPodRows', $3::jsonb, 'stage', $4::text)
+            WHERE id=$5`,
+          [doneCount, Math.round((doneCount / input.items.length) * 100), JSON.stringify(rows), 'uploading', id],
+        )
+      }
+
+      await cleanupRemoteJobDir(session.ssh, remoteJobDir)
+      await query(`UPDATE generation_queue SET status='done', finished_at=now(), progress=100 WHERE id=$1`, [id])
+      return NextResponse.json({ ok: true, done: doneCount })
+    }
+
+    // ── my_pod_animate ─────────────────────────────────────────────────────────
+    if (job.job_type === 'my_pod_animate') {
+      const input = job.input as unknown as MyPodAnimateJobInput
+      const session = await getPodSessionSecrets(job.user_id)
+      if (!session) throw new Error('Pod session expired — reconnect in My Pod')
+
+      const health = await probeComfyHealth(session.comfyBaseUrl, session.comfyApiToken)
+      if (!health.ok) throw new Error(`Pod offline — ${health.error}`)
+
+      const { remoteJobDir } = await ensureRemoteWorkDir(session.ssh, session.remoteWorkRoot, id)
+      const rows: MyPodRow[] = job.output?.myPodRows ? [...job.output.myPodRows] : []
+      let doneCount = job.done_items
+
+      const refBuf = await downloadDriveFile(input.referenceImageId)
+
+      for (let i = doneCount; i < input.items.length; i++) {
+        const item = input.items[i]
+        try {
+          await query(
+            `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'downloading_inputs') WHERE id=$2`,
+            [JSON.stringify(rows), id],
+          )
+          const vidBuf = await downloadDriveFile(item.driveFileId)
+          await query(
+            `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'building_graph') WHERE id=$2`,
+            [JSON.stringify(rows), id],
+          )
+          await query(
+            `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'running_windows') WHERE id=$2`,
+            [JSON.stringify(rows), id],
+          )
+          const result = await runAnimateItem({
+            comfyBaseUrl: session.comfyBaseUrl,
+            apiToken: session.comfyApiToken,
+            ssh: session.ssh,
+            imageBuffer: refBuf,
+            imageName: input.referenceImageName,
+            videoBuffer: vidBuf,
+            videoName: item.name,
+            jobId: `${id}_${i}`,
+          })
+          const ext = result.filename.split('.').pop() ?? 'mp4'
+          const uploaded = await uploadToDriveFolder(
+            input.outputDriveFolderId,
+            `${item.name.replace(/\.[^.]+$/, '')}_output.${ext}`,
+            result.buffer,
+            'video/mp4',
+          )
+          rows.push({ label: item.name, status: 'done', stage: 'done', driveLink: uploaded.link })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'failed'
+          rows.push({ label: item.name, status: 'error', stage: 'error', error: msg })
+          console.error(`[queue/process] my_pod_animate ${id} item ${i}:`, msg)
+        }
+        doneCount++
+        await query(
+          `UPDATE generation_queue
+              SET done_items=$1, progress=$2, output=jsonb_build_object('myPodRows', $3::jsonb, 'stage', 'uploading')
+            WHERE id=$4`,
+          [doneCount, Math.round((doneCount / input.items.length) * 100), JSON.stringify(rows), id],
+        )
+      }
+
+      await cleanupRemoteJobDir(session.ssh, remoteJobDir)
+      await query(`UPDATE generation_queue SET status='done', finished_at=now(), progress=100 WHERE id=$1`, [id])
       return NextResponse.json({ ok: true, done: doneCount })
     }
 

@@ -79,27 +79,61 @@ export async function GET(req: NextRequest) {
   }
 
   // ── Generation queue processing ───────────────────────────────
-  // Reset stuck jobs that have been processing for > 30 minutes
+  // Reset stuck shared-pool jobs that have been processing for > 30 minutes
   await query(
     `UPDATE generation_queue
         SET status = 'pending'
       WHERE status = 'processing'
         AND started_at < now() - interval '30 minutes'
-        AND attempts < max_attempts`,
+        AND attempts < max_attempts
+        AND job_type NOT IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate')`,
   ).catch(err => console.error('[cron/tick] reset stuck queue jobs:', err))
+
+  // My Pod: fail jobs with no progress for > 10 minutes (don't silently requeue forever)
+  await query(
+    `UPDATE generation_queue
+        SET status = 'failed',
+            error = COALESCE(error, 'No progress for 10+ minutes — pod may be offline'),
+            finished_at = now()
+      WHERE status = 'processing'
+        AND job_type IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate')
+        AND started_at < now() - interval '10 minutes'
+        AND (
+          output IS NULL
+          OR NOT (output ? 'stage')
+          OR (output->>'stage') IN ('validating', 'uploading', 'downloading_inputs', 'building_graph')
+        )
+        AND done_items = 0`,
+  ).catch(err => console.error('[cron/tick] fail stuck my-pod jobs:', err))
+
+  // Long-running My Pod renders can exceed 10 min once stage=running — only fail if done_items
+  // hasn't moved for 90 minutes wall time.
+  await query(
+    `UPDATE generation_queue
+        SET status = 'failed',
+            error = COALESCE(error, 'My Pod job exceeded 90 minutes — marked failed'),
+            finished_at = now()
+      WHERE status = 'processing'
+        AND job_type IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate')
+        AND started_at < now() - interval '90 minutes'`,
+  ).catch(err => console.error('[cron/tick] fail long my-pod jobs:', err))
 
   let queueStarted = 0
   try {
-    // comfyui_pod_bulk runs on the user's own pod, not our compute — it has its
-    // own claim path below and must not eat into this shared pool.
+    // My Pod jobs run on the user's own GPU — separate claim path below.
     const processingCount = await one<{ count: number }>(
-      `SELECT count(*)::int AS count FROM generation_queue WHERE status = 'processing' AND job_type != 'comfyui_pod_bulk'`,
+      `SELECT count(*)::int AS count FROM generation_queue
+        WHERE status = 'processing'
+          AND job_type NOT IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate')`,
     )
     const slots = Math.max(0, QUEUE_CONCURRENCY - (processingCount?.count ?? 0))
 
     if (slots > 0) {
       const pending = await rows<{ id: string }>(
-        `SELECT id FROM generation_queue WHERE status = 'pending' AND job_type != 'comfyui_pod_bulk' ORDER BY created_at LIMIT $1`,
+        `SELECT id FROM generation_queue
+          WHERE status = 'pending'
+            AND job_type NOT IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate')
+          ORDER BY created_at LIMIT $1`,
         [slots],
       )
 
@@ -113,7 +147,6 @@ export async function GET(req: NextRequest) {
         )
         if (claimed) {
           queueStarted++
-          // Fire-and-forget — process route updates the DB when done
           fetch(`${base}/api/queue/process/${job.id}`, {
             method: 'POST',
             headers: { 'x-cron-secret': CRON_SECRET },
@@ -125,17 +158,19 @@ export async function GET(req: NextRequest) {
     console.error('[cron/tick] queue processing error:', err)
   }
 
-  // ── ComfyUI pod bulk jobs — no shared resource to protect, just cap at
-  // 1 concurrent batch per user (guards against duplicate submissions racing
-  // on the same pod, not a resource limit).
+  // ── My Pod jobs (comfyui_pod_bulk + i2v + animate) — 1 concurrent per user ──
   let comfyStarted = 0
   try {
+    const myPodTypes = `('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate')`
     const pendingComfy = await rows<{ id: string; user_id: string }>(
-      `SELECT id, user_id FROM generation_queue WHERE status = 'pending' AND job_type = 'comfyui_pod_bulk' ORDER BY created_at`,
+      `SELECT id, user_id FROM generation_queue
+        WHERE status = 'pending' AND job_type IN ${myPodTypes}
+        ORDER BY created_at`,
     )
     const busyUsers = new Set(
       (await rows<{ user_id: string }>(
-        `SELECT DISTINCT user_id FROM generation_queue WHERE status = 'processing' AND job_type = 'comfyui_pod_bulk'`,
+        `SELECT DISTINCT user_id FROM generation_queue
+          WHERE status = 'processing' AND job_type IN ${myPodTypes}`,
       )).map(r => r.user_id),
     )
 
@@ -154,11 +189,28 @@ export async function GET(req: NextRequest) {
         fetch(`${base}/api/queue/process/${job.id}`, {
           method: 'POST',
           headers: { 'x-cron-secret': CRON_SECRET },
-        }).catch(err => console.error('[cron/tick] fire comfyui process job:', err))
+        }).catch(err => console.error('[cron/tick] fire my-pod process job:', err))
       }
     }
   } catch (err) {
-    console.error('[cron/tick] comfyui queue processing error:', err)
+    console.error('[cron/tick] my-pod queue processing error:', err)
+  }
+
+  // ── My Pod session health (HTTP every tick; ~5 min cadence if cron is 5 min) ──
+  let podHealthChecked = 0
+  try {
+    const sessions = await rows<{ user_id: string }>(
+      `SELECT user_id FROM pod_sessions WHERE expires_at > now()`,
+    )
+    const { refreshPodSessionHealth } = await import('@/lib/my-pod/session')
+    for (const s of sessions) {
+      await refreshPodSessionHealth(s.user_id).catch(err =>
+        console.error('[cron/tick] pod health', s.user_id, err),
+      )
+      podHealthChecked++
+    }
+  } catch (err) {
+    console.error('[cron/tick] pod session health error:', err)
   }
 
   // ── Daily IG profile monitor (Copy-Paste pipeline) ────────────
@@ -187,7 +239,7 @@ export async function GET(req: NextRequest) {
     posts: { processed: due.length, results: postResults.map(r => r.status) },
     reels: { processed: dueReels.length, results: reelResults.map(r => r.status) },
     stats: statsResult,
-    queue: { started: queueStarted, comfyuiStarted: comfyStarted },
+    queue: { started: queueStarted, comfyuiStarted: comfyStarted, podHealthChecked },
     monitor: monitorScans,
     driveArchive,
   })

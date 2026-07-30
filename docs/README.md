@@ -12,6 +12,7 @@
 | File | Purpose |
 |------|---------|
 | [`video-models-plan.md`](./video-models-plan.md) | Kling + Seedance + LTX — when to use each, phased rollout |
-| [`runpod-comfy-worker-plan.md`](./runpod-comfy-worker-plan.md) | RunPod SSH + ComfyUI remote worker — parked plan & resume checklist |
+| [`my-pod.md`](./my-pod.md) | My Pod control plane — SSH + ComfyUI + Drive (live) |
+| [`runpod-comfy-worker-plan.md`](./runpod-comfy-worker-plan.md) | Historical RunPod worker design notes (superseded by my-pod.md) |
 
 These were saved 2026-07-26 to merge fully with a newer plan later.

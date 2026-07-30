@@ -93,6 +93,21 @@ export interface ComfyUIPodBulkJobInput {
   items: ComfyUIPodBulkItem[]
 }
 
+export interface MyPodI2vJobInput {
+  inputDriveFolderId: string
+  outputDriveFolderId: string
+  prompt?: string
+  items: { driveFileId: string; name: string; prompt?: string }[]
+}
+
+export interface MyPodAnimateJobInput {
+  inputDriveFolderId: string
+  outputDriveFolderId: string
+  referenceImageId: string
+  referenceImageName: string
+  items: { driveFileId: string; name: string }[]
+}
+
 const MAX_CAPTION_ITEMS = 200
 const MAX_TRANSCRIBE_ITEMS = 200
 const MAX_OCR_ITEMS = 200
@@ -115,7 +130,22 @@ export type QueueSubmitBody =
   | { job_type: 'caption_generate'; input: CaptionGenerateJobInput }
   | {
       job_type: 'comfyui_pod_bulk'
-      input: { podUrl: string; templateId: string; inputDriveFolderId?: string; outputDriveFolderId: string; prompts: string[] }
+      input: {
+        podUrl?: string
+        usePodSession?: boolean
+        templateId: string
+        inputDriveFolderId?: string
+        outputDriveFolderId: string
+        prompts: string[]
+      }
+    }
+  | {
+      job_type: 'my_pod_i2v'
+      input: { inputDriveFolderId: string; outputDriveFolderId: string; prompt?: string }
+    }
+  | {
+      job_type: 'my_pod_animate'
+      input: { inputDriveFolderId: string; outputDriveFolderId: string }
     }
   | { job_type: 'bulk_carousel'; input: BulkCarouselJobInput }
 
@@ -304,9 +334,21 @@ export async function POST(req: NextRequest) {
   }
 
   if (body.job_type === 'comfyui_pod_bulk') {
-    const { podUrl, templateId, inputDriveFolderId, outputDriveFolderId, prompts } = body.input ?? {}
+    const { podUrl, usePodSession, templateId, inputDriveFolderId, outputDriveFolderId, prompts } = body.input ?? {}
 
-    if (!podUrl || !RUNPOD_POD_URL_RE.test(podUrl)) {
+    let resolvedPodUrl = podUrl?.trim() ?? ''
+    if (usePodSession || !resolvedPodUrl) {
+      try {
+        const { requireHealthyPodSession } = await import('@/lib/my-pod/session')
+        const secrets = await requireHealthyPodSession(user.id)
+        resolvedPodUrl = secrets.comfyBaseUrl
+      } catch (err) {
+        return NextResponse.json(
+          { error: err instanceof Error ? err.message : 'Pod session required' },
+          { status: 400 },
+        )
+      }
+    } else if (!RUNPOD_POD_URL_RE.test(resolvedPodUrl)) {
       return NextResponse.json({ error: 'podUrl must be a RunPod proxy URL like https://<pod-id>-8188.proxy.runpod.net' }, { status: 400 })
     }
     if (!templateId) return NextResponse.json({ error: 'templateId required' }, { status: 400 })
@@ -341,12 +383,93 @@ export async function POST(req: NextRequest) {
     }
 
     const input: ComfyUIPodBulkJobInput = {
-      podUrl,
+      podUrl: resolvedPodUrl,
       templateId,
       outputDriveFolderId: outputDriveFolderId.trim(),
       items,
     }
 
+    const row = await one<{ id: string }>(
+      `INSERT INTO generation_queue (user_id, job_type, input, total_items)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [user.id, body.job_type, JSON.stringify(input), items.length],
+    )
+    return NextResponse.json({ id: row!.id })
+  }
+
+  if (body.job_type === 'my_pod_i2v') {
+    const { inputDriveFolderId, outputDriveFolderId, prompt } = body.input ?? {}
+    if (!inputDriveFolderId?.trim() || !outputDriveFolderId?.trim()) {
+      return NextResponse.json({ error: 'inputDriveFolderId and outputDriveFolderId required' }, { status: 400 })
+    }
+    try {
+      const { requireHealthyPodSession } = await import('@/lib/my-pod/session')
+      await requireHealthyPodSession(user.id)
+    } catch (err) {
+      return NextResponse.json({ error: err instanceof Error ? err.message : 'Pod session required' }, { status: 400 })
+    }
+
+    let files
+    try {
+      files = await listDriveFiles(inputDriveFolderId.trim(), 'image/')
+    } catch (err) {
+      return NextResponse.json({ error: `Could not read input Drive folder: ${err instanceof Error ? err.message : 'failed'}` }, { status: 400 })
+    }
+    if (!files.length) return NextResponse.json({ error: 'Input Drive folder has no image files' }, { status: 400 })
+
+    const items = files.slice(0, MAX_COMFYUI_ITEMS).map(f => ({
+      driveFileId: f.id,
+      name: f.name,
+      prompt: prompt?.trim() || undefined,
+    }))
+    const input: MyPodI2vJobInput = {
+      inputDriveFolderId: inputDriveFolderId.trim(),
+      outputDriveFolderId: outputDriveFolderId.trim(),
+      prompt: prompt?.trim() || undefined,
+      items,
+    }
+    const row = await one<{ id: string }>(
+      `INSERT INTO generation_queue (user_id, job_type, input, total_items)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [user.id, body.job_type, JSON.stringify(input), items.length],
+    )
+    return NextResponse.json({ id: row!.id })
+  }
+
+  if (body.job_type === 'my_pod_animate') {
+    const { inputDriveFolderId, outputDriveFolderId } = body.input ?? {}
+    if (!inputDriveFolderId?.trim() || !outputDriveFolderId?.trim()) {
+      return NextResponse.json({ error: 'inputDriveFolderId and outputDriveFolderId required' }, { status: 400 })
+    }
+    try {
+      const { requireHealthyPodSession } = await import('@/lib/my-pod/session')
+      await requireHealthyPodSession(user.id)
+    } catch (err) {
+      return NextResponse.json({ error: err instanceof Error ? err.message : 'Pod session required' }, { status: 400 })
+    }
+
+    let allFiles
+    try {
+      allFiles = await listDriveFiles(inputDriveFolderId.trim())
+    } catch (err) {
+      return NextResponse.json({ error: `Could not read input Drive folder: ${err instanceof Error ? err.message : 'failed'}` }, { status: 400 })
+    }
+    const images = allFiles.filter(f => /\.(png|jpe?g|webp|gif)$/i.test(f.name))
+    const videos = allFiles.filter(f => /\.(mp4|webm|mov|mkv)$/i.test(f.name))
+    if (!images.length) return NextResponse.json({ error: 'Input folder needs a reference image' }, { status: 400 })
+    if (!videos.length) return NextResponse.json({ error: 'Input folder needs at least one driving video' }, { status: 400 })
+
+    const ref = images[0]
+    const items = videos.slice(0, MAX_COMFYUI_ITEMS).map(f => ({ driveFileId: f.id, name: f.name }))
+    const input: MyPodAnimateJobInput = {
+      inputDriveFolderId: inputDriveFolderId.trim(),
+      outputDriveFolderId: outputDriveFolderId.trim(),
+      referenceImageId: ref.id,
+      referenceImageName: ref.name,
+      items,
+    }
     const row = await one<{ id: string }>(
       `INSERT INTO generation_queue (user_id, job_type, input, total_items)
        VALUES ($1, $2, $3, $4)

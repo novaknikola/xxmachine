@@ -73,6 +73,7 @@ const NAV_ITEMS: NavItem[] = [
     ],
   },
   { href: '/copy-paste', label: 'Copy-Paste Studio', icon: Copy },
+  { href: '/my-pod', label: 'My Pod', icon: Zap },
   { href: '/history', label: 'History', icon: History, module: 'history' },
   { href: '/settings', label: 'Settings', icon: Settings },
 ]

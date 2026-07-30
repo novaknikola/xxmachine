@@ -48,6 +48,9 @@ const KIND_LABEL: Record<string, string> = {
   video_repurpose: 'Video Variants',
   video_caption: 'Captions',
   monitor_multi_shot: 'Multi-shot',
+  comfyui_pod_bulk: 'My Pod · Simple',
+  my_pod_i2v: 'My Pod · I2V',
+  my_pod_animate: 'My Pod · Animate',
 }
 
 const FILTER_GROUPS: {
@@ -119,7 +122,7 @@ export default function HistoryPage() {
       if (filter === 'queue') {
         gens = gens.filter(g => g.source === 'queue' || [
           'bulk_image', 'bulk_carousel', 'video_repurpose', 'video_caption',
-          'monitor_multi_shot', 'comfyui_pod_bulk',
+          'monitor_multi_shot', 'comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate',
         ].includes(g.kind))
       }
 

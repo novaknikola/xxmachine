@@ -374,7 +374,9 @@ function ContentEngineTab() {
               <Zap className="w-4 h-4 text-primary" /> RunPod Content Engine
             </h3>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Enter your own API keys. Each user pays their own API costs directly to the providers.
+              Serverless endpoint keys for the discovery pipeline. For dedicated Pod + ComfyUI, use{' '}
+              <a href="/my-pod?tab=connection" className="text-primary hover:underline">My Pod → Connection</a>.
+              {' '}Each user pays their own API costs directly to the providers.
             </p>
           </div>
           <Button onClick={saveKeys} disabled={saving || !hasChanges} size="sm" className="h-8 shrink-0">

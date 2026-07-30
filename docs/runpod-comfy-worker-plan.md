@@ -1,6 +1,9 @@
 # RunPod + ComfyUI remote worker — plan & instructions
 
-> Draft 2026-07-27. Parking doc — **no implementation yet**. Return here when ready.
+> **Superseded for implementation by [`docs/my-pod.md`](./my-pod.md).**  
+> My Pod (SSH + ComfyUI URL + Drive) is implemented under `/my-pod`. Keep this file as historical design notes.
+
+> Draft 2026-07-27. Parking doc — **implementation lives in My Pod**. Return to my-pod.md for ops.
 > Goal: user starts a RunPod pod with ComfyUI, sends credentials to xxmachine, and our server orchestrates generate → folders on drive → outputs placed automatically.
 
 ---

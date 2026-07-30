@@ -1,13 +1,26 @@
+/** Legacy /comfyui → My Pod hub. */
 'use client'
 
-import { useEffect } from 'react'
-import { useRouter } from 'next/navigation'
+import { Suspense, useEffect } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 
-/** Legacy route — Copy-Paste now lives at /copy-paste. */
-export default function ComfyUIRedirect() {
+function RedirectInner() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   useEffect(() => {
-    router.replace('/copy-paste')
-  }, [router])
+    const tab = searchParams.get('tab')
+    const mapped = tab === 'queue' || tab === 'templates' || tab === 'generate'
+      ? tab
+      : 'connection'
+    router.replace(`/my-pod?tab=${mapped}`)
+  }, [router, searchParams])
   return null
+}
+
+export default function ComfyUIRedirect() {
+  return (
+    <Suspense fallback={null}>
+      <RedirectInner />
+    </Suspense>
+  )
 }
