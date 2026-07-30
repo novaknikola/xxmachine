@@ -303,7 +303,7 @@ export async function refreshPodSessionHealth(userId: string): Promise<void> {
     return
   }
 
-  const comfy = await probeComfyHealth(secrets.comfyBaseUrl, secrets.comfyApiToken, 10_000)
+  const comfy = await probeComfyHealth(secrets.comfyBaseUrl, secrets.comfyApiToken, 45_000)
   if (comfy.ok) {
     await query(
       `UPDATE pod_sessions SET last_ok_at = now(), last_error = NULL, updated_at = now() WHERE user_id = $1`,
@@ -342,7 +342,7 @@ export async function requireHealthyPodSession(userId: string): Promise<PodSessi
     // Allow submit but prefer a fresh probe for generate
   }
 
-  const comfy = await probeComfyHealth(secrets.comfyBaseUrl, secrets.comfyApiToken, 10_000)
+  const comfy = await probeComfyHealth(secrets.comfyBaseUrl, secrets.comfyApiToken, 45_000)
   if (!comfy.ok) {
     await query(
       `UPDATE pod_sessions SET last_error = $2, updated_at = now() WHERE user_id = $1`,

@@ -17,29 +17,37 @@ export function comfyHeaders(apiToken?: string | null): HeadersInit {
 export async function probeComfyHealth(
   comfyBaseUrl: string,
   apiToken?: string | null,
-  timeoutMs = 15_000,
+  timeoutMs = 45_000,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const base = comfyBaseUrl.replace(/\/+$/, '')
-  const ctrl = new AbortController()
-  const t = setTimeout(() => ctrl.abort(), timeoutMs)
-  try {
-    const res = await fetch(`${base}/system_stats`, {
-      headers: comfyHeaders(apiToken),
-      signal: ctrl.signal,
-    })
-    if (res.ok) return { ok: true }
-    const res2 = await fetch(`${base}/object_info`, {
-      headers: comfyHeaders(apiToken),
-      signal: ctrl.signal,
-    })
-    if (res2.ok) return { ok: true }
-    return { ok: false, error: `ComfyUI health check failed (${res.status})` }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    if (msg.includes('abort')) return { ok: false, error: 'ComfyUI health check timed out' }
-    return { ok: false, error: `ComfyUI unreachable: ${msg}` }
-  } finally {
-    clearTimeout(t)
+  // Prefer light endpoints first — /system_stats is often slow through RunPod proxy.
+  const paths = ['/queue', '/system_stats', '/', '/object_info']
+  const errors: string[] = []
+
+  for (const path of paths) {
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), timeoutMs)
+    try {
+      const res = await fetch(`${base}${path}`, {
+        headers: comfyHeaders(apiToken),
+        signal: ctrl.signal,
+        redirect: 'follow',
+      })
+      if (res.ok || (path === '/' && res.status >= 200 && res.status < 500)) {
+        return { ok: true }
+      }
+      errors.push(`${path}→${res.status}`)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      errors.push(`${path}→${msg.includes('abort') ? 'timeout' : msg}`)
+    } finally {
+      clearTimeout(t)
+    }
+  }
+
+  return {
+    ok: false,
+    error: `ComfyUI unreachable (${errors.join('; ')}). Confirm the pod is Running and the comfy URL still works in your browser.`,
   }
 }
 
