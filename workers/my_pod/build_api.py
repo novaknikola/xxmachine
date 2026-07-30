@@ -96,6 +96,17 @@ for t in types_needed:
     except Exception as e:
         print(f"WARN: {t}: {e}")
 
+# Hard-required for a valid WAN Animate API graph (nodes 100/101 = DWPreprocessor).
+# Silent skip used to cause Comfy KeyError '101' at /prompt — fail early instead.
+_REQUIRED_FOR_ANIMATE = ("DWPreprocessor", "WanAnimateToVideo", "SaveVideo")
+_missing_req = [t for t in _REQUIRED_FOR_ANIMATE if t not in obj_info]
+if _missing_req:
+    raise SystemExit(
+        "Missing Comfy node types on pod (install/auto-ensure failed): "
+        + ", ".join(_missing_req)
+        + ". Need comfyui_controlnet_aux (DWPreprocessor) and WAN Animate nodes."
+    )
+
 
 def widget_capable_order(ntype):
     info = obj_info[ntype]
@@ -301,6 +312,20 @@ api["9999"] = {
         "codec": "auto",
     },
 }
+
+# Validate every linked node id exists before Comfy sees the prompt (catches KeyError '101').
+_missing_refs = set()
+for _nid, _node in api.items():
+    for _val in (_node.get("inputs") or {}).values():
+        if isinstance(_val, list) and len(_val) >= 1 and isinstance(_val[0], str):
+            if _val[0] not in api:
+                _missing_refs.add(_val[0])
+if _missing_refs:
+    raise SystemExit(
+        "Built graph references missing node ids: "
+        + ", ".join(sorted(_missing_refs)[:20])
+        + ". Usually DWPreprocessor (100/101) was skipped — ensure comfyui_controlnet_aux is installed."
+    )
 
 json.dump(api, open(OUTPUT_JSON, "w"), indent=2)
 print(f"Built API workflow with {len(api)} nodes, {N_EXTEND_WINDOWS} extend windows chained, image={IMAGE_FILE}, driving={DRIVING_FILE}")

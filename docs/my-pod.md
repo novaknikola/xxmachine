@@ -61,7 +61,9 @@ Pod must have ComfyUI listening (usually port 8188) with models + custom nodes f
 
 **I2V:** WAN 2.2 I2V checkpoint, VHS, matching node IDs in the API template.
 
-**Animate:** WAN 2.2 Animate 14B, DWPose, SAM2, KJNodes / SDPose face crop nodes, 32GB+ VRAM recommended.
+**Animate:** WAN 2.2 Animate 14B, DWPose (`DWPreprocessor` via `comfyui_controlnet_aux`), SAM2, SDPose face crop nodes, 32GB+ VRAM recommended.
+
+If `DWPreprocessor` is missing, My Pod **auto-installs** `comfyui_controlnet_aux` over SSH before the first Animate item, restarts Comfy, and re-tests `/object_info`. Non-installable missing nodes (e.g. WanAnimateToVideo) fail fast with a clear error.
 
 Network volume `/workspace` for models is fine; session `remote_work_root` defaults to `/workspace/xxmachine`.
 

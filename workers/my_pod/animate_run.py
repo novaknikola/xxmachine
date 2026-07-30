@@ -29,6 +29,28 @@ def _req(url, data=None, method=None):
     return urllib.request.urlopen(req, timeout=60)
 
 
+def preflight_nodes():
+    """HTTP check that DWPreprocessor exists — VPS TypeScript usually installs first."""
+    required = ("DWPreprocessor", "WanAnimateToVideo")
+    missing = []
+    for t in required:
+        try:
+            with _req(f"{COMFY_URL}/object_info/{t}") as r:
+                data = json.loads(r.read())
+            if t not in data:
+                missing.append(t)
+        except Exception as e:
+            missing.append(f"{t}({e})")
+    if missing:
+        raise RuntimeError(
+            "Animate preflight failed — pod missing node types: "
+            + ", ".join(missing)
+            + ". xxmachine should auto-install comfyui_controlnet_aux via SSH; "
+            "if this persists, install it manually under ComfyUI/custom_nodes."
+        )
+    print("preflight OK: DWPreprocessor + WanAnimateToVideo present")
+
+
 def build_prompt():
     env = os.environ.copy()
     env.setdefault("OUTPUT_JSON", "/tmp/xxm_api_workflow.json")
@@ -93,6 +115,7 @@ def wait_for_result(prompt_id):
 def main():
     if not os.environ.get("IMAGE_FILE") or not os.environ.get("DRIVING_FILE"):
         raise SystemExit("IMAGE_FILE and DRIVING_FILE required")
+    preflight_nodes()
     prompt_path = build_prompt()
     prompt_id = submit(prompt_path)
     print(f"submitted prompt_id={prompt_id}")

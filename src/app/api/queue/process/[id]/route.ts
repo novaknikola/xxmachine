@@ -817,6 +817,23 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         )
       }
 
+      // Once per batch: probe DWPreprocessor etc.; auto-install via SSH if missing.
+      leaseStage = 'ensuring_nodes'
+      await touchLease()
+      {
+        const { ensureAnimateNodes } = await import('@/lib/my-pod/ensure-animate-nodes')
+        const ensured = await ensureAnimateNodes({
+          comfyBaseUrl: session.comfyBaseUrl,
+          apiToken: session.comfyApiToken,
+          ssh: session.ssh,
+          onProgress: async () => { await touchLease() },
+        })
+        if (!ensured.ok) throw new Error(ensured.error)
+        if (ensured.installed.length) {
+          console.log(`[my_pod_animate] auto-installed: ${ensured.installed.join(', ')}`)
+        }
+      }
+
       for (let i = doneCount; i < input.items.length; i++) {
         const item = input.items[i]
         try {
@@ -837,6 +854,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             videoName: item.name,
             jobId: `${id}_${i}`,
             onHeartbeat: touchLease,
+            skipEnsureNodes: true,
           })
           const ext = result.filename.split('.').pop() ?? 'mp4'
           const uploaded = await uploadToDriveFolderResilient(

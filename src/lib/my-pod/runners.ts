@@ -173,8 +173,9 @@ export async function runAnimateItem(opts: {
   drivingFrames?: number
   jobId: string
   onHeartbeat?: () => void | Promise<void>
+  /** Skip ensure when caller already ran it for the batch. */
+  skipEnsureNodes?: boolean
 }): Promise<{ buffer: Buffer; filename: string }> {
-  void opts.ssh
   const workflowPath = animateWorkflowPath()
   if (!existsSync(workflowPath)) {
     throw new Error(
@@ -184,6 +185,17 @@ export async function runAnimateItem(opts: {
   const runScript = join(WORKERS_DIR, 'animate_run.py')
   if (!existsSync(runScript)) {
     throw new Error('Animate Python sidecar missing: workers/my_pod/animate_run.py')
+  }
+
+  if (!opts.skipEnsureNodes) {
+    const { ensureAnimateNodes } = await import('@/lib/my-pod/ensure-animate-nodes')
+    const ensured = await ensureAnimateNodes({
+      comfyBaseUrl: opts.comfyBaseUrl,
+      apiToken: opts.apiToken,
+      ssh: opts.ssh,
+      onProgress: opts.onHeartbeat,
+    })
+    if (!ensured.ok) throw new Error(ensured.error)
   }
 
   const imgRemote = `xxm_anim_${randomUUID().slice(0, 8)}_${opts.imageName.replace(/[^\w.-]/g, '_')}`
