@@ -160,7 +160,7 @@ export async function GET(req: NextRequest) {
     console.error('[cron/tick] queue processing error:', err)
   }
 
-  // ── My Pod jobs — 1 concurrent per pod (fallback: per user if no pod pin) ──
+  // ── My Pod jobs — 1 concurrent per pod; unpinned jobs serialize per user ──
   let comfyStarted = 0
   try {
     const myPodTypes = `('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk')`
@@ -169,16 +169,26 @@ export async function GET(req: NextRequest) {
         WHERE status = 'pending' AND job_type IN ${myPodTypes}
         ORDER BY created_at`,
     )
-    const busyKeys = new Set(
-      (await rows<{ user_id: string; pod_session_id: string | null }>(
-        `SELECT user_id, pod_session_id FROM generation_queue
-          WHERE status = 'processing' AND job_type IN ${myPodTypes}`,
-      )).map(r => r.pod_session_id ?? `user:${r.user_id}`),
+    const processing = await rows<{ user_id: string; pod_session_id: string | null }>(
+      `SELECT user_id, pod_session_id FROM generation_queue
+        WHERE status = 'processing' AND job_type IN ${myPodTypes}`,
+    )
+    const busyPods = new Set(
+      processing.map(r => r.pod_session_id).filter((id): id is string => !!id),
+    )
+    const usersWithAnyProcessing = new Set(processing.map(r => r.user_id))
+    const usersWithUnpinnedProcessing = new Set(
+      processing.filter(r => !r.pod_session_id).map(r => r.user_id),
     )
 
     for (const job of pendingComfy) {
-      const key = job.pod_session_id ?? `user:${job.user_id}`
-      if (busyKeys.has(key)) continue
+      if (job.pod_session_id) {
+        if (busyPods.has(job.pod_session_id)) continue
+        // Unpinned worker may be using any pod via fallback — don't stack on top.
+        if (usersWithUnpinnedProcessing.has(job.user_id)) continue
+      } else if (usersWithAnyProcessing.has(job.user_id)) {
+        continue
+      }
       const claimed = await one<{ id: string }>(
         `UPDATE generation_queue
             SET status = 'processing', started_at = now(), attempts = attempts + 1
@@ -187,7 +197,9 @@ export async function GET(req: NextRequest) {
         [job.id],
       )
       if (claimed) {
-        busyKeys.add(key)
+        if (job.pod_session_id) busyPods.add(job.pod_session_id)
+        usersWithAnyProcessing.add(job.user_id)
+        if (!job.pod_session_id) usersWithUnpinnedProcessing.add(job.user_id)
         comfyStarted++
         fetch(`${base}/api/queue/process/${job.id}`, {
           method: 'POST',
