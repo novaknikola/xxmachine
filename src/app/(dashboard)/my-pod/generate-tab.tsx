@@ -126,7 +126,7 @@ export function GenerateTab() {
           <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">Workflow</CardTitle>
         </CardHeader>
         <CardContent>
-          <Select value={workflow} onValueChange={setWorkflow}>
+          <Select value={workflow} onValueChange={v => { if (v) setWorkflow(v) }}>
             <SelectTrigger className="h-10 text-xs"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="infinitetalk">InfiniteTalk — Fish + Comfy</SelectItem>
