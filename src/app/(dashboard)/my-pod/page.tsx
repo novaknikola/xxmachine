@@ -10,9 +10,9 @@ import { Loader2, Server } from 'lucide-react'
 
 const TABS = [
   { id: 'connection', label: 'Connection' },
-  { id: 'templates', label: 'Templates' },
   { id: 'generate', label: 'Generate' },
   { id: 'queue', label: 'Queue' },
+  { id: 'templates', label: 'Templates' },
 ] as const
 
 type TabId = (typeof TABS)[number]['id']
@@ -44,7 +44,7 @@ function MyPodInner() {
             <Server className="w-5 h-5 text-primary" /> My Pod
           </h1>
           <p className="text-sm text-muted-foreground">
-            Connect your RunPod via SSH + ComfyUI URL, queue jobs, results land in Google Drive.
+            Connect your RunPod via SSH + ComfyUI URL. Talk = Fish TTS + InfiniteTalk → Google Drive.
           </p>
         </div>
 

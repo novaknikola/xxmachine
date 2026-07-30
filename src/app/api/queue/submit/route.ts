@@ -108,6 +108,19 @@ export interface MyPodAnimateJobInput {
   items: { driveFileId: string; name: string }[]
 }
 
+export interface MyPodTalkJobInput {
+  inputDriveFolderId: string
+  outputDriveFolderId: string
+  fishVoiceId: string
+  style?: string
+  items: {
+    driveFileId: string
+    name: string
+    text: string
+    spokenText?: string
+  }[]
+}
+
 const MAX_CAPTION_ITEMS = 200
 const MAX_TRANSCRIBE_ITEMS = 200
 const MAX_OCR_ITEMS = 200
@@ -146,6 +159,19 @@ export type QueueSubmitBody =
   | {
       job_type: 'my_pod_animate'
       input: { inputDriveFolderId: string; outputDriveFolderId: string }
+    }
+  | {
+      job_type: 'my_pod_talk'
+      input: {
+        inputDriveFolderId: string
+        outputDriveFolderId: string
+        fishVoiceId: string
+        style?: string
+        /** One caption/script per line; paired with images (cycled if counts differ). */
+        texts: string[]
+        /** Optional spoken overrides (1 per line); blank line = use Text. */
+        spokenTexts?: string[]
+      }
     }
   | { job_type: 'bulk_carousel'; input: BulkCarouselJobInput }
 
@@ -468,6 +494,77 @@ export async function POST(req: NextRequest) {
       outputDriveFolderId: outputDriveFolderId.trim(),
       referenceImageId: ref.id,
       referenceImageName: ref.name,
+      items,
+    }
+    const row = await one<{ id: string }>(
+      `INSERT INTO generation_queue (user_id, job_type, input, total_items)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [user.id, body.job_type, JSON.stringify(input), items.length],
+    )
+    return NextResponse.json({ id: row!.id })
+  }
+
+  if (body.job_type === 'my_pod_talk') {
+    const {
+      inputDriveFolderId, outputDriveFolderId, fishVoiceId, style, texts, spokenTexts,
+    } = body.input ?? {}
+    if (!inputDriveFolderId?.trim() || !outputDriveFolderId?.trim()) {
+      return NextResponse.json({ error: 'inputDriveFolderId and outputDriveFolderId required' }, { status: 400 })
+    }
+    if (!fishVoiceId?.trim()) {
+      return NextResponse.json({ error: 'fishVoiceId required (Fish Audio voice reference ID)' }, { status: 400 })
+    }
+    const cleanTexts = (Array.isArray(texts) ? texts : [])
+      .map(t => (typeof t === 'string' ? t.trim() : ''))
+      .filter(Boolean)
+      .slice(0, MAX_COMFYUI_ITEMS)
+    if (!cleanTexts.length) {
+      return NextResponse.json({ error: 'At least one text line required' }, { status: 400 })
+    }
+    try {
+      const { requireHealthyPodSession } = await import('@/lib/my-pod/session')
+      const secrets = await requireHealthyPodSession(user.id)
+      if (!secrets.fishApiKey?.trim()) {
+        return NextResponse.json(
+          { error: 'Fish API key required — paste it in My Pod → Connection' },
+          { status: 400 },
+        )
+      }
+    } catch (err) {
+      return NextResponse.json({ error: err instanceof Error ? err.message : 'Pod session required' }, { status: 400 })
+    }
+
+    let files
+    try {
+      files = await listDriveFiles(inputDriveFolderId.trim(), 'image/')
+    } catch (err) {
+      return NextResponse.json({ error: `Could not read input Drive folder: ${err instanceof Error ? err.message : 'failed'}` }, { status: 400 })
+    }
+    if (!files.length) return NextResponse.json({ error: 'Input Drive folder has no image files' }, { status: 400 })
+
+    const spokenLines = Array.isArray(spokenTexts)
+      ? spokenTexts.map(t => (typeof t === 'string' ? t.trim() : ''))
+      : []
+
+    const count = Math.min(MAX_COMFYUI_ITEMS, Math.max(cleanTexts.length, files.length))
+    const items = Array.from({ length: count }, (_, i) => {
+      const file = files[i % files.length]
+      const text = cleanTexts[i % cleanTexts.length]
+      const spoken = spokenLines[i]?.trim()
+      return {
+        driveFileId: file.id,
+        name: file.name,
+        text,
+        spokenText: spoken || undefined,
+      }
+    })
+
+    const input: MyPodTalkJobInput = {
+      inputDriveFolderId: inputDriveFolderId.trim(),
+      outputDriveFolderId: outputDriveFolderId.trim(),
+      fishVoiceId: fishVoiceId.trim(),
+      style: style?.trim() || undefined,
       items,
     }
     const row = await one<{ id: string }>(

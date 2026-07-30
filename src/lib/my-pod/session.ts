@@ -16,6 +16,7 @@ export interface PodSessionPublic {
   sshPort: number | null
   sshUser: string | null
   remoteWorkRoot: string | null
+  hasFishApiKey: boolean
   lastOkAt: string | null
   lastError: string | null
   expiresAt: string | null
@@ -25,6 +26,7 @@ export interface PodSessionSecrets {
   comfyBaseUrl: string
   ssh: SshAuth
   comfyApiToken: string | null
+  fishApiKey: string | null
   remoteWorkRoot: string
   expiresAt: Date
 }
@@ -38,16 +40,19 @@ interface PodSessionRow {
   ssh_auth_type: 'password' | 'private_key'
   ssh_auth_enc: string
   comfy_api_token_enc: string | null
+  fish_api_key_enc: string | null
   remote_work_root: string
   last_ok_at: Date | null
   last_error: string | null
   expires_at: Date
 }
 
-/** Only what the user pastes from RunPod Connect. */
+/** Only what the user pastes in My Pod → Connection. */
 export interface SavePodSessionInput {
   comfyBaseUrl: string
   sshCommand: string
+  /** Fish Audio API key. Blank keeps existing saved key. */
+  fishApiKey?: string
 }
 
 function rowToSecrets(row: PodSessionRow): PodSessionSecrets {
@@ -65,6 +70,9 @@ function rowToSecrets(row: PodSessionRow): PodSessionSecrets {
     comfyApiToken: row.comfy_api_token_enc
       ? decryptSecret(row.comfy_api_token_enc, MY_POD_SECRET_PURPOSE)
       : null,
+    fishApiKey: row.fish_api_key_enc
+      ? decryptSecret(row.fish_api_key_enc, MY_POD_SECRET_PURPOSE)
+      : null,
     remoteWorkRoot: row.remote_work_root,
     expiresAt: new Date(row.expires_at),
   }
@@ -80,6 +88,7 @@ export function toPublic(row: PodSessionRow | null, healthyOverride?: boolean): 
       sshPort: null,
       sshUser: null,
       remoteWorkRoot: null,
+      hasFishApiKey: false,
       lastOkAt: null,
       lastError: null,
       expiresAt: null,
@@ -95,6 +104,7 @@ export function toPublic(row: PodSessionRow | null, healthyOverride?: boolean): 
     sshPort: row.ssh_port,
     sshUser: row.ssh_user,
     remoteWorkRoot: row.remote_work_root,
+    hasFishApiKey: !!row.fish_api_key_enc,
     lastOkAt: row.last_ok_at ? new Date(row.last_ok_at).toISOString() : null,
     lastError: row.last_error,
     expiresAt: new Date(row.expires_at).toISOString(),
@@ -205,11 +215,22 @@ export async function savePodSession(
   // Placeholder only — runtime always uses resolvePlatformSshPrivateKey()
   const sshAuthEnc = encryptSecret('platform', MY_POD_SECRET_PURPOSE)
 
+  const existing = await getPodSessionRow(userId)
+  const fishIncoming = input.fishApiKey?.trim() ?? ''
+  let fishEnc: string | null
+  if (fishIncoming) {
+    fishEnc = encryptSecret(fishIncoming, MY_POD_SECRET_PURPOSE)
+  } else if (existing?.fish_api_key_enc) {
+    fishEnc = existing.fish_api_key_enc
+  } else {
+    fishEnc = null
+  }
+
   await query(
     `INSERT INTO pod_sessions (
        user_id, comfy_base_url, ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_auth_enc,
-       comfy_api_token_enc, remote_work_root, last_ok_at, last_error, expires_at, updated_at
-     ) VALUES ($1,$2,$3,$4,$5,'private_key',$6,NULL,$7, now(), NULL, $8, now())
+       comfy_api_token_enc, fish_api_key_enc, remote_work_root, last_ok_at, last_error, expires_at, updated_at
+     ) VALUES ($1,$2,$3,$4,$5,'private_key',$6,NULL,$7,$8, now(), NULL, $9, now())
      ON CONFLICT (user_id) DO UPDATE SET
        comfy_base_url = EXCLUDED.comfy_base_url,
        ssh_host = EXCLUDED.ssh_host,
@@ -218,6 +239,7 @@ export async function savePodSession(
        ssh_auth_type = EXCLUDED.ssh_auth_type,
        ssh_auth_enc = EXCLUDED.ssh_auth_enc,
        comfy_api_token_enc = NULL,
+       fish_api_key_enc = EXCLUDED.fish_api_key_enc,
        remote_work_root = EXCLUDED.remote_work_root,
        last_ok_at = now(),
        last_error = NULL,
@@ -225,7 +247,7 @@ export async function savePodSession(
        updated_at = now()`,
     [
       userId, comfyBaseUrl, sshHost, sshPort, sshUser, sshAuthEnc,
-      remoteWorkRoot, expiresAt.toISOString(),
+      fishEnc, remoteWorkRoot, expiresAt.toISOString(),
     ],
   )
 

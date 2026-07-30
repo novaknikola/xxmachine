@@ -20,11 +20,13 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({})) as {
     comfyBaseUrl?: string
     sshCommand?: string
+    fishApiKey?: string
   }
   try {
     const session = await savePodSession(user.id, {
       comfyBaseUrl: body.comfyBaseUrl ?? '',
       sshCommand: body.sshCommand ?? '',
+      fishApiKey: body.fishApiKey,
     })
     return NextResponse.json({ session })
   } catch (err) {

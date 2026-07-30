@@ -15,6 +15,7 @@ interface PodSession {
   sshHostMasked: string | null
   sshPort: number | null
   sshUser: string | null
+  hasFishApiKey: boolean
   lastOkAt: string | null
   lastError: string | null
 }
@@ -26,6 +27,7 @@ export function ConnectionTab() {
   const [testing, setTesting] = useState(false)
   const [comfyBaseUrl, setComfyBaseUrl] = useState('')
   const [sshCommand, setSshCommand] = useState('')
+  const [fishApiKey, setFishApiKey] = useState('')
 
   const fetchSession = useCallback(async () => {
     try {
@@ -47,6 +49,10 @@ export function ConnectionTab() {
       toast.error('Paste ComfyUI URL and SSH command')
       return
     }
+    if (!fishApiKey.trim() && !session?.hasFishApiKey) {
+      toast.error('Paste your Fish Audio API key (needed for Talk)')
+      return
+    }
     setSaving(true)
     try {
       const res = await fetch('/api/my-pod/session', {
@@ -55,11 +61,13 @@ export function ConnectionTab() {
         body: JSON.stringify({
           comfyBaseUrl: comfyBaseUrl.trim(),
           sshCommand: sshCommand.trim(),
+          fishApiKey: fishApiKey.trim() || undefined,
         }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Connect failed')
       setSession(data.session)
+      setFishApiKey('')
       toast.success('Pod connected')
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed')
@@ -88,6 +96,7 @@ export function ConnectionTab() {
     const res = await fetch('/api/my-pod/session', { method: 'DELETE' })
     if (res.ok) {
       setSession(null)
+      setFishApiKey('')
       toast.success('Disconnected')
     } else {
       toast.error('Could not disconnect')
@@ -125,6 +134,9 @@ export function ConnectionTab() {
               <p className="text-xs text-muted-foreground">
                 SSH {session.sshUser}@{session.sshHostMasked}:{session.sshPort}
               </p>
+              <p className="text-xs text-muted-foreground">
+                Fish API key: {session.hasFishApiKey ? 'saved' : 'missing (required for Talk)'}
+              </p>
               {session.lastOkAt && (
                 <p className="text-xs text-muted-foreground">Last OK: {new Date(session.lastOkAt).toLocaleString()}</p>
               )}
@@ -143,7 +155,7 @@ export function ConnectionTab() {
             </>
           ) : (
             <p className="text-muted-foreground text-sm">
-              Paste the two lines from RunPod → Connect. Nothing else.
+              Paste ComfyUI URL + SSH from RunPod Connect, plus your Fish Audio API key for Talk.
             </p>
           )}
         </CardContent>
@@ -172,6 +184,22 @@ export function ConnectionTab() {
               onChange={e => setSshCommand(e.target.value)}
               placeholder="ssh y6i8rlwrcqamk8-64410e02@ssh.runpod.io -i ~/.ssh/id_ed25519"
               className="h-10 text-sm font-mono"
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">
+              Fish Audio API key{' '}
+              {session?.hasFishApiKey && (
+                <span className="opacity-60 font-normal">(leave blank to keep saved)</span>
+              )}
+            </Label>
+            <Input
+              type="password"
+              value={fishApiKey}
+              onChange={e => setFishApiKey(e.target.value)}
+              placeholder={session?.hasFishApiKey ? '•••••••• (saved)' : 'fish_…'}
+              className="h-10 text-sm font-mono"
+              autoComplete="off"
             />
           </div>
           <Button className="w-full h-10" onClick={connect} disabled={saving}>

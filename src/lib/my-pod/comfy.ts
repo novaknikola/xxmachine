@@ -9,7 +9,10 @@ export {
 } from '@/lib/my-pod/parse-ssh'
 
 export function comfyHeaders(apiToken?: string | null): HeadersInit {
-  const h: Record<string, string> = {}
+  const h: Record<string, string> = {
+    // RunPod Cloudflare proxy 403s bare Node fetch without a browser-like UA.
+    'User-Agent': 'xxmachine-my-pod/1.0',
+  }
   if (apiToken) h.Authorization = `Bearer ${apiToken}`
   return h
 }

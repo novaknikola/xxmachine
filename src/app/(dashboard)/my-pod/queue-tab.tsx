@@ -31,9 +31,10 @@ interface Job {
   created_at: string
 }
 
-const MY_POD_TYPES = new Set(['comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate'])
+const MY_POD_TYPES = new Set(['comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk'])
 
 function typeLabel(t: string) {
+  if (t === 'my_pod_talk') return 'Talk (Fish + InfiniteTalk)'
   if (t === 'my_pod_i2v') return 'WAN I2V'
   if (t === 'my_pod_animate') return 'WAN Animate'
   return 'Simple template'

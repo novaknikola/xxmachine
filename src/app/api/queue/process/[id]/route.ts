@@ -21,14 +21,15 @@ import { randomUUID } from 'crypto'
 import type {
   BulkImageJobItem, VideoRepurposeJobInput, VideoCaptionJobInput, VideoCaptionItem,
   VideoTranscribeJobInput, VideoOcrJobInput, CaptionShuffleJobInput, CaptionGenerateJobInput, ComfyUIPodBulkJobInput,
-  BulkCarouselJobInput, MyPodI2vJobInput, MyPodAnimateJobInput,
+  BulkCarouselJobInput, MyPodI2vJobInput, MyPodAnimateJobInput, MyPodTalkJobInput,
 } from '../../submit/route'
 import { getPodSessionSecrets } from '@/lib/my-pod/session'
 import { ensureRemoteWorkDir, cleanupRemoteJobDir } from '@/lib/my-pod/ssh'
 import {
   uploadImageToComfy, submitComfyPrompt, pollComfyResult, downloadFromComfy, probeComfyHealth,
 } from '@/lib/my-pod/comfy'
-import { runI2vItem, runAnimateItem } from '@/lib/my-pod/runners'
+import { runI2vItem, runAnimateItem, runTalkItem } from '@/lib/my-pod/runners'
+import { fishTts } from '@/lib/my-pod/fish-tts'
 import {
   processMultiShotJob,
   type MonitorMultiShotJobInput,
@@ -795,6 +796,90 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       }
 
       await cleanupRemoteJobDir(session.ssh, remoteJobDir)
+      await query(`UPDATE generation_queue SET status='done', finished_at=now(), progress=100 WHERE id=$1`, [id])
+      return NextResponse.json({ ok: true, done: doneCount })
+    }
+
+    // ── my_pod_talk (InfiniteTalk + Fish TTS) ──────────────────────────────────
+    if (job.job_type === 'my_pod_talk') {
+      const input = job.input as unknown as MyPodTalkJobInput
+      const session = await getPodSessionSecrets(job.user_id)
+      if (!session) throw new Error('Pod session expired — reconnect in My Pod')
+
+      const health = await probeComfyHealth(session.comfyBaseUrl, session.comfyApiToken)
+      if (!health.ok) throw new Error(`Pod offline — ${health.error}`)
+
+      const fishKey = session.fishApiKey?.trim()
+      if (!fishKey) throw new Error('Fish API key missing — reconnect in My Pod → Connection')
+
+      // Talk is fully remote HTTP (like sheets COMFY_REMOTE=1) — SSH disk check is best-effort.
+      let remoteJobDir: string | null = null
+      try {
+        const d = await ensureRemoteWorkDir(session.ssh, session.remoteWorkRoot, id)
+        remoteJobDir = d.remoteJobDir
+      } catch (err) {
+        console.warn('[my_pod_talk] SSH workdir skipped:', err instanceof Error ? err.message : err)
+      }
+      const rows: MyPodRow[] = job.output?.myPodRows ? [...job.output.myPodRows] : []
+      let doneCount = job.done_items
+
+      for (let i = doneCount; i < input.items.length; i++) {
+        const item = input.items[i]
+        try {
+          await query(
+            `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'downloading_inputs'), done_items=$2, progress=$3 WHERE id=$4`,
+            [JSON.stringify(rows), doneCount, Math.round((doneCount / input.items.length) * 100), id],
+          )
+          const imgBuf = await downloadDriveFile(item.driveFileId)
+
+          await query(
+            `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'fish_tts') WHERE id=$2`,
+            [JSON.stringify(rows), id],
+          )
+          const speechSource = item.spokenText?.trim() || item.text
+          const audioBuf = await fishTts({
+            apiKey: fishKey,
+            voiceId: input.fishVoiceId,
+            text: speechSource,
+            style: input.style,
+          })
+
+          await query(
+            `UPDATE generation_queue SET output = jsonb_build_object('myPodRows', $1::jsonb, 'stage', 'running') WHERE id=$2`,
+            [JSON.stringify(rows), id],
+          )
+          const result = await runTalkItem({
+            comfyBaseUrl: session.comfyBaseUrl,
+            apiToken: session.comfyApiToken,
+            ssh: session.ssh,
+            imageBuffer: imgBuf,
+            imageName: item.name,
+            audioBuffer: audioBuf,
+            jobId: `${id}_${i}`,
+          })
+          const ext = result.filename.split('.').pop() ?? 'mp4'
+          const uploaded = await uploadToDriveFolder(
+            input.outputDriveFolderId,
+            `${item.name.replace(/\.[^.]+$/, '')}_talk.${ext}`,
+            result.buffer,
+            ext === 'webm' ? 'video/webm' : 'video/mp4',
+          )
+          rows.push({ label: item.name, status: 'done', stage: 'done', driveLink: uploaded.link })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'failed'
+          rows.push({ label: item.name, status: 'error', stage: 'error', error: msg })
+          console.error(`[queue/process] my_pod_talk ${id} item ${i}:`, msg)
+        }
+        doneCount++
+        await query(
+          `UPDATE generation_queue
+              SET done_items=$1, progress=$2, output=jsonb_build_object('myPodRows', $3::jsonb, 'stage', 'uploading')
+            WHERE id=$4`,
+          [doneCount, Math.round((doneCount / input.items.length) * 100), JSON.stringify(rows), id],
+        )
+      }
+
+      if (remoteJobDir) await cleanupRemoteJobDir(session.ssh, remoteJobDir)
       await query(`UPDATE generation_queue SET status='done', finished_at=now(), progress=100 WHERE id=$1`, [id])
       return NextResponse.json({ ok: true, done: doneCount })
     }

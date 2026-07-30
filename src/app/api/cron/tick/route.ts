@@ -86,7 +86,7 @@ export async function GET(req: NextRequest) {
       WHERE status = 'processing'
         AND started_at < now() - interval '30 minutes'
         AND attempts < max_attempts
-        AND job_type NOT IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate')`,
+        AND job_type NOT IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk')`,
   ).catch(err => console.error('[cron/tick] reset stuck queue jobs:', err))
 
   // My Pod: fail jobs with no progress for > 10 minutes (don't silently requeue forever)
@@ -96,12 +96,12 @@ export async function GET(req: NextRequest) {
             error = COALESCE(error, 'No progress for 10+ minutes — pod may be offline'),
             finished_at = now()
       WHERE status = 'processing'
-        AND job_type IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate')
+        AND job_type IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk')
         AND started_at < now() - interval '10 minutes'
         AND (
           output IS NULL
           OR NOT (output ? 'stage')
-          OR (output->>'stage') IN ('validating', 'uploading', 'downloading_inputs', 'building_graph')
+          OR (output->>'stage') IN ('validating', 'uploading', 'downloading_inputs', 'building_graph', 'fish_tts')
         )
         AND done_items = 0`,
   ).catch(err => console.error('[cron/tick] fail stuck my-pod jobs:', err))
@@ -114,7 +114,7 @@ export async function GET(req: NextRequest) {
             error = COALESCE(error, 'My Pod job exceeded 90 minutes — marked failed'),
             finished_at = now()
       WHERE status = 'processing'
-        AND job_type IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate')
+        AND job_type IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk')
         AND started_at < now() - interval '90 minutes'`,
   ).catch(err => console.error('[cron/tick] fail long my-pod jobs:', err))
 
@@ -124,7 +124,7 @@ export async function GET(req: NextRequest) {
     const processingCount = await one<{ count: number }>(
       `SELECT count(*)::int AS count FROM generation_queue
         WHERE status = 'processing'
-          AND job_type NOT IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate')`,
+          AND job_type NOT IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk')`,
     )
     const slots = Math.max(0, QUEUE_CONCURRENCY - (processingCount?.count ?? 0))
 
@@ -132,7 +132,7 @@ export async function GET(req: NextRequest) {
       const pending = await rows<{ id: string }>(
         `SELECT id FROM generation_queue
           WHERE status = 'pending'
-            AND job_type NOT IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate')
+            AND job_type NOT IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk')
           ORDER BY created_at LIMIT $1`,
         [slots],
       )
@@ -158,10 +158,10 @@ export async function GET(req: NextRequest) {
     console.error('[cron/tick] queue processing error:', err)
   }
 
-  // ── My Pod jobs (comfyui_pod_bulk + i2v + animate) — 1 concurrent per user ──
+  // ── My Pod jobs (bulk + i2v + animate + talk) — 1 concurrent per user ──
   let comfyStarted = 0
   try {
-    const myPodTypes = `('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate')`
+    const myPodTypes = `('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk')`
     const pendingComfy = await rows<{ id: string; user_id: string }>(
       `SELECT id, user_id FROM generation_queue
         WHERE status = 'pending' AND job_type IN ${myPodTypes}

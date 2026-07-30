@@ -159,3 +159,56 @@ export async function runAnimateItem(opts: {
   )
   return { buffer, filename }
 }
+
+export function talkWorkflowPath(): string {
+  return process.env.MY_POD_TALK_WORKFLOW_PATH
+    || join(WORKERS_DIR, 'templates', 'wanvideo_infinitetalk_template.json')
+}
+
+/** InfiniteTalk: portrait image + Fish TTS wav → talking video (HTTP upload only). */
+export async function runTalkItem(opts: {
+  comfyBaseUrl: string
+  apiToken?: string | null
+  ssh: SshAuth
+  imageBuffer: Buffer
+  imageName: string
+  audioBuffer: Buffer
+  jobId: string
+}): Promise<{ buffer: Buffer; filename: string }> {
+  void opts.ssh
+  const workflowPath = talkWorkflowPath()
+  if (!existsSync(workflowPath)) {
+    throw new Error(`InfiniteTalk template missing at ${workflowPath}`)
+  }
+  const runScript = join(WORKERS_DIR, 'talk_run.py')
+  if (!existsSync(runScript)) {
+    throw new Error('Talk Python sidecar missing: workers/my_pod/talk_run.py')
+  }
+
+  const imgRemote = `xxm_talk_${randomUUID().slice(0, 8)}_${opts.imageName.replace(/[^\w.-]/g, '_')}`
+  const audioRemote = `xxm_talk_${randomUUID().slice(0, 8)}.wav`
+
+  await uploadFileToComfy(opts.comfyBaseUrl, opts.imageBuffer, imgRemote, opts.apiToken)
+  await uploadFileToComfy(opts.comfyBaseUrl, opts.audioBuffer, audioRemote, opts.apiToken)
+
+  const { stdout } = await runPython(runScript, {
+    COMFY_URL: opts.comfyBaseUrl,
+    COMFY_API_TOKEN: opts.apiToken ?? '',
+    WORKFLOW_PATH: workflowPath,
+    INPUT_IMAGE: imgRemote,
+    INPUT_AUDIO: audioRemote,
+    OUTPUT_PREFIX: `video/xxm_talk_${opts.jobId}`,
+    JOB_TIMEOUT_SEC: '900',
+  }, 960_000)
+
+  const m = stdout.match(/DONE filename=(\S+) subfolder=(\S*)/)
+  if (!m) throw new Error(`Talk sidecar unexpected output: ${stdout.slice(-800)}`)
+  const filename = m[1]
+  const subfolder = m[2] === '-' ? '' : m[2]
+  const buffer = await downloadFromComfy(
+    opts.comfyBaseUrl,
+    { filename, subfolder, type: 'output' },
+    opts.apiToken,
+  )
+  return { buffer, filename }
+}
