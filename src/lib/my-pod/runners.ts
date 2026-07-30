@@ -88,7 +88,9 @@ function runPython(
     let stdout = ''
     let stderr = ''
     const beat = onHeartbeat
-      ? setInterval(() => { void onHeartbeat().catch(() => {}) }, 60_000)
+      ? setInterval(() => {
+          void Promise.resolve(onHeartbeat()).catch(() => {})
+        }, 60_000)
       : null
     const timer = setTimeout(() => {
       child.kill('SIGKILL')
