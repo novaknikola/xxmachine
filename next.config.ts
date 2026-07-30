@@ -13,6 +13,8 @@ const nextConfig: NextConfig = {
     'playwright-core',
     'puppeteer-extra-plugin-stealth',
     'instagram-private-api',
+    'ssh2',
+    'cpu-features',
   ],
 };
 
