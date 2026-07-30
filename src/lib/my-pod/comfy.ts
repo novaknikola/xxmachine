@@ -138,7 +138,7 @@ export async function pollComfyResult(
     await new Promise(r => setTimeout(r, interval))
     if (opts?.onHeartbeat && Date.now() - lastBeat > 60_000) {
       lastBeat = Date.now()
-      await opts.onHeartbeat().catch(() => {})
+      try { await opts.onHeartbeat() } catch { /* lease touch best-effort */ }
     }
     const res = await fetch(`${base}/history/${promptId}`, {
       headers: comfyHeaders(token),
