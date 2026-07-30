@@ -3,7 +3,6 @@
 import { Suspense, useEffect, useState } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import { ConnectionTab } from './connection-tab'
-import { TemplatesTab } from '../comfyui/templates-tab'
 import { GenerateTab } from './generate-tab'
 import { QueueTab } from './queue-tab'
 import { Loader2, Server } from 'lucide-react'
@@ -12,7 +11,6 @@ const TABS = [
   { id: 'connection', label: 'Connection' },
   { id: 'generate', label: 'Generate' },
   { id: 'queue', label: 'Queue' },
-  { id: 'templates', label: 'Templates' },
 ] as const
 
 type TabId = (typeof TABS)[number]['id']
@@ -29,6 +27,7 @@ function MyPodInner() {
 
   useEffect(() => {
     if (isTab(tabParam)) setTab(tabParam)
+    else if (tabParam === 'templates') setTab('generate')
   }, [tabParam])
 
   function go(id: TabId) {
@@ -44,7 +43,7 @@ function MyPodInner() {
             <Server className="w-5 h-5 text-primary" /> My Pod
           </h1>
           <p className="text-sm text-muted-foreground">
-            Connect your RunPod via SSH + ComfyUI URL. Talk = Fish TTS + InfiniteTalk → Google Drive.
+            Connect your RunPod, run InfiniteTalk batches, watch progress in Queue.
           </p>
         </div>
 
@@ -66,7 +65,6 @@ function MyPodInner() {
         </div>
 
         {tab === 'connection' && <ConnectionTab />}
-        {tab === 'templates' && <TemplatesTab />}
         {tab === 'generate' && <GenerateTab />}
         {tab === 'queue' && <QueueTab />}
       </div>
