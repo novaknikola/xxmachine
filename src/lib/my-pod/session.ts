@@ -153,7 +153,9 @@ export async function validatePodConnection(input: {
       input.remoteWorkRoot,
     )
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    // Shell mkdir/df may fail on some templates; Comfy HTTP is enough for file transfer
+    // (RunPod SSH often has no SCP/SFTP). Soft-warn but continue if SSH probe already passed.
+    console.warn('[my-pod] remote work dir check:', err instanceof Error ? err.message : err)
   }
 
   const comfy = await probeComfyHealth(input.comfyBaseUrl, input.comfyApiToken)

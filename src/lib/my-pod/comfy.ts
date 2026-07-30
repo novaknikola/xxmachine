@@ -1,20 +1,12 @@
-/** RunPod ComfyUI proxy URL + SSH helpers for My Pod. */
+/** RunPod ComfyUI HTTP helpers for My Pod (server-side). */
 
-export const RUNPOD_COMFY_URL_RE = /^https:\/\/[a-z0-9-]+-\d+\.proxy\.runpod\.net\/?$/i
-export const RUNPOD_SSH_HOST_RE = /^[a-z0-9.-]+\.proxy\.runpod\.net$/i
-
-export function normalizeComfyUrl(url: string): string {
-  const trimmed = url.trim().replace(/\/+$/, '')
-  if (!RUNPOD_COMFY_URL_RE.test(trimmed)) {
-    throw new Error('ComfyUI URL must look like https://<pod-id>-8188.proxy.runpod.net')
-  }
-  return trimmed
-}
-
-export function maskHost(host: string): string {
-  if (host.length <= 12) return host
-  return `${host.slice(0, 6)}…${host.slice(-8)}`
-}
+export {
+  RUNPOD_COMFY_URL_RE,
+  RUNPOD_SSH_HOST_RE,
+  normalizeComfyUrl,
+  maskHost,
+  parseRunpodSshCommand,
+} from '@/lib/my-pod/parse-ssh'
 
 export function comfyHeaders(apiToken?: string | null): HeadersInit {
   const h: Record<string, string> = {}
@@ -36,7 +28,6 @@ export async function probeComfyHealth(
       signal: ctrl.signal,
     })
     if (res.ok) return { ok: true }
-    // Some templates only expose object_info
     const res2 = await fetch(`${base}/object_info`, {
       headers: comfyHeaders(apiToken),
       signal: ctrl.signal,
@@ -58,7 +49,9 @@ export interface PodOutputFile {
   type?: string
 }
 
-export async function uploadImageToComfy(
+/** Upload any file into ComfyUI input/ via HTTP (images and videos).
+ *  Prefer this over SFTP — RunPod SSH gateway often has no SCP/SFTP. */
+export async function uploadFileToComfy(
   comfyBaseUrl: string,
   buffer: Buffer,
   filename: string,
@@ -73,8 +66,17 @@ export async function uploadImageToComfy(
     body: fd,
   })
   const data = await res.json().catch(() => ({})) as { error?: string; name?: string; subfolder?: string }
-  if (!res.ok) throw new Error(data.error ?? `Pod image upload failed: ${res.status}`)
+  if (!res.ok) throw new Error(data.error ?? `Pod upload failed: ${res.status}`)
   return data.subfolder ? `${data.subfolder}/${data.name}` : (data.name as string)
+}
+
+export async function uploadImageToComfy(
+  comfyBaseUrl: string,
+  buffer: Buffer,
+  filename: string,
+  apiToken?: string | null,
+): Promise<string> {
+  return uploadFileToComfy(comfyBaseUrl, buffer, filename, apiToken)
 }
 
 export async function submitComfyPrompt(

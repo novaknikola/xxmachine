@@ -9,6 +9,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { toast } from 'sonner'
 import { Loader2, Plug, PlugZap, RefreshCw, Unplug, CheckCircle2, XCircle } from 'lucide-react'
+import { parseRunpodSshCommand } from '@/lib/my-pod/parse-ssh'
 
 interface PodSession {
   connected: boolean
@@ -30,10 +31,11 @@ export function ConnectionTab() {
   const [testing, setTesting] = useState(false)
 
   const [comfyBaseUrl, setComfyBaseUrl] = useState('')
-  const [sshHost, setSshHost] = useState('')
+  const [sshPaste, setSshPaste] = useState('')
+  const [sshHost, setSshHost] = useState('ssh.runpod.io')
   const [sshPort, setSshPort] = useState('22')
-  const [sshUser, setSshUser] = useState('root')
-  const [sshAuthType, setSshAuthType] = useState<'password' | 'private_key'>('password')
+  const [sshUser, setSshUser] = useState('')
+  const [sshAuthType, setSshAuthType] = useState<'password' | 'private_key'>('private_key')
   const [sshSecret, setSshSecret] = useState('')
   const [comfyApiToken, setComfyApiToken] = useState('')
   const [remoteWorkRoot, setRemoteWorkRoot] = useState('/workspace/xxmachine')
@@ -56,9 +58,20 @@ export function ConnectionTab() {
 
   useEffect(() => { fetchSession() }, [fetchSession])
 
+  function applySshPaste(raw: string) {
+    setSshPaste(raw)
+    const parsed = parseRunpodSshCommand(raw)
+    if (!parsed) return
+    setSshHost(parsed.sshHost)
+    setSshPort(String(parsed.sshPort))
+    setSshUser(parsed.sshUser)
+    setSshAuthType('private_key')
+    toast.success(`Parsed SSH → ${parsed.sshUser}@${parsed.sshHost}`)
+  }
+
   async function connect() {
-    if (!comfyBaseUrl.trim() || !sshHost.trim() || !sshSecret.trim()) {
-      toast.error('ComfyUI URL, SSH host, and SSH secret are required')
+    if (!comfyBaseUrl.trim() || !sshHost.trim() || !sshUser.trim() || !sshSecret.trim()) {
+      toast.error('ComfyUI URL, SSH user/host, and private key are required')
       return
     }
     setSaving(true)
@@ -163,7 +176,10 @@ export function ConnectionTab() {
               </div>
             </>
           ) : (
-            <p className="text-muted-foreground text-sm">No pod connected. Paste SSH + ComfyUI URL below.</p>
+            <p className="text-muted-foreground text-sm">
+              From RunPod Connect: paste the <span className="text-foreground">comfy</span> HTTP URL + SSH line below.
+              File transfer uses Comfy HTTP (RunPod SSH has no SCP/SFTP).
+            </p>
           )}
         </CardContent>
       </Card>
@@ -176,11 +192,20 @@ export function ConnectionTab() {
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="space-y-1">
-            <Label className="text-xs text-muted-foreground">ComfyUI URL</Label>
+            <Label className="text-xs text-muted-foreground">ComfyUI URL (HTTP Services → comfy / 8188)</Label>
             <Input
               value={comfyBaseUrl}
               onChange={e => setComfyBaseUrl(e.target.value)}
-              placeholder="https://abc123-8188.proxy.runpod.net"
+              placeholder="https://y6i8rlwrcqamk8-8188.proxy.runpod.net"
+              className="h-10 text-sm font-mono"
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">Paste SSH command <span className="opacity-60">(optional — auto-fills fields)</span></Label>
+            <Input
+              value={sshPaste}
+              onChange={e => applySshPaste(e.target.value)}
+              placeholder="ssh y6i8rlwrcqamk8-64410e02@ssh.runpod.io -i ~/.ssh/id_ed25519"
               className="h-10 text-sm font-mono"
             />
           </div>
@@ -190,7 +215,7 @@ export function ConnectionTab() {
               <Input
                 value={sshHost}
                 onChange={e => setSshHost(e.target.value)}
-                placeholder="ssh.proxy.runpod.net or pod host"
+                placeholder="ssh.runpod.io"
                 className="h-10 text-sm font-mono"
               />
             </div>
@@ -202,40 +227,47 @@ export function ConnectionTab() {
           <div className="grid grid-cols-2 gap-2">
             <div className="space-y-1">
               <Label className="text-xs text-muted-foreground">SSH user</Label>
-              <Input value={sshUser} onChange={e => setSshUser(e.target.value)} className="h-10 text-sm font-mono" />
+              <Input
+                value={sshUser}
+                onChange={e => setSshUser(e.target.value)}
+                placeholder="y6i8rlwrcqamk8-64410e02"
+                className="h-10 text-sm font-mono"
+              />
             </div>
             <div className="space-y-1">
               <Label className="text-xs text-muted-foreground">Auth</Label>
               <Select value={sshAuthType} onValueChange={v => setSshAuthType(v as 'password' | 'private_key')}>
                 <SelectTrigger className="h-10 text-xs"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="password">Password</SelectItem>
                   <SelectItem value="private_key">Private key</SelectItem>
+                  <SelectItem value="password">Password</SelectItem>
                 </SelectContent>
               </Select>
             </div>
           </div>
           <div className="space-y-1">
             <Label className="text-xs text-muted-foreground">
-              {sshAuthType === 'password' ? 'SSH password' : 'SSH private key'}
+              {sshAuthType === 'password' ? 'SSH password' : 'SSH private key contents'}
             </Label>
             {sshAuthType === 'password' ? (
               <Input
                 type="password"
                 value={sshSecret}
                 onChange={e => setSshSecret(e.target.value)}
-                placeholder={session?.connected ? '•••••••• (leave blank to keep)' : 'password'}
                 className="h-10 text-sm font-mono"
               />
             ) : (
               <Textarea
                 value={sshSecret}
                 onChange={e => setSshSecret(e.target.value)}
-                rows={4}
-                placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                rows={5}
+                placeholder={'Paste the full key from your PC:\n-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----'}
                 className="font-mono text-xs resize-none"
               />
             )}
+            <p className="text-[10px] text-muted-foreground">
+              `-i ~/.ssh/id_ed25519` means paste that file&apos;s contents here — xxmachine needs the key text, not a path on your laptop.
+            </p>
           </div>
           <div className="space-y-1">
             <Label className="text-xs text-muted-foreground">Comfy API token <span className="opacity-60">(optional)</span></Label>
@@ -259,9 +291,6 @@ export function ConnectionTab() {
               ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Validating…</>
               : <><Plug className="w-4 h-4 mr-2" />{session?.connected ? 'Reconnect' : 'Connect & validate'}</>}
           </Button>
-          <p className="text-[10px] text-muted-foreground text-center">
-            Validation probes SSH + ComfyUI /system_stats before saving. Secrets are encrypted at rest.
-          </p>
         </CardContent>
       </Card>
     </div>

@@ -3,12 +3,12 @@ import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
-  uploadImageToComfy,
+  uploadFileToComfy,
   submitComfyPrompt,
   pollComfyResult,
   downloadFromComfy,
 } from '@/lib/my-pod/comfy'
-import { sftpUpload, type SshAuth } from '@/lib/my-pod/ssh'
+import type { SshAuth } from '@/lib/my-pod/ssh'
 
 const WORKERS_DIR = join(process.cwd(), 'workers', 'my_pod')
 
@@ -60,7 +60,7 @@ function runPython(script: string, env: Record<string, string>, timeoutMs: numbe
   })
 }
 
-/** Run one I2V job against remote ComfyUI. */
+/** Run one I2V job against remote ComfyUI (HTTP upload only — no SFTP). */
 export async function runI2vItem(opts: {
   comfyBaseUrl: string
   apiToken?: string | null
@@ -70,6 +70,7 @@ export async function runI2vItem(opts: {
   prompt?: string
   jobId: string
 }): Promise<{ buffer: Buffer; filename: string }> {
+  void opts.ssh // reserved for future shell probes; RunPod gateway has no SFTP
   const templatePath = i2vTemplatePath()
   if (!existsSync(templatePath)) {
     throw new Error(
@@ -78,13 +79,7 @@ export async function runI2vItem(opts: {
   }
 
   const remoteName = `xxm_i2v_${randomUUID().slice(0, 8)}_${opts.imageName.replace(/[^\w.-]/g, '_')}`
-  let uploadedName: string
-  try {
-    uploadedName = await uploadImageToComfy(opts.comfyBaseUrl, opts.imageBuffer, remoteName, opts.apiToken)
-  } catch {
-    await sftpUpload(opts.ssh, `/app/ComfyUI/input/${remoteName}`, opts.imageBuffer)
-    uploadedName = remoteName
-  }
+  const uploadedName = await uploadFileToComfy(opts.comfyBaseUrl, opts.imageBuffer, remoteName, opts.apiToken)
 
   const api = JSON.parse(readFileSync(templatePath, 'utf8')) as Record<string, { inputs: Record<string, unknown> }>
   const ids = I2V_NODE_IDS
@@ -112,7 +107,7 @@ export async function runI2vItem(opts: {
   return { buffer, filename: video.filename }
 }
 
-/** Run one Animate job via Python build_api + remote Comfy. */
+/** Run one Animate job via Python build_api + remote Comfy (HTTP upload only). */
 export async function runAnimateItem(opts: {
   comfyBaseUrl: string
   apiToken?: string | null
@@ -124,6 +119,7 @@ export async function runAnimateItem(opts: {
   drivingFrames?: number
   jobId: string
 }): Promise<{ buffer: Buffer; filename: string }> {
+  void opts.ssh
   const workflowPath = animateWorkflowPath()
   if (!existsSync(workflowPath)) {
     throw new Error(
@@ -138,12 +134,8 @@ export async function runAnimateItem(opts: {
   const imgRemote = `xxm_anim_${randomUUID().slice(0, 8)}_${opts.imageName.replace(/[^\w.-]/g, '_')}`
   const vidRemote = `xxm_anim_${randomUUID().slice(0, 8)}_${opts.videoName.replace(/[^\w.-]/g, '_')}`
 
-  try {
-    await uploadImageToComfy(opts.comfyBaseUrl, opts.imageBuffer, imgRemote, opts.apiToken)
-  } catch {
-    await sftpUpload(opts.ssh, `/app/ComfyUI/input/${imgRemote}`, opts.imageBuffer)
-  }
-  await sftpUpload(opts.ssh, `/app/ComfyUI/input/${vidRemote}`, opts.videoBuffer)
+  await uploadFileToComfy(opts.comfyBaseUrl, opts.imageBuffer, imgRemote, opts.apiToken)
+  await uploadFileToComfy(opts.comfyBaseUrl, opts.videoBuffer, vidRemote, opts.apiToken)
 
   const { stdout } = await runPython(runScript, {
     COMFY_URL: opts.comfyBaseUrl,
