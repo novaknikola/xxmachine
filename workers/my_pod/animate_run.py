@@ -30,8 +30,8 @@ def _req(url, data=None, method=None):
 
 
 def preflight_nodes():
-    """HTTP check that DWPreprocessor exists — VPS TypeScript usually installs first."""
-    required = ("DWPreprocessor", "WanAnimateToVideo")
+    """HTTP check that required Animate node types exist."""
+    required = ("DWPreprocessor", "Sam2Segmentation", "WanAnimateToVideo")
     missing = []
     for t in required:
         try:
@@ -45,10 +45,9 @@ def preflight_nodes():
         raise RuntimeError(
             "Animate preflight failed — pod missing node types: "
             + ", ".join(missing)
-            + ". xxmachine should auto-install comfyui_controlnet_aux via SSH; "
-            "if this persists, install it manually under ComfyUI/custom_nodes."
+            + ". xxmachine auto-installs comfyui_controlnet_aux + ComfyUI-segment-anything-2 via SSH."
         )
-    print("preflight OK: DWPreprocessor + WanAnimateToVideo present")
+    print("preflight OK: DWPreprocessor + Sam2Segmentation + WanAnimateToVideo present")
 
 
 def build_prompt():

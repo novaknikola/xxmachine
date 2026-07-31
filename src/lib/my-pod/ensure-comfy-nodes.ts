@@ -15,6 +15,7 @@ export interface NodePack {
 
 export const ANIMATE_REQUIRED_NODE_TYPES = [
   'DWPreprocessor',
+  'Sam2Segmentation',
   'WanAnimateToVideo',
   'SaveVideo',
 ] as const
@@ -35,6 +36,11 @@ const ANIMATE_PACKS: NodePack[] = [
     provides: ['DWPreprocessor'],
     repo: 'https://github.com/Fannovel16/comfyui_controlnet_aux.git',
     dir: 'comfyui_controlnet_aux',
+  },
+  {
+    provides: ['Sam2Segmentation'],
+    repo: 'https://github.com/kijai/ComfyUI-segment-anything-2.git',
+    dir: 'ComfyUI-segment-anything-2',
   },
 ]
 

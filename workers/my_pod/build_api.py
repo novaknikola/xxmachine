@@ -96,15 +96,17 @@ for t in types_needed:
     except Exception as e:
         print(f"WARN: {t}: {e}")
 
-# Hard-required for a valid WAN Animate API graph (nodes 100/101 = DWPreprocessor).
-# Silent skip used to cause Comfy KeyError '101' at /prompt — fail early instead.
-_REQUIRED_FOR_ANIMATE = ("DWPreprocessor", "WanAnimateToVideo", "SaveVideo")
+# Hard-required for a valid WAN Animate API graph.
+# Silent skip of missing types leaves dangling refs (e.g. Sam2Segmentation id 107,
+# DWPreprocessor 100/101) — fail early instead.
+_REQUIRED_FOR_ANIMATE = ("DWPreprocessor", "Sam2Segmentation", "WanAnimateToVideo", "SaveVideo")
 _missing_req = [t for t in _REQUIRED_FOR_ANIMATE if t not in obj_info]
 if _missing_req:
     raise SystemExit(
         "Missing Comfy node types on pod (install/auto-ensure failed): "
         + ", ".join(_missing_req)
-        + ". Need comfyui_controlnet_aux (DWPreprocessor) and WAN Animate nodes."
+        + ". Need comfyui_controlnet_aux (DWPreprocessor), "
+        "ComfyUI-segment-anything-2 (Sam2Segmentation), and WAN Animate nodes."
     )
 
 
@@ -324,7 +326,8 @@ if _missing_refs:
     raise SystemExit(
         "Built graph references missing node ids: "
         + ", ".join(sorted(_missing_refs)[:20])
-        + ". Usually DWPreprocessor (100/101) was skipped — ensure comfyui_controlnet_aux is installed."
+        + ". A required node type was skipped (not on pod /object_info) — "
+        "common: DWPreprocessor 100/101, Sam2Segmentation 107."
     )
 
 json.dump(api, open(OUTPUT_JSON, "w"), indent=2)
