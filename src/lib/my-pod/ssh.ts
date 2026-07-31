@@ -13,8 +13,9 @@ function connectConfig(auth: SshAuth): ConnectConfig {
     host: auth.host,
     port: auth.port,
     username: auth.username,
-    readyTimeout: 30_000,
-    // RunPod proxy can be flaky on first connect
+    readyTimeout: 90_000,
+    keepaliveInterval: 10_000,
+    keepaliveCountMax: 6,
     tryKeyboard: false,
   }
   if (auth.authType === 'password') {
@@ -43,16 +44,22 @@ function isPtyError(err: unknown): boolean {
   return /PTY|pseudo-?tty|pseudo-terminal/i.test(msg)
 }
 
+function isTimeoutError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return /timed out|Timeout|ECONNRESET|ECONNREFUSED|Hang up|Socket closed/i.test(msg)
+}
+
 /**
- * Run a remote command. Prefer a small PTY (RunPod ssh.runpod.io needs it).
- * Fall back without PTY. Multi-line scripts are base64-piped into bash.
+ * Run a remote command. RunPod ssh.runpod.io needs a PTY and is slow —
+ * timer starts only after the connection is ready; timeouts retry.
  */
 export async function sshExec(
   auth: SshAuth,
   command: string,
-  timeoutMs = 30_000,
+  timeoutMs = 90_000,
+  retries = 3,
 ): Promise<{ stdout: string; stderr: string; code: number }> {
-  const needsWrap = command.includes('\n') || command.length > 800
+  const needsWrap = command.includes('\n') || command.length > 400
   const remote = needsWrap
     ? `echo ${Buffer.from(command, 'utf8').toString('base64')} | base64 -d | bash`
     : command
@@ -60,6 +67,7 @@ export async function sshExec(
   const tryOnce = (opts: ExecOptions | undefined) =>
     withSsh(auth, client =>
       new Promise<{ stdout: string; stderr: string; code: number }>((resolve, reject) => {
+        // Timer starts after connect — connect has its own readyTimeout.
         const timer = setTimeout(() => reject(new Error('SSH command timed out')), timeoutMs)
         const onErr = (err: Error) => {
           clearTimeout(timer)
@@ -90,21 +98,36 @@ export async function sshExec(
     pty: { term: 'xterm-256color', cols: 120, rows: 30 },
   }
 
-  try {
-    const result = await tryOnce(withPty)
-    if (result.code !== 0 && isPtyError(result.stderr || result.stdout)) {
-      return await tryOnce(undefined)
+  let lastErr: unknown
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const result = await tryOnce(withPty)
+      if (result.code !== 0 && isPtyError(result.stderr || result.stdout)) {
+        return await tryOnce(undefined)
+      }
+      return result
+    } catch (err) {
+      lastErr = err
+      if (isPtyError(err)) {
+        try {
+          return await tryOnce(undefined)
+        } catch (err2) {
+          lastErr = err2
+        }
+      }
+      if (!isTimeoutError(err) && !isPtyError(err) && attempt === retries) break
+      if (attempt < retries) {
+        await new Promise(r => setTimeout(r, 2_000 * attempt))
+        continue
+      }
     }
-    return result
-  } catch (err) {
-    if (!isPtyError(err)) throw err
-    return await tryOnce(undefined)
   }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
 }
 
 export async function probeSsh(auth: SshAuth): Promise<{ ok: true; uname: string } | { ok: false; error: string }> {
   try {
-    const { stdout, code, stderr } = await sshExec(auth, 'echo ok && uname -a', 30_000)
+    const { stdout, code, stderr } = await sshExec(auth, 'echo ok && uname -a', 60_000)
     if (code !== 0) return { ok: false, error: stderr.trim() || `SSH exit ${code}` }
     if (!stdout.includes('ok')) return { ok: false, error: 'SSH probe failed unexpectedly' }
     return { ok: true, uname: stdout.replace(/^ok\s*/i, '').trim() }
@@ -127,7 +150,7 @@ export async function ensureRemoteWorkDir(
     `df -BG --output=avail ${JSON.stringify(root)} 2>/dev/null | tail -1 | tr -dc '0-9' || df -m ${JSON.stringify(root)} | tail -1 | awk '{print int($4/1024)}'`,
   ].join(' && ')
 
-  const { stdout, code, stderr } = await sshExec(auth, script, 60_000)
+  const { stdout, code, stderr } = await sshExec(auth, script, 90_000)
   if (code !== 0) throw new Error(`SSH mkdir failed: ${stderr.trim() || `exit ${code}`}`)
 
   const freeGb = Number.parseInt(stdout.trim().split('\n').pop() ?? '', 10)
@@ -140,7 +163,7 @@ export async function ensureRemoteWorkDir(
 export async function cleanupRemoteJobDir(auth: SshAuth, remoteJobDir: string): Promise<void> {
   const safe = remoteJobDir.replace(/\/+$/, '')
   if (!safe || safe === '/' || safe.length < 10) return
-  await sshExec(auth, `rm -rf ${JSON.stringify(safe)}`, 60_000).catch(() => {})
+  await sshExec(auth, `rm -rf ${JSON.stringify(safe)}`, 90_000).catch(() => {})
 }
 
 /** Upload a buffer to a remote path via SFTP. */

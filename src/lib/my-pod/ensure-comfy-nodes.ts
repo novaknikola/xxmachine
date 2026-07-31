@@ -1,8 +1,8 @@
 /**
  * Probe Comfy /object_info for required node types; auto-install missing
- * custom_nodes packs. Works with RunPod ssh.runpod.io + Comfy proxy URL:
- * long work runs in a background shell on the pod; we only use short SSH
- * sessions and poll Comfy over HTTP.
+ * custom_nodes. Designed for RunPod ssh.runpod.io + Comfy proxy URL:
+ * at most one short SSH kickoff (background install); progress polled via
+ * Comfy HTTP; reboot via Manager HTTP when possible.
  */
 import { comfyHeaders } from '@/lib/my-pod/comfy'
 import { sshExec, type SshAuth } from '@/lib/my-pod/ssh'
@@ -11,8 +11,6 @@ export interface NodePack {
   provides: string[]
   repo: string
   dir: string
-  /** ComfyUI-Manager catalog titles (best-effort HTTP install). */
-  managerTitles?: string[]
 }
 
 export const ANIMATE_REQUIRED_NODE_TYPES = [
@@ -37,15 +35,9 @@ const ANIMATE_PACKS: NodePack[] = [
     provides: ['DWPreprocessor'],
     repo: 'https://github.com/Fannovel16/comfyui_controlnet_aux.git',
     dir: 'comfyui_controlnet_aux',
-    managerTitles: [
-      "ComfyUI's ControlNet Auxiliary Preprocessors",
-      'comfyui_controlnet_aux',
-      'ControlNet Auxiliary Preprocessors',
-    ],
   },
 ]
 
-/** kijai wrapper provides InfiniteTalk / MultiTalkWav2VecEmbeds + WanVideo* nodes. */
 const TALK_PACKS: NodePack[] = [
   {
     provides: [
@@ -55,13 +47,11 @@ const TALK_PACKS: NodePack[] = [
     ],
     repo: 'https://github.com/kijai/ComfyUI-WanVideoWrapper.git',
     dir: 'ComfyUI-WanVideoWrapper',
-    managerTitles: ['ComfyUI-WanVideoWrapper', 'WanVideoWrapper'],
   },
   {
     provides: ['VHS_VideoCombine'],
     repo: 'https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git',
     dir: 'ComfyUI-VideoHelperSuite',
-    managerTitles: ['ComfyUI-VideoHelperSuite', 'Video Helper Suite'],
   },
 ]
 
@@ -126,26 +116,6 @@ function packsForMissing(missing: string[], packs: NodePack[]): NodePack[] {
   return packs.filter(p => p.provides.some(n => missing.includes(n)))
 }
 
-async function findComfyRoot(ssh: SshAuth): Promise<string> {
-  const { stdout, code } = await sshExec(
-    ssh,
-    [
-      'for d in /workspace/ComfyUI /workspace/RunPod-ComfyUI /workspace/comfyui /ComfyUI /root/ComfyUI; do',
-      '  [ -d "$d/custom_nodes" ] && echo "$d" && exit 0',
-      'done',
-      'ls -d /home/*/ComfyUI/custom_nodes 2>/dev/null | head -1 | sed "s|/custom_nodes||" && exit 0',
-      'exit 1',
-    ].join('\n'),
-    60_000,
-  )
-  const root = stdout.trim().split('\n').filter(Boolean).pop()
-  if (code !== 0 || !root) {
-    throw new Error('Could not find ComfyUI/custom_nodes on the pod via SSH.')
-  }
-  return root
-}
-
-/** Best-effort install via ComfyUI-Manager over the public Comfy URL. */
 async function tryManagerHttpInstall(
   comfyBaseUrl: string,
   pack: NodePack,
@@ -156,7 +126,6 @@ async function tryManagerHttpInstall(
     ...comfyHeaders(apiToken),
     'Content-Type': 'application/json',
   }
-
   const payloads: unknown[] = [
     {
       install_type: 'git-clone',
@@ -166,18 +135,16 @@ async function tryManagerHttpInstall(
     },
     pack.repo,
   ]
-
   const paths = [
     '/customnode/install/git_url',
     '/api/customnode/install/git_url',
     '/customnode/install',
     '/api/customnode/install',
   ]
-
   for (const path of paths) {
     for (const body of payloads) {
       const ctrl = new AbortController()
-      const t = setTimeout(() => ctrl.abort(), 120_000)
+      const t = setTimeout(() => ctrl.abort(), 90_000)
       try {
         const res = await fetch(`${base}${path}`, {
           method: 'POST',
@@ -186,11 +153,11 @@ async function tryManagerHttpInstall(
           signal: ctrl.signal,
         })
         if (res.ok || res.status === 200 || res.status === 201) {
-          console.log(`[my-pod] Manager HTTP install accepted via ${path} for ${pack.dir}`)
+          console.log(`[my-pod] Manager HTTP install via ${path} → ${pack.dir}`)
           return true
         }
       } catch {
-        // try next
+        // next
       } finally {
         clearTimeout(t)
       }
@@ -199,96 +166,70 @@ async function tryManagerHttpInstall(
   return false
 }
 
-async function restartComfyShort(ssh: SshAuth): Promise<void> {
-  await sshExec(
-    ssh,
-    [
-      'set +e',
-      'curl -sS -m 8 -X POST http://127.0.0.1:8188/manager/reboot >/dev/null 2>&1 && echo REBOOT_OK && exit 0',
-      'pkill -f "python.*main.py" 2>/dev/null || pkill -f "ComfyUI/main.py" 2>/dev/null || true',
-      'echo KILLED',
-    ].join('\n'),
-    45_000,
-  ).catch(() => {})
+async function rebootComfyHttp(comfyBaseUrl: string, apiToken?: string | null): Promise<boolean> {
+  const base = comfyBaseUrl.replace(/\/+$/, '')
+  for (const path of ['/manager/reboot', '/api/manager/reboot']) {
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), 20_000)
+    try {
+      const res = await fetch(`${base}${path}`, {
+        method: 'POST',
+        headers: comfyHeaders(apiToken),
+        signal: ctrl.signal,
+      })
+      if (res.ok || res.status === 200) return true
+    } catch {
+      // next
+    } finally {
+      clearTimeout(t)
+    }
+  }
+  return false
 }
 
 /**
- * Start a long git/pip install in the background on the pod, then poll with
- * short SSH checks. This is how RunPod ssh.runpod.io stays usable.
+ * One SSH call: find Comfy root + start background git/pip for all packs.
+ * Progress is watched via Comfy HTTP (no SSH polling).
  */
-async function installPackBackground(
-  ssh: SshAuth,
-  root: string,
-  pack: NodePack,
-  onProgress?: (msg: string) => void | Promise<void>,
-): Promise<void> {
-  const dest = `${root}/custom_nodes/${pack.dir}`
-  const marker = `/tmp/xxm_ok_${pack.dir.replace(/[^a-zA-Z0-9_-]/g, '_')}`
-  const failMarker = `/tmp/xxm_fail_${pack.dir.replace(/[^a-zA-Z0-9_-]/g, '_')}`
-  const logFile = `/tmp/xxm_log_${pack.dir.replace(/[^a-zA-Z0-9_-]/g, '_')}.log`
-
-  const work = [
-    'set -e',
-    `DEST=${JSON.stringify(dest)}`,
-    `REPO=${JSON.stringify(pack.repo)}`,
-    `ROOT=${JSON.stringify(root)}`,
-    `MARKER=${JSON.stringify(marker)}`,
-    `FAIL=${JSON.stringify(failMarker)}`,
-    'rm -f "$MARKER" "$FAIL"',
-    'if [ -d "$DEST/.git" ]; then',
-    '  git -C "$DEST" pull --ff-only || true',
-    'else',
-    '  rm -rf "$DEST"',
-    '  git clone --depth 1 "$REPO" "$DEST"',
+async function kickoffBackgroundInstalls(ssh: SshAuth, packs: NodePack[]): Promise<void> {
+  const lines: string[] = [
+    'set +e',
+    'rm -f /tmp/xxm_install_ok /tmp/xxm_install_fail',
+    'ROOT=""',
+    'for d in /workspace/ComfyUI /workspace/RunPod-ComfyUI /workspace/comfyui /ComfyUI /root/ComfyUI; do',
+    '  if [ -d "$d/custom_nodes" ]; then ROOT="$d"; break; fi',
+    'done',
+    'if [ -z "$ROOT" ]; then',
+    '  CAND=$(ls -d /home/*/ComfyUI/custom_nodes 2>/dev/null | head -1 | sed "s|/custom_nodes||")',
+    '  [ -n "$CAND" ] && ROOT="$CAND"',
     'fi',
-    'if [ -f "$DEST/requirements.txt" ]; then',
-    '  PY="$ROOT/venv/bin/pip"',
-    '  if [ -x "$PY" ]; then "$PY" install -r "$DEST/requirements.txt" || true',
-    '  else pip3 install -r "$DEST/requirements.txt" || pip install -r "$DEST/requirements.txt" || true',
-    '  fi',
-    'fi',
-    'touch "$MARKER"',
-  ].join('\n')
+    'if [ -z "$ROOT" ]; then echo NO_ROOT > /tmp/xxm_install_fail; exit 1; fi',
+  ]
 
-  const b64 = Buffer.from(work, 'utf8').toString('base64')
-  // Kick off and return immediately — critical for RunPod proxy.
-  const startCmd = [
-    `rm -f ${JSON.stringify(marker)} ${JSON.stringify(failMarker)}`,
-    `nohup bash -c 'echo ${b64} | base64 -d | bash || touch ${JSON.stringify(failMarker)}' > ${JSON.stringify(logFile)} 2>&1 &`,
-    'echo STARTED',
-  ].join('; ')
-
-  console.log(`[my-pod] background-install ${pack.dir} on pod`)
-  await onProgress?.(`installing ${pack.dir} (background)…`)
-  const started = await sshExec(ssh, startCmd, 60_000)
-  if (!started.stdout.includes('STARTED') && started.code !== 0) {
-    throw new Error(`Could not start install for ${pack.dir}: ${(started.stderr || started.stdout).slice(-400)}`)
+  for (const pack of packs) {
+    const dest = `"$ROOT/custom_nodes/${pack.dir}"`
+    const repo = JSON.stringify(pack.repo)
+    lines.push(
+      `DEST=${dest}`,
+      `REPO=${repo}`,
+      'if [ -d "$DEST/.git" ]; then git -C "$DEST" pull --ff-only || true',
+      'else rm -rf "$DEST"; git clone --depth 1 "$REPO" "$DEST" || { echo clone_fail > /tmp/xxm_install_fail; exit 1; }; fi',
+      'if [ -f "$DEST/requirements.txt" ]; then',
+      '  if [ -x "$ROOT/venv/bin/pip" ]; then "$ROOT/venv/bin/pip" install -r "$DEST/requirements.txt" || true',
+      '  else pip3 install -r "$DEST/requirements.txt" || pip install -r "$DEST/requirements.txt" || true; fi',
+      'fi',
+    )
   }
+  lines.push('touch /tmp/xxm_install_ok')
 
-  const deadline = Date.now() + 15 * 60_000
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 12_000))
-    await onProgress?.(`installing ${pack.dir}…`)
-    const check = await sshExec(
-      ssh,
-      [
-        `if [ -f ${JSON.stringify(marker)} ]; then echo DONE; exit 0; fi`,
-        `if [ -f ${JSON.stringify(failMarker)} ]; then echo FAIL; tail -c 800 ${JSON.stringify(logFile)} 2>/dev/null; exit 1; fi`,
-        `echo WAIT; tail -c 200 ${JSON.stringify(logFile)} 2>/dev/null || true`,
-      ].join('; '),
-      45_000,
-    ).catch((err) => ({
-      stdout: '',
-      stderr: err instanceof Error ? err.message : String(err),
-      code: 1,
-    }))
+  const b64 = Buffer.from(lines.join('\n'), 'utf8').toString('base64')
+  // Must return immediately — RunPod proxy drops long interactive sessions.
+  const start = `rm -f /tmp/xxm_install_ok /tmp/xxm_install_fail; nohup bash -c 'echo ${b64}|base64 -d|bash' >/tmp/xxm_install.log 2>&1 & echo STARTED`
 
-    if (check.stdout.includes('DONE')) return
-    if (check.stdout.includes('FAIL') || (check.code !== 0 && check.stdout.includes('FAIL'))) {
-      throw new Error(`Install failed for ${pack.dir}: ${(check.stdout + check.stderr).slice(-600)}`)
-    }
+  const result = await sshExec(ssh, start, 120_000, 4)
+  if (!result.stdout.includes('STARTED')) {
+    throw new Error(`SSH kickoff failed: ${(result.stderr || result.stdout).slice(-400) || `exit ${result.code}`}`)
   }
-  throw new Error(`Install timed out for ${pack.dir} after 15 minutes`)
 }
 
 async function installPacks(opts: {
@@ -299,29 +240,48 @@ async function installPacks(opts: {
   onProgress?: (msg: string) => void | Promise<void>
 }): Promise<void> {
   const { ssh, packs, comfyBaseUrl, apiToken, onProgress } = opts
+  const neededTypes = [...new Set(packs.flatMap(p => p.provides))]
 
-  // 1) Prefer Comfy Manager over HTTP (uses the Comfy URL the user already has).
-  const stillNeed: NodePack[] = []
+  let managerOk = true
   for (const pack of packs) {
-    await onProgress?.(`trying Manager install: ${pack.dir}`)
-    const ok = await tryManagerHttpInstall(comfyBaseUrl, pack, apiToken)
-    if (ok) {
-      // Give Manager a moment; confirm later after restart/probe.
-      continue
-    }
-    stillNeed.push(pack)
+    await onProgress?.(`Manager install: ${pack.dir}`)
+    if (!(await tryManagerHttpInstall(comfyBaseUrl, pack, apiToken))) managerOk = false
   }
 
-  // 2) Anything Manager couldn't take → background SSH install (short sessions).
-  if (stillNeed.length) {
-    const root = await findComfyRoot(ssh)
-    for (const pack of stillNeed) {
-      await installPackBackground(ssh, root, pack, onProgress)
-    }
+  if (!managerOk) {
+    await onProgress?.('starting background install over SSH…')
+    await kickoffBackgroundInstalls(ssh, packs)
   }
 
-  await onProgress?.('restarting ComfyUI…')
-  await restartComfyShort(ssh)
+  // Poll Comfy HTTP only — reboot periodically so newly cloned nodes load.
+  const deadline = Date.now() + 15 * 60_000
+  let lastReboot = 0
+  while (Date.now() < deadline) {
+    await onProgress?.('waiting for custom nodes…')
+    const missing: string[] = []
+    for (const t of neededTypes) {
+      if (!(await probeNodeType(comfyBaseUrl, t, apiToken))) missing.push(t)
+    }
+    if (missing.length === 0) return
+
+    const now = Date.now()
+    if (now - lastReboot > 90_000) {
+      lastReboot = now
+      await onProgress?.('rebooting ComfyUI…')
+      const ok = await rebootComfyHttp(comfyBaseUrl, apiToken)
+      if (!ok) {
+        await sshExec(
+          ssh,
+          'curl -sS -m 5 -X POST http://127.0.0.1:8188/manager/reboot >/dev/null 2>&1 || pkill -f "python.*main.py" || true; echo OK',
+          90_000,
+          2,
+        ).catch(() => {})
+      }
+      await waitForComfy(comfyBaseUrl, apiToken, 180_000)
+    }
+    await new Promise(r => setTimeout(r, 15_000))
+  }
+  throw new Error(`Timed out waiting for nodes: ${neededTypes.join(', ')}`)
 }
 
 export type EnsureNodesResult = {
@@ -391,17 +351,6 @@ async function ensureNodePacks(opts: {
     }
   }
 
-  await log('waiting for ComfyUI to reload…')
-  const up = await waitForComfy(opts.comfyBaseUrl, opts.apiToken, 300_000)
-  if (!up) {
-    return {
-      ok: false,
-      missing: probe.missing,
-      error: 'Installed custom nodes but ComfyUI did not come back within 5 minutes.',
-    }
-  }
-
-  await new Promise(r => setTimeout(r, 10_000))
   probe = await probeTypes(
     opts.comfyBaseUrl,
     opts.apiToken,
@@ -412,7 +361,7 @@ async function ensureNodePacks(opts: {
     return {
       ok: false,
       missing: probe.missing,
-      error: `Installed packs but still missing: ${probe.missing.join(', ')}.`,
+      error: `Still missing after install: ${probe.missing.join(', ')}.`,
     }
   }
 
