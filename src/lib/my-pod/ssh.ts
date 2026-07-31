@@ -88,7 +88,7 @@ export async function sshShellExec(
           })
           stream.stderr?.on('data', (d: Buffer) => { buf += d.toString() })
           stream.on('close', () => finish(buf.includes(marker) ? 0 : 1))
-          stream.on('error', (e) => {
+          stream.on('error', (e: Error) => {
             clearTimeout(timer)
             reject(e)
           })

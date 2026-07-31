@@ -5,7 +5,7 @@
  * Comfy HTTP; reboot via Manager HTTP when possible.
  */
 import { comfyHeaders } from '@/lib/my-pod/comfy'
-import { sshExec, sshShellExec, type SshAuth } from '@/lib/my-pod/ssh'
+import { sshShellExec, type SshAuth } from '@/lib/my-pod/ssh'
 
 export interface NodePack {
   provides: string[]
