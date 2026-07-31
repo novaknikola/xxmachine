@@ -51,6 +51,8 @@ interface MyPodRow {
   stage?: string
   driveLink?: string
   error?: string
+  /** ISO timestamp when this item finished (done or error). */
+  finishedAt?: string
 }
 
 interface CarouselRow {
@@ -74,6 +76,35 @@ function packMyPodOutput(rows: MyPodRow[], stage: string) {
     stage,
     progressAt: new Date().toISOString(),
   })
+}
+
+function myPodItemDone(label: string, driveLink?: string): MyPodRow {
+  return {
+    label,
+    status: 'done',
+    stage: 'done',
+    driveLink,
+    finishedAt: new Date().toISOString(),
+  }
+}
+
+function myPodItemError(label: string, error: string): MyPodRow {
+  return {
+    label,
+    status: 'error',
+    stage: 'error',
+    error,
+    finishedAt: new Date().toISOString(),
+  }
+}
+
+/** Stop batch early if the job was cancelled or deleted from the queue. */
+async function myPodJobStillRunning(id: string): Promise<boolean> {
+  const row = await one<{ status: string }>(
+    `SELECT status FROM generation_queue WHERE id = $1`,
+    [id],
+  )
+  return row?.status === 'processing'
 }
 
 function packComfyOutput(rows: ComfyUIRow[], stage: string) {
@@ -736,11 +767,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       }
 
       for (let i = doneCount; i < input.items.length; i++) {
+        if (!(await myPodJobStillRunning(id))) break
         const item = input.items[i]
         try {
           leaseStage = 'downloading_inputs'
           await query(
-            `UPDATE generation_queue SET output = $1::jsonb, done_items=$2, progress=$3 WHERE id=$4`,
+            `UPDATE generation_queue SET output = $1::jsonb, done_items=$2, progress=$3 WHERE id=$4 AND status='processing'`,
             [packMyPodOutput(rows, leaseStage), doneCount, Math.round((doneCount / input.items.length) * 100), id],
           )
           const imgBuf = await downloadDriveFile(item.driveFileId)
@@ -764,10 +796,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             result.buffer,
             ext === 'webm' ? 'video/webm' : 'video/mp4',
           )
-          rows.push({ label: item.name, status: 'done', stage: 'done', driveLink: uploaded.link })
+          rows.push(myPodItemDone(item.name, uploaded.link))
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'failed'
-          rows.push({ label: item.name, status: 'error', stage: 'error', error: msg })
+          rows.push(myPodItemError(item.name, msg))
           console.error(`[queue/process] my_pod_i2v ${id} item ${i}:`, msg)
         }
         doneCount++
@@ -780,7 +812,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       }
 
       if (remoteJobDir) await cleanupRemoteJobDir(session.ssh, remoteJobDir)
-      await query(`UPDATE generation_queue SET status='done', finished_at=now(), progress=100 WHERE id=$1`, [id])
+      await query(
+        `UPDATE generation_queue SET status='done', finished_at=now(), progress=100 WHERE id=$1 AND status='processing'`,
+        [id],
+      )
       return NextResponse.json({ ok: true, done: doneCount })
     }
 
@@ -835,6 +870,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       }
 
       for (let i = doneCount; i < input.items.length; i++) {
+        if (!(await myPodJobStillRunning(id))) break
         const item = input.items[i]
         try {
           leaseStage = 'downloading_inputs'
@@ -864,10 +900,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             result.buffer,
             'video/mp4',
           )
-          rows.push({ label: item.name, status: 'done', stage: 'done', driveLink: uploaded.link })
+          rows.push(myPodItemDone(item.name, uploaded.link))
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'failed'
-          rows.push({ label: item.name, status: 'error', stage: 'error', error: msg })
+          rows.push(myPodItemError(item.name, msg))
           console.error(`[queue/process] my_pod_animate ${id} item ${i}:`, msg)
         }
         doneCount++
@@ -880,7 +916,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       }
 
       if (remoteJobDir) await cleanupRemoteJobDir(session.ssh, remoteJobDir)
-      await query(`UPDATE generation_queue SET status='done', finished_at=now(), progress=100 WHERE id=$1`, [id])
+      await query(
+        `UPDATE generation_queue SET status='done', finished_at=now(), progress=100 WHERE id=$1 AND status='processing'`,
+        [id],
+      )
       return NextResponse.json({ ok: true, done: doneCount })
     }
 
@@ -938,11 +977,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       }
 
       for (let i = doneCount; i < input.items.length; i++) {
+        if (!(await myPodJobStillRunning(id))) break
         const item = input.items[i]
         try {
           leaseStage = 'downloading_inputs'
           await query(
-            `UPDATE generation_queue SET output = $1::jsonb, done_items=$2, progress=$3 WHERE id=$4`,
+            `UPDATE generation_queue SET output = $1::jsonb, done_items=$2, progress=$3 WHERE id=$4 AND status='processing'`,
             [packMyPodOutput(rows, leaseStage), doneCount, Math.round((doneCount / input.items.length) * 100), id],
           )
           const imgBuf = await downloadDriveFile(item.driveFileId)
@@ -978,10 +1018,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             result.buffer,
             ext === 'webm' ? 'video/webm' : 'video/mp4',
           )
-          rows.push({ label: item.name, status: 'done', stage: 'done', driveLink: uploaded.link })
+          rows.push(myPodItemDone(item.name, uploaded.link))
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'failed'
-          rows.push({ label: item.name, status: 'error', stage: 'error', error: msg })
+          rows.push(myPodItemError(item.name, msg))
           console.error(`[queue/process] my_pod_talk ${id} item ${i}:`, msg)
         }
         doneCount++
@@ -994,7 +1034,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       }
 
       if (remoteJobDir) await cleanupRemoteJobDir(session.ssh, remoteJobDir)
-      await query(`UPDATE generation_queue SET status='done', finished_at=now(), progress=100 WHERE id=$1`, [id])
+      await query(
+        `UPDATE generation_queue SET status='done', finished_at=now(), progress=100 WHERE id=$1 AND status='processing'`,
+        [id],
+      )
       return NextResponse.json({ ok: true, done: doneCount })
     }
 

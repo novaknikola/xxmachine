@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
 import {
   Loader2, CheckCircle2, XCircle, Clock, RefreshCw, Trash2, ListTodo,
-  ExternalLink, ChevronDown, ChevronRight,
+  ExternalLink, ChevronDown, ChevronRight, Pause, Play, Square,
 } from 'lucide-react'
 
 interface RowOut {
@@ -15,6 +15,7 @@ interface RowOut {
   stage?: string
   driveLink?: string
   error?: string
+  finishedAt?: string
 }
 
 interface JobInput {
@@ -28,10 +29,12 @@ interface JobInput {
   textCount?: number
 }
 
+type JobStatus = 'pending' | 'processing' | 'paused' | 'done' | 'failed' | 'cancelled'
+
 interface Job {
   id: string
   job_type: string
-  status: 'pending' | 'processing' | 'done' | 'failed' | 'cancelled'
+  status: JobStatus
   total_items: number
   done_items: number
   progress: number
@@ -49,6 +52,7 @@ interface Job {
 }
 
 type RowFilter = 'all' | 'done' | 'failed'
+type JobAction = 'pause' | 'resume' | 'stop'
 
 const MY_POD_TYPES = new Set(['comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk'])
 
@@ -63,13 +67,14 @@ function driveFolderLink(id?: string) {
   return id ? `https://drive.google.com/drive/folders/${id}` : undefined
 }
 
-function StatusBadge({ status }: { status: Job['status'] }) {
-  const cfg: Record<Job['status'], { label: string; cls: string; icon: React.ReactNode }> = {
+function StatusBadge({ status }: { status: JobStatus }) {
+  const cfg: Record<JobStatus, { label: string; cls: string; icon: React.ReactNode }> = {
     pending:    { label: 'Waiting',    cls: 'bg-secondary text-muted-foreground', icon: <Clock className="w-2.5 h-2.5" /> },
     processing: { label: 'Processing', cls: 'bg-blue-500/15 text-blue-400',       icon: <Loader2 className="w-2.5 h-2.5 animate-spin" /> },
+    paused:     { label: 'Paused',     cls: 'bg-amber-500/15 text-amber-400',     icon: <Pause className="w-2.5 h-2.5" /> },
     done:       { label: 'Done',       cls: 'bg-emerald-500/15 text-emerald-400', icon: <CheckCircle2 className="w-2.5 h-2.5" /> },
     failed:     { label: 'Error',      cls: 'bg-destructive/15 text-destructive', icon: <XCircle className="w-2.5 h-2.5" /> },
-    cancelled:  { label: 'Cancelled',  cls: 'bg-secondary text-muted-foreground', icon: <XCircle className="w-2.5 h-2.5" /> },
+    cancelled:  { label: 'Stopped',    cls: 'bg-secondary text-muted-foreground', icon: <Square className="w-2.5 h-2.5" /> },
   }
   const { label, cls, icon } = cfg[status]
   return (
@@ -89,16 +94,31 @@ function ItemStatus({ status }: { status: string }) {
   return <span className="text-[10px] text-muted-foreground font-medium">{status}</span>
 }
 
+function formatItemTime(iso?: string) {
+  if (!iso) return null
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return null
+  return d.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+}
+
 function JobCard({
   job,
   expanded,
   onToggle,
-  onCancel,
+  onAction,
+  onDelete,
 }: {
   job: Job
   expanded: boolean
   onToggle: () => void
-  onCancel: () => void
+  onAction: (action: JobAction) => void
+  onDelete: () => void
 }) {
   const [filter, setFilter] = useState<RowFilter>('all')
   const rows = job.output?.myPodRows ?? job.output?.comfyuiRows ?? []
@@ -112,6 +132,11 @@ function JobCard({
     ?? job.input?.textCount
     ?? (Array.isArray(job.input?.items) ? job.input.items.length : undefined)
     ?? job.input?.itemCount
+
+  const canPause = job.status === 'pending' || job.status === 'processing'
+  const canResume = job.status === 'paused' || job.status === 'failed' || job.status === 'cancelled'
+  const canStop = job.status === 'pending' || job.status === 'processing' || job.status === 'paused'
+  const showProgress = job.status === 'processing' || job.status === 'paused' || job.status === 'done'
 
   const filtered = rows.filter(r => {
     if (filter === 'done') return r.status === 'done'
@@ -148,23 +173,69 @@ function JobCard({
               {job.pod_name ? ` · ${job.pod_name}` : ''}
             </p>
           </div>
-          {job.status === 'pending' && (
-            <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive shrink-0"
-              onClick={onCancel} title="Cancel">
+          <div className="flex items-center gap-0.5 shrink-0">
+            {canPause && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 w-7 p-0 text-muted-foreground hover:text-amber-400"
+                onClick={() => onAction('pause')}
+                title="Pause (after current item)"
+              >
+                <Pause className="w-3.5 h-3.5" />
+              </Button>
+            )}
+            {canResume && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 w-7 p-0 text-muted-foreground hover:text-emerald-400"
+                onClick={() => onAction('resume')}
+                title="Start / resume"
+              >
+                <Play className="w-3.5 h-3.5" />
+              </Button>
+            )}
+            {canStop && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+                onClick={() => onAction('stop')}
+                title="Stop (keep in queue)"
+              >
+                <Square className="w-3.5 h-3.5" />
+              </Button>
+            )}
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
+              onClick={onDelete}
+              title="Remove from queue"
+            >
               <Trash2 className="w-3 h-3" />
             </Button>
-          )}
+          </div>
         </div>
 
-        {(job.status === 'processing' || job.status === 'done') && job.total_items > 0 && (
+        {showProgress && job.total_items > 0 && (
           <div className="space-y-1 pl-9">
             <div className="flex justify-between text-xs text-muted-foreground">
               <span>{job.done_items} / {job.total_items}</span>
               <span>{job.progress}%</span>
             </div>
             <div className="h-2 rounded-full bg-secondary overflow-hidden">
-              <div className={`h-full transition-all duration-500 ${job.status === 'done' ? 'bg-emerald-500' : 'bg-primary animate-pulse'}`}
-                style={{ width: `${job.progress}%` }} />
+              <div
+                className={`h-full transition-all duration-500 ${
+                  job.status === 'done'
+                    ? 'bg-emerald-500'
+                    : job.status === 'paused'
+                      ? 'bg-amber-500'
+                      : 'bg-primary animate-pulse'
+                }`}
+                style={{ width: `${job.progress}%` }}
+              />
             </div>
           </div>
         )}
@@ -265,6 +336,7 @@ function JobCard({
                     const n = rows.indexOf(row) + 1
                     const label = row.label || row.prompt || `item ${n}`
                     const isFail = row.status === 'error' || row.status === 'failed'
+                    const when = formatItemTime(row.finishedAt)
                     return (
                       <div
                         key={`${job.id}-${n}-${label}`}
@@ -273,6 +345,11 @@ function JobCard({
                         <div className="flex items-center gap-2 text-xs min-w-0">
                           <span className="text-muted-foreground font-mono w-6 shrink-0">{n}</span>
                           <span className="truncate font-medium flex-1" title={label}>{label}</span>
+                          {when && (
+                            <span className="text-[10px] text-muted-foreground shrink-0 tabular-nums" title={row.finishedAt}>
+                              {when}
+                            </span>
+                          )}
                           <ItemStatus status={row.status} />
                           {row.stage && row.status !== 'done' && (
                             <span className="text-[10px] text-muted-foreground font-mono shrink-0">{row.stage}</span>
@@ -341,16 +418,47 @@ export function QueueTab() {
     return () => clearTimeout(t)
   }, [jobs, fetchJobs])
 
-  async function cancelJob(id: string) {
+  async function controlJob(id: string, action: JobAction) {
+    const labels = { pause: 'Paused', resume: 'Queued to start', stop: 'Stopped' } as const
+    if (action === 'stop' && !confirm('Stop this job? Progress so far is kept; you can Start again later.')) {
+      return
+    }
+    const res = await fetch(`/api/queue/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    })
+    if (res.ok) {
+      toast.success(labels[action])
+      fetchJobs()
+    } else {
+      const data = await res.json().catch(() => ({}))
+      toast.error(typeof data.error === 'string' ? data.error : `Could not ${action}`)
+    }
+  }
+
+  async function deleteJob(id: string) {
+    const job = jobs.find(j => j.id === id)
+    const active = job?.status === 'pending' || job?.status === 'processing' || job?.status === 'paused'
+    if (!confirm(active
+      ? 'Remove this job from the queue? This cannot be undone.'
+      : 'Remove this job from the queue?')) {
+      return
+    }
     const res = await fetch(`/api/queue/${id}`, { method: 'DELETE' })
-    if (res.ok) { toast.success('Job cancelled'); fetchJobs() }
-    else toast.error('Could not cancel job')
+    if (res.ok) {
+      toast.success('Job removed')
+      fetchJobs()
+    } else {
+      const data = await res.json().catch(() => ({}))
+      toast.error(typeof data.error === 'string' ? data.error : 'Could not remove job')
+    }
   }
 
   return (
     <div className="max-w-3xl mx-auto space-y-4">
       <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">My Pod jobs — expand a batch for full item details</p>
+        <p className="text-sm text-muted-foreground">My Pod jobs — pause / start / stop / delete</p>
         <Button variant="outline" size="sm" onClick={fetchJobs} disabled={loading}>
           <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
         </Button>
@@ -374,7 +482,8 @@ export function QueueTab() {
               job={job}
               expanded={!!expanded[job.id]}
               onToggle={() => setExpanded(prev => ({ ...prev, [job.id]: !prev[job.id] }))}
-              onCancel={() => cancelJob(job.id)}
+              onAction={(action) => controlJob(job.id, action)}
+              onDelete={() => deleteJob(job.id)}
             />
           ))}
         </div>
