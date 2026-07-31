@@ -49,6 +49,23 @@ export const NICHE_HAIR_DEFAULTS: Record<string, string> = {
   'nurse-playful': 'hair in clip-up nurse-cap friendly style',
   'beach-bombshell': 'long honey-blonde beach waves, sun-lightened ends',
   'angel-soft': 'soft platinum waves with halo-lit glow',
+  'sorority-girl': 'long straight hair with claw clip, campus-casual center part',
+  'pinup-retro': 'victory rolls with red hair scarf, glossy vintage curls',
+  'cosplay-con': 'long colorful wig straight with blunt bangs, convention-ready styling',
+  'biker-chick': 'long tousled waves under a bandana, windswept from riding',
+  'space-vixen': 'sleek silver-white braid with metallic hair cuffs',
+  'surfer-girl': 'salt-tousled beach waves sun-bleached at the ends',
+  'fairycore': 'loose braided crown with tiny flowers woven through',
+  'military-tactical': 'tight slicked bun with camo bandana',
+  'bridal-boudoir': 'soft bridal updo with loose face-framing tendrils',
+  'trophy-wife': 'glossy blowout with face-framing layers, polished suburban glam',
+  'golf-girl': 'sleek ponytail through a visor, polished sporty waves',
+  'gymnast': 'tight competition bun with glitter hairspray sheen',
+  'hockey-girl': 'tight braid pulled through a helmet cage, ice-rink practical style',
+  'volleyball-girl': 'high ponytail with sweatband, sporty practical style',
+  'swim-dive': 'wet slicked-back hair, competitive swim-cap ready style',
+  'cheerleader': 'high sleek ponytail with team-color ribbon',
+  'figure-skater': 'sleek competition bun with sparkling hairpins',
 }
 
 export function getNicheHairDefault(nicheId: string): string {
