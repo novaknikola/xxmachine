@@ -164,9 +164,11 @@ async function installPacks(ssh: SshAuth, packs: NodePack[]): Promise<void> {
     console.log(`[my-pod] installing ${pack.dir} into ${root}/custom_nodes`)
     const { stdout, stderr, code } = await sshExec(ssh, script, 600_000)
     if (code !== 0 || !stdout.includes('INSTALLED_OK')) {
-      throw new Error(
-        `Failed to install ${pack.dir} on pod: ${(stderr || stdout).slice(-600)}`,
-      )
+      const detail = (stderr || stdout).slice(-600).trim() || `exit ${code}`
+      const hint = /PTY|pseudo-?tty/i.test(detail)
+        ? ' Use RunPod “SSH over exposed TCP” (root@IP -p PORT) in Connection, not ssh.runpod.io.'
+        : ''
+      throw new Error(`Failed to install ${pack.dir} on pod: ${detail}.${hint}`)
     }
   }
 

@@ -1,4 +1,4 @@
-import { Client, type ConnectConfig } from 'ssh2'
+import { Client, type ConnectConfig, type ExecOptions } from 'ssh2'
 
 export interface SshAuth {
   host: string
@@ -38,28 +38,96 @@ export async function withSsh<T>(auth: SshAuth, fn: (client: Client) => Promise<
   }
 }
 
-export async function sshExec(auth: SshAuth, command: string, timeoutMs = 30_000): Promise<{ stdout: string; stderr: string; code: number }> {
-  return withSsh(auth, client =>
-    new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('SSH command timed out')), timeoutMs)
-      client.exec(command, { pty: false }, (err, stream) => {
-        if (err) {
+function isPtyError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return /PTY|pseudo-?tty|pseudo-terminal/i.test(msg)
+}
+
+function runpodProxyHint(auth: SshAuth): string {
+  if (!/runpod\.io/i.test(auth.host)) return ''
+  return (
+    ' Tip: use RunPod “SSH over exposed TCP” (root@IP -p PORT), not ssh.runpod.io proxy — '
+    + 'the proxy often breaks long installs / PTY.'
+  )
+}
+
+/**
+ * Run a remote command. Prefer a small PTY (RunPod ssh.runpod.io rejects
+ * non-PTY sessions with "Your SSH client doesn't support PTY"). Fall back
+ * without PTY for hosts that refuse allocation.
+ *
+ * Multi-line scripts are base64-piped into bash so newlines survive proxies.
+ */
+export async function sshExec(
+  auth: SshAuth,
+  command: string,
+  timeoutMs = 30_000,
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  const needsWrap = command.includes('\n') || command.length > 800
+  const remote = needsWrap
+    ? `echo ${Buffer.from(command, 'utf8').toString('base64')} | base64 -d | bash`
+    : command
+
+  const tryOnce = (opts: ExecOptions | undefined) =>
+    withSsh(auth, client =>
+      new Promise<{ stdout: string; stderr: string; code: number }>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('SSH command timed out')), timeoutMs)
+        const onErr = (err: Error) => {
           clearTimeout(timer)
           reject(err)
-          return
         }
-        let stdout = ''
-        let stderr = ''
-        stream
-          .on('close', (code: number) => {
-            clearTimeout(timer)
-            resolve({ stdout, stderr, code: code ?? 0 })
-          })
-          .on('data', (d: Buffer) => { stdout += d.toString() })
-        stream.stderr.on('data', (d: Buffer) => { stderr += d.toString() })
-      })
-    }),
-  )
+        const cb = (err: Error | undefined, stream: import('ssh2').Channel) => {
+          if (err) {
+            onErr(err)
+            return
+          }
+          let stdout = ''
+          let stderr = ''
+          stream
+            .on('close', (code: number) => {
+              clearTimeout(timer)
+              resolve({ stdout, stderr, code: code ?? 0 })
+            })
+            .on('error', onErr)
+            .on('data', (d: Buffer) => { stdout += d.toString() })
+          stream.stderr.on('data', (d: Buffer) => { stderr += d.toString() })
+        }
+        if (opts) client.exec(remote, opts, cb)
+        else client.exec(remote, cb)
+      }),
+    )
+
+  // RunPod proxy wants a PTY; direct TCP is fine either way.
+  const withPty: ExecOptions = {
+    pty: { term: 'xterm-256color', cols: 120, rows: 30 },
+  }
+
+  try {
+    const result = await tryOnce(withPty)
+    // Some proxies accept the channel then print the PTY error on stderr and exit.
+    if (
+      result.code !== 0
+      && isPtyError(result.stderr || result.stdout)
+    ) {
+      const retry = await tryOnce(undefined)
+      if (retry.code === 0) return retry
+      throw new Error(
+        `${(result.stderr || result.stdout || 'SSH PTY error').trim()}.${runpodProxyHint(auth)}`,
+      )
+    }
+    return result
+  } catch (err) {
+    if (!isPtyError(err)) {
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new Error(`${msg}${runpodProxyHint(auth)}`)
+    }
+    try {
+      return await tryOnce(undefined)
+    } catch (err2) {
+      const msg = err2 instanceof Error ? err2.message : String(err2)
+      throw new Error(`${msg}${runpodProxyHint(auth)}`)
+    }
+  }
 }
 
 export async function probeSsh(auth: SshAuth): Promise<{ ok: true; uname: string } | { ok: false; error: string }> {

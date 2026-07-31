@@ -248,9 +248,13 @@ export function ConnectionTab() {
               <Input
                 value={sshCommand}
                 onChange={e => setSshCommand(e.target.value)}
-                placeholder="ssh user@ssh.runpod.io -i ~/.ssh/id_ed25519"
+                placeholder="ssh root@IP -p PORT -i ~/.ssh/id_ed25519"
                 className="h-10 text-sm font-mono"
               />
+              <p className="text-[11px] text-muted-foreground">
+                Prefer RunPod <span className="text-foreground/80">SSH over exposed TCP</span> (IP + port).
+                The <span className="font-mono">ssh.runpod.io</span> proxy often breaks node installs.
+              </p>
             </div>
             <div className="space-y-1">
               <Label className="text-xs text-muted-foreground">
