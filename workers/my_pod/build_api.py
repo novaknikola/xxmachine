@@ -16,16 +16,37 @@ script works for any image/video pair without editing:
   OUTPUT_PREFIX     SaveVideo filename_prefix (default: video/ComfyUI_FULLCHAIN)
   OUTPUT_JSON       where to write the built prompt (default: /tmp/api_workflow.json)
   WORKFLOW_PATH     path to the UI-format workflow template json
+  NEUTRALIZE_CUTAWAYS         disable the scene-cut cleanup below by setting to "0" (default: "1")
+  SCENE_CUT_THRESHOLD         ffmpeg scene-score delta that counts as a hard cut (default: 0.12)
+  MAX_CUTAWAY_RUN_FRAMES      only auto-neutralize runs up to this long (default: 15)
 
 Each "Video Extend" window contributes 77 frames on the first window and
 ~72 net new frames per additional window (77 minus the 5-frame continue_motion
 overlap). N_EXTEND_WINDOWS is derived from DRIVING_FRAMES (0 when the first
 window alone covers the clip). Remaining overshoot is trimmed + audio muxed
 in the Node runner via ffmpeg against the driving file.
+
+Driving-video edit cuts (a short B-roll/cutaway insert spliced into someone's
+source clip) confuse this pipeline: WanAnimateToVideo is built to map ONE
+reference character onto the driving motion, so when the driving footage
+itself jump-cuts to unrelated framing for a couple of frames, DWPose's face
+bbox collapses to match that unrelated framing and the face crop feeds garbage
+into the model for those frames -- visible as a jarring flash of wrong content
+in the output. This isn't a bbox-detector bug: the driving frames really are
+a different shot. _neutralize_driving_cutaways() detects short scene-cut runs
+via ffmpeg scene-score and hold-frames over them (before the video reaches
+Comfy) so a driving clip with editing cuts doesn't corrupt the render. Only
+touches the local copy of THIS job's driving file; never modifies the Talk
+(build_infinitetalk_api.py) or I2V pipelines.
 """
 import json
 import math
 import os
+import re
+import shutil
+import subprocess
+import tempfile
+import urllib.parse
 import urllib.request
 
 WF_PATH = os.environ.get(
@@ -98,12 +119,165 @@ types_needed.add("CropByBBoxes")
 COMFY_URL = os.environ.get("COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
 COMFY_API_TOKEN = os.environ.get("COMFY_API_TOKEN", "").strip()
 
-def _comfy_req(path: str):
-    req = urllib.request.Request(f"{COMFY_URL}{path}")
+def _comfy_req(path: str, method: str = "GET", data: bytes = None, extra_headers: dict = None):
+    req = urllib.request.Request(f"{COMFY_URL}{path}", data=data, method=method)
     req.add_header("User-Agent", os.environ.get("HTTP_UA", "xxmachine-my-pod/1.0"))
     if COMFY_API_TOKEN:
         req.add_header("Authorization", f"Bearer {COMFY_API_TOKEN}")
+    for k, v in (extra_headers or {}).items():
+        req.add_header(k, v)
     return req
+
+
+NEUTRALIZE_CUTAWAYS = os.environ.get("NEUTRALIZE_CUTAWAYS", "1") != "0"
+SCENE_CUT_THRESHOLD = float(os.environ.get("SCENE_CUT_THRESHOLD", "0.12"))
+MAX_CUTAWAY_RUN_FRAMES = int(os.environ.get("MAX_CUTAWAY_RUN_FRAMES", "15"))
+
+
+def _download_comfy_input(filename: str, dest_path: str) -> None:
+    req = _comfy_req(f"/view?filename={urllib.parse.quote(filename)}&type=input")
+    with urllib.request.urlopen(req, timeout=60) as r:
+        data = r.read()
+    with open(dest_path, "wb") as f:
+        f.write(data)
+
+
+def _upload_comfy_input(local_path: str, filename: str) -> str:
+    boundary = "xxmachineboundary" + os.urandom(8).hex()
+    with open(local_path, "rb") as f:
+        file_bytes = f.read()
+
+    def _field(name, value):
+        return (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+        ).encode()
+
+    body = b"".join([
+        _field("type", "input"),
+        _field("overwrite", "true"),
+        (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"{filename}\"\r\n"
+            f"Content-Type: application/octet-stream\r\n\r\n"
+        ).encode(),
+        file_bytes,
+        f"\r\n--{boundary}--\r\n".encode(),
+    ])
+    req = _comfy_req(
+        "/upload/image",
+        method="POST",
+        data=body,
+        extra_headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    with urllib.request.urlopen(req, timeout=120) as r:
+        resp = json.loads(r.read())
+    return resp.get("name", filename)
+
+
+def _probe_fps(path: str) -> float:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", path],
+        capture_output=True, text=True, timeout=30, check=True,
+    ).stdout.strip()
+    num, _, den = out.partition("/")
+    return float(num) / float(den or 1)
+
+
+def _scene_scores(path: str) -> dict:
+    """Per-frame ffmpeg scene-change score, keyed by 0-based frame index."""
+    proc = subprocess.run(
+        ["ffmpeg", "-i", path, "-vf", "select='gte(scene\\,0)',metadata=print", "-f", "null", "-"],
+        capture_output=True, text=True, timeout=120,
+    )
+    scores, frame_idx = {}, None
+    for line in proc.stderr.splitlines():
+        m = re.search(r"frame:(\d+)\s+pts:", line)
+        if m:
+            frame_idx = int(m.group(1))
+        m2 = re.search(r"scene_score=([\d.]+)", line)
+        if m2 and frame_idx is not None:
+            scores[frame_idx] = float(m2.group(1))
+    return scores
+
+
+def _neutralize_driving_cutaways(filename: str) -> str:
+    """
+    Detects short scene-cut runs (edit splices / B-roll cutaways) baked into the
+    driving video and hold-frames over them, so a single reference character
+    doesn't get crossed with an unrelated shot for a few frames. Returns the
+    (possibly new) Comfy input filename to use as DRIVING_FILE. Never raises —
+    any failure just falls back to the original file untouched.
+    """
+    if not NEUTRALIZE_CUTAWAYS:
+        return filename
+    workdir = tempfile.mkdtemp(prefix="xxm_driving_clean_")
+    try:
+        src = os.path.join(workdir, "src.mp4")
+        _download_comfy_input(filename, src)
+
+        scores = _scene_scores(src)
+        boundaries = sorted(i for i, s in scores.items() if s >= SCENE_CUT_THRESHOLD and i > 0)
+        bad_ranges = []
+        i = 0
+        while i < len(boundaries) - 1:
+            start, end = boundaries[i], boundaries[i + 1]
+            if 0 < end - start <= MAX_CUTAWAY_RUN_FRAMES:
+                bad_ranges.append((start, end))
+                i += 2
+            else:
+                i += 1
+        if not bad_ranges:
+            return filename
+
+        bad_frames = set()
+        for start, end in bad_ranges:
+            bad_frames.update(range(start, end))
+        print(
+            f"Detected {len(bad_frames)} likely edit-cut/cutaway frame(s) in driving video "
+            f"{filename}: {sorted(bad_frames)} — hold-framing over them before Animate."
+        )
+
+        frames_pattern = os.path.join(workdir, "f_%06d.png")
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", src, "-vsync", "0", frames_pattern],
+            capture_output=True, timeout=180, check=True,
+        )
+        total_frames = max(scores.keys()) + 1 if scores else 0
+        last_good = None
+        for idx in range(total_frames):
+            fp = os.path.join(workdir, f"f_{idx + 1:06d}.png")
+            if idx in bad_frames:
+                if last_good is not None:
+                    good_fp = os.path.join(workdir, f"f_{last_good + 1:06d}.png")
+                    if os.path.exists(good_fp):
+                        shutil.copyfile(good_fp, fp)
+            else:
+                last_good = idx
+
+        fps = _probe_fps(src)
+        video_only = os.path.join(workdir, "video_only.mp4")
+        subprocess.run(
+            ["ffmpeg", "-y", "-r", str(fps), "-i", frames_pattern,
+             "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p", video_only],
+            capture_output=True, timeout=180, check=True,
+        )
+        cleaned = os.path.join(workdir, "cleaned.mp4")
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", video_only, "-i", src,
+             "-map", "0:v:0", "-map", "1:a:0?",
+             "-c:v", "copy", "-c:a", "copy", "-shortest", cleaned],
+            capture_output=True, timeout=180, check=True,
+        )
+        clean_name = f"clean_{filename}"
+        return _upload_comfy_input(cleaned, clean_name)
+    except Exception as e:
+        print(f"WARN: driving cutaway cleanup skipped: {e}")
+        return filename
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+DRIVING_FILE = _neutralize_driving_cutaways(DRIVING_FILE)
 
 obj_info = {}
 for t in types_needed:
