@@ -137,6 +137,13 @@ async function findComfyRoot(ssh: SshAuth): Promise<string> {
 }
 
 async function installPacks(ssh: SshAuth, packs: NodePack[]): Promise<void> {
+  if (/runpod\.io/i.test(ssh.host)) {
+    throw new Error(
+      'Auto-install needs full SSH. In RunPod → Connect, copy “SSH over exposed TCP” '
+      + '(ssh root@IP -p PORT …), paste it in My Pod → Connection for this pod, Test, then Start the job. '
+      + 'ssh.runpod.io proxy cannot run long git/pip installs.',
+    )
+  }
   const root = await findComfyRoot(ssh)
   for (const pack of packs) {
     const dest = `${root}/custom_nodes/${pack.dir}`
