@@ -43,12 +43,36 @@ interface Job {
     comfyuiRows?: RowOut[]
     myPodRows?: RowOut[]
     stage?: string
+    progressAt?: string
   } | null
   input: JobInput | null
   created_at: string
   started_at?: string | null
   pod_session_id?: string | null
   pod_name?: string | null
+}
+
+/** Heartbeat age for processing My Pod jobs (cron requeues after ~25m idle). */
+function heartbeatInfo(job: Job, nowMs: number): {
+  label: string
+  cls: string
+  idleSec: number
+} | null {
+  if (job.status !== 'processing') return null
+  const raw = job.output?.progressAt || job.started_at
+  if (!raw) return null
+  const t = new Date(raw).getTime()
+  if (Number.isNaN(t)) return null
+  const idleSec = Math.max(0, Math.floor((nowMs - t) / 1000))
+  if (idleSec < 120) {
+    return { label: `live · ${idleSec}s ago`, cls: 'bg-emerald-500/15 text-emerald-400', idleSec }
+  }
+  if (idleSec < 15 * 60) {
+    const m = Math.floor(idleSec / 60)
+    return { label: `slow · ${m}m ago`, cls: 'bg-amber-500/15 text-amber-400', idleSec }
+  }
+  const m = Math.floor(idleSec / 60)
+  return { label: `stalled? · ${m}m ago`, cls: 'bg-destructive/15 text-destructive', idleSec }
 }
 
 type RowFilter = 'all' | 'done' | 'failed'
@@ -113,12 +137,14 @@ function JobCard({
   onToggle,
   onAction,
   onDelete,
+  nowMs,
 }: {
   job: Job
   expanded: boolean
   onToggle: () => void
   onAction: (action: JobAction) => void
   onDelete: () => void
+  nowMs: number
 }) {
   const [filter, setFilter] = useState<RowFilter>('all')
   const rows = job.output?.myPodRows ?? job.output?.comfyuiRows ?? []
@@ -128,6 +154,7 @@ function JobCard({
   const inputFolderLink = driveFolderLink(job.input?.inputDriveFolderId)
   const currentStage = job.output?.stage
     ?? rows.find(r => r.stage && r.status !== 'done' && r.status !== 'error')?.stage
+  const heartbeat = heartbeatInfo(job, nowMs)
   const textCount = job.input?.texts?.length
     ?? job.input?.textCount
     ?? (Array.isArray(job.input?.items) ? job.input.items.length : undefined)
@@ -165,6 +192,11 @@ function JobCard({
               <StatusBadge status={job.status} />
               {currentStage && job.status === 'processing' && (
                 <span className="text-[10px] text-muted-foreground font-mono">{currentStage}</span>
+              )}
+              {heartbeat && (
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${heartbeat.cls}`}>
+                  {heartbeat.label}
+                </span>
               )}
             </div>
             <p className="text-xs text-muted-foreground">
@@ -232,11 +264,20 @@ function JobCard({
                     ? 'bg-emerald-500'
                     : job.status === 'paused'
                       ? 'bg-amber-500'
-                      : 'bg-primary animate-pulse'
+                      : heartbeat && heartbeat.idleSec >= 15 * 60
+                        ? 'bg-destructive'
+                        : heartbeat && heartbeat.idleSec >= 120
+                          ? 'bg-amber-500'
+                          : 'bg-primary animate-pulse'
                 }`}
-                style={{ width: `${job.progress}%` }}
+                style={{ width: `${Math.max(job.progress, job.status === 'processing' ? 2 : 0)}%` }}
               />
             </div>
+            {heartbeat && heartbeat.idleSec >= 15 * 60 && (
+              <p className="text-[10px] text-destructive">
+                No heartbeat for {Math.floor(heartbeat.idleSec / 60)}m — cron will requeue around 25m idle.
+              </p>
+            )}
           </div>
         )}
 
@@ -390,6 +431,7 @@ export function QueueTab() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [loading, setLoading] = useState(true)
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  const [nowMs, setNowMs] = useState(() => Date.now())
 
   const fetchJobs = useCallback(async () => {
     try {
@@ -417,6 +459,13 @@ export function QueueTab() {
     const t = setTimeout(() => fetchJobs(), 5000)
     return () => clearTimeout(t)
   }, [jobs, fetchJobs])
+
+  useEffect(() => {
+    const hasProcessing = jobs.some(j => j.status === 'processing')
+    if (!hasProcessing) return
+    const t = setInterval(() => setNowMs(Date.now()), 5000)
+    return () => clearInterval(t)
+  }, [jobs])
 
   async function controlJob(id: string, action: JobAction) {
     const labels = { pause: 'Paused', resume: 'Queued to start', stop: 'Stopped' } as const
@@ -481,6 +530,7 @@ export function QueueTab() {
               key={job.id}
               job={job}
               expanded={!!expanded[job.id]}
+              nowMs={nowMs}
               onToggle={() => setExpanded(prev => ({ ...prev, [job.id]: !prev[job.id] }))}
               onAction={(action) => controlJob(job.id, action)}
               onDelete={() => deleteJob(job.id)}

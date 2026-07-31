@@ -127,13 +127,18 @@ async function muxTrimAnimateToDriving(
   writeFileSync(genPath, generated)
   writeFileSync(drivePath, driving)
   try {
-    const duration = await probeDurationSec(driving)
+    const driveDur = await probeDurationSec(driving)
+    const genDur = await probeDurationSec(generated)
     const hasAudio = await probeHasAudio(driving)
+    // Cap to the shorter stream so we never emit 4s video + 5s audio (or a frozen tail).
+    const cutCandidates = [driveDur, genDur].filter((d): d is number => d != null && d > 0)
+    const cutSec = cutCandidates.length ? Math.min(...cutCandidates) : null
     const args = ['-y', '-i', genPath]
     if (hasAudio) args.push('-i', drivePath)
     args.push('-map', '0:v:0')
     if (hasAudio) args.push('-map', '1:a:0')
-    if (duration != null) args.push('-t', duration.toFixed(3))
+    if (cutSec != null) args.push('-t', cutSec.toFixed(3))
+    if (hasAudio) args.push('-shortest')
     args.push(
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18',
       ...(hasAudio ? ['-c:a', 'aac', '-b:a', '192k'] : ['-an']),
@@ -171,7 +176,7 @@ function runPython(
     const beat = onHeartbeat
       ? setInterval(() => {
           void Promise.resolve(onHeartbeat()).catch(() => {})
-        }, 60_000)
+        }, 30_000)
       : null
     const timer = setTimeout(() => {
       child.kill('SIGKILL')
