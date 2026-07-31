@@ -43,20 +43,9 @@ function isPtyError(err: unknown): boolean {
   return /PTY|pseudo-?tty|pseudo-terminal/i.test(msg)
 }
 
-function runpodProxyHint(auth: SshAuth): string {
-  if (!/runpod\.io/i.test(auth.host)) return ''
-  return (
-    ' Tip: use RunPod “SSH over exposed TCP” (root@IP -p PORT), not ssh.runpod.io proxy — '
-    + 'the proxy often breaks long installs / PTY.'
-  )
-}
-
 /**
- * Run a remote command. Prefer a small PTY (RunPod ssh.runpod.io rejects
- * non-PTY sessions with "Your SSH client doesn't support PTY"). Fall back
- * without PTY for hosts that refuse allocation.
- *
- * Multi-line scripts are base64-piped into bash so newlines survive proxies.
+ * Run a remote command. Prefer a small PTY (RunPod ssh.runpod.io needs it).
+ * Fall back without PTY. Multi-line scripts are base64-piped into bash.
  */
 export async function sshExec(
   auth: SshAuth,
@@ -97,36 +86,19 @@ export async function sshExec(
       }),
     )
 
-  // RunPod proxy wants a PTY; direct TCP is fine either way.
   const withPty: ExecOptions = {
     pty: { term: 'xterm-256color', cols: 120, rows: 30 },
   }
 
   try {
     const result = await tryOnce(withPty)
-    // Some proxies accept the channel then print the PTY error on stderr and exit.
-    if (
-      result.code !== 0
-      && isPtyError(result.stderr || result.stdout)
-    ) {
-      const retry = await tryOnce(undefined)
-      if (retry.code === 0) return retry
-      throw new Error(
-        `${(result.stderr || result.stdout || 'SSH PTY error').trim()}.${runpodProxyHint(auth)}`,
-      )
+    if (result.code !== 0 && isPtyError(result.stderr || result.stdout)) {
+      return await tryOnce(undefined)
     }
     return result
   } catch (err) {
-    if (!isPtyError(err)) {
-      const msg = err instanceof Error ? err.message : String(err)
-      throw new Error(`${msg}${runpodProxyHint(auth)}`)
-    }
-    try {
-      return await tryOnce(undefined)
-    } catch (err2) {
-      const msg = err2 instanceof Error ? err2.message : String(err2)
-      throw new Error(`${msg}${runpodProxyHint(auth)}`)
-    }
+    if (!isPtyError(err)) throw err
+    return await tryOnce(undefined)
   }
 }
 
