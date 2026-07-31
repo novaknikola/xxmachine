@@ -5,7 +5,7 @@
  * Comfy HTTP; reboot via Manager HTTP when possible.
  */
 import { comfyHeaders } from '@/lib/my-pod/comfy'
-import { sshExec, type SshAuth } from '@/lib/my-pod/ssh'
+import { sshExec, sshShellExec, type SshAuth } from '@/lib/my-pod/ssh'
 
 export interface NodePack {
   provides: string[]
@@ -188,47 +188,50 @@ async function rebootComfyHttp(comfyBaseUrl: string, apiToken?: string | null): 
 }
 
 /**
- * One SSH call: find Comfy root + start background git/pip for all packs.
- * Progress is watched via Comfy HTTP (no SSH polling).
+ * Install packs via RunPod interactive SSH shell (exec is broken on ssh.runpod.io).
+ * Then reboot Comfy over HTTP and poll until required node types appear.
  */
-async function kickoffBackgroundInstalls(ssh: SshAuth, packs: NodePack[]): Promise<void> {
+async function installPacksViaShell(
+  ssh: SshAuth,
+  packs: NodePack[],
+  onProgress?: (msg: string) => void | Promise<void>,
+): Promise<void> {
   const lines: string[] = [
     'set +e',
-    'rm -f /tmp/xxm_install_ok /tmp/xxm_install_fail',
     'ROOT=""',
-    'for d in /workspace/ComfyUI /workspace/RunPod-ComfyUI /workspace/comfyui /ComfyUI /root/ComfyUI; do',
+    'for d in /app/ComfyUI /workspace/ComfyUI /workspace/RunPod-ComfyUI /workspace/comfyui /ComfyUI /root/ComfyUI; do',
     '  if [ -d "$d/custom_nodes" ]; then ROOT="$d"; break; fi',
     'done',
     'if [ -z "$ROOT" ]; then',
     '  CAND=$(ls -d /home/*/ComfyUI/custom_nodes 2>/dev/null | head -1 | sed "s|/custom_nodes||")',
     '  [ -n "$CAND" ] && ROOT="$CAND"',
     'fi',
-    'if [ -z "$ROOT" ]; then echo NO_ROOT > /tmp/xxm_install_fail; exit 1; fi',
+    'if [ -z "$ROOT" ]; then echo NO_COMFY_ROOT; exit 1; fi',
+    'echo ROOT=$ROOT',
   ]
 
   for (const pack of packs) {
-    const dest = `"$ROOT/custom_nodes/${pack.dir}"`
-    const repo = JSON.stringify(pack.repo)
     lines.push(
-      `DEST=${dest}`,
-      `REPO=${repo}`,
+      `DEST="$ROOT/custom_nodes/${pack.dir}"`,
+      `REPO=${JSON.stringify(pack.repo)}`,
+      'echo INSTALLING_$DEST',
       'if [ -d "$DEST/.git" ]; then git -C "$DEST" pull --ff-only || true',
-      'else rm -rf "$DEST"; git clone --depth 1 "$REPO" "$DEST" || { echo clone_fail > /tmp/xxm_install_fail; exit 1; }; fi',
+      'else rm -rf "$DEST"; git clone --depth 1 "$REPO" "$DEST" || exit 1; fi',
       'if [ -f "$DEST/requirements.txt" ]; then',
       '  if [ -x "$ROOT/venv/bin/pip" ]; then "$ROOT/venv/bin/pip" install -r "$DEST/requirements.txt" || true',
+      '  elif [ -x /opt/conda/bin/pip ]; then /opt/conda/bin/pip install -r "$DEST/requirements.txt" || true',
       '  else pip3 install -r "$DEST/requirements.txt" || pip install -r "$DEST/requirements.txt" || true; fi',
       'fi',
     )
   }
-  lines.push('touch /tmp/xxm_install_ok')
+  lines.push('echo INSTALLED_OK')
 
-  const b64 = Buffer.from(lines.join('\n'), 'utf8').toString('base64')
-  // Must return immediately — RunPod proxy drops long interactive sessions.
-  const start = `rm -f /tmp/xxm_install_ok /tmp/xxm_install_fail; nohup bash -c 'echo ${b64}|base64 -d|bash' >/tmp/xxm_install.log 2>&1 & echo STARTED`
-
-  const result = await sshExec(ssh, start, 120_000, 4)
-  if (!result.stdout.includes('STARTED')) {
-    throw new Error(`SSH kickoff failed: ${(result.stderr || result.stdout).slice(-400) || `exit ${result.code}`}`)
+  await onProgress?.('SSH shell install running…')
+  const result = await sshShellExec(ssh, lines.join('\n'), 12 * 60_000)
+  if (!result.stdout.includes('INSTALLED_OK')) {
+    throw new Error(
+      `SSH shell install failed: ${result.stdout.slice(-800) || `exit ${result.code}`}`,
+    )
   }
 }
 
@@ -249,12 +252,12 @@ async function installPacks(opts: {
   }
 
   if (!managerOk) {
-    await onProgress?.('starting background install over SSH…')
-    await kickoffBackgroundInstalls(ssh, packs)
+    await onProgress?.('installing via SSH shell…')
+    await installPacksViaShell(ssh, packs, onProgress)
   }
 
-  // Poll Comfy HTTP only — reboot periodically so newly cloned nodes load.
-  const deadline = Date.now() + 15 * 60_000
+  // Reboot + poll until nodes show up on Comfy HTTP.
+  const deadline = Date.now() + 10 * 60_000
   let lastReboot = 0
   while (Date.now() < deadline) {
     await onProgress?.('waiting for custom nodes…')
@@ -265,21 +268,20 @@ async function installPacks(opts: {
     if (missing.length === 0) return
 
     const now = Date.now()
-    if (now - lastReboot > 90_000) {
+    if (now - lastReboot > 60_000) {
       lastReboot = now
       await onProgress?.('rebooting ComfyUI…')
       const ok = await rebootComfyHttp(comfyBaseUrl, apiToken)
       if (!ok) {
-        await sshExec(
+        await sshShellExec(
           ssh,
-          'curl -sS -m 5 -X POST http://127.0.0.1:8188/manager/reboot >/dev/null 2>&1 || pkill -f "python.*main.py" || true; echo OK',
-          90_000,
-          2,
+          'curl -sS -m 5 -X POST http://127.0.0.1:8188/manager/reboot >/dev/null 2>&1 || pkill -f "python.*main.py" || true; echo REBOOT_TRIED',
+          120_000,
         ).catch(() => {})
       }
       await waitForComfy(comfyBaseUrl, apiToken, 180_000)
     }
-    await new Promise(r => setTimeout(r, 15_000))
+    await new Promise(r => setTimeout(r, 10_000))
   }
   throw new Error(`Timed out waiting for nodes: ${neededTypes.join(', ')}`)
 }

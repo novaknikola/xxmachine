@@ -50,6 +50,67 @@ function isTimeoutError(err: unknown): boolean {
 }
 
 /**
+ * RunPod ssh.runpod.io rejects non-PTY exec and ignores commands with forced PTY.
+ * Interactive shell WITH PTY works — send a script via the shell stdin.
+ */
+export async function sshShellExec(
+  auth: SshAuth,
+  script: string,
+  timeoutMs = 600_000,
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  const marker = `__XXM_DONE_${Date.now()}__`
+  const fullScript = `${script}\necho ${marker}\n`
+  const b64 = Buffer.from(fullScript, 'utf8').toString('base64')
+
+  return withSsh(auth, client =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('SSH shell timed out')), timeoutMs)
+      client.shell(
+        { term: 'xterm-256color', cols: 120, rows: 40 },
+        (err, stream) => {
+          if (err) {
+            clearTimeout(timer)
+            reject(err)
+            return
+          }
+          let buf = ''
+          let finished = false
+          const finish = (code: number) => {
+            if (finished) return
+            finished = true
+            clearTimeout(timer)
+            try { stream.end() } catch { /* ignore */ }
+            resolve({ stdout: buf, stderr: '', code })
+          }
+          stream.on('data', (d: Buffer) => {
+            buf += d.toString()
+            if (buf.includes(marker)) finish(0)
+          })
+          stream.stderr?.on('data', (d: Buffer) => { buf += d.toString() })
+          stream.on('close', () => finish(buf.includes(marker) ? 0 : 1))
+          stream.on('error', (e) => {
+            clearTimeout(timer)
+            reject(e)
+          })
+
+          // Let RunPod banner / login settle, then feed the script.
+          setTimeout(() => {
+            try {
+              stream.write('stty -echo 2>/dev/null || true\n')
+              stream.write(`echo ${b64} | base64 -d | bash\n`)
+              stream.write('exit\n')
+            } catch (e) {
+              clearTimeout(timer)
+              reject(e instanceof Error ? e : new Error(String(e)))
+            }
+          }, 2500)
+        },
+      )
+    }),
+  )
+}
+
+/**
  * Run a remote command. RunPod ssh.runpod.io needs a PTY and is slow —
  * timer starts only after the connection is ready; timeouts retry.
  */
