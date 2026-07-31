@@ -19,8 +19,9 @@ script works for any image/video pair without editing:
 
 Each "Video Extend" window contributes 77 frames on the first window and
 ~72 net new frames per additional window (77 minus the 5-frame continue_motion
-overlap). N_EXTEND_WINDOWS is derived from DRIVING_FRAMES so the chain always
-covers the full driving video (may overshoot by a few frames - harmless).
+overlap). N_EXTEND_WINDOWS is derived from DRIVING_FRAMES (0 when the first
+window alone covers the clip). Remaining overshoot is trimmed + audio muxed
+in the Node runner via ffmpeg against the driving file.
 """
 import json
 import math
@@ -44,7 +45,25 @@ HEIGHT = int(os.environ.get("OUT_HEIGHT", "832"))
 FIRST_WINDOW_FRAMES = 77
 CONTINUE_MOTION_OVERLAP = 5
 NET_FRAMES_PER_EXTRA_WINDOW = FIRST_WINDOW_FRAMES - CONTINUE_MOTION_OVERLAP  # 72
-N_EXTEND_WINDOWS = max(1, math.ceil((DRIVING_FRAMES - FIRST_WINDOW_FRAMES) / NET_FRAMES_PER_EXTRA_WINDOW))
+
+# WAN length widgets prefer 4n+1 (77 = 4*19+1).
+def _wan_length(frames: int) -> int:
+    frames = max(5, int(frames))
+    return 4 * ((frames - 1) // 4) + 1
+
+
+if DRIVING_FRAMES <= FIRST_WINDOW_FRAMES:
+    N_EXTEND_WINDOWS = 0
+    WINDOW1_LENGTH = _wan_length(DRIVING_FRAMES)
+    LAST_EXTEND_LENGTH = FIRST_WINDOW_FRAMES
+else:
+    # Cover at least DRIVING_FRAMES; last extend length sized to the remainder.
+    remaining_after_first = DRIVING_FRAMES - FIRST_WINDOW_FRAMES
+    N_EXTEND_WINDOWS = max(1, math.ceil(remaining_after_first / NET_FRAMES_PER_EXTRA_WINDOW))
+    WINDOW1_LENGTH = FIRST_WINDOW_FRAMES
+    covered_before_last = FIRST_WINDOW_FRAMES + (N_EXTEND_WINDOWS - 1) * NET_FRAMES_PER_EXTRA_WINDOW
+    last_net = max(1, DRIVING_FRAMES - covered_before_last)
+    LAST_EXTEND_LENGTH = _wan_length(last_net + CONTINUE_MOTION_OVERLAP)
 
 wf = json.load(open(WF_PATH))
 nodes = wf["nodes"]
@@ -216,7 +235,7 @@ api["10"]["inputs"]["image"] = IMAGE_FILE
 api["145"]["inputs"]["file"] = DRIVING_FILE
 api["159"]["inputs"]["value"] = WIDTH
 api["160"]["inputs"]["value"] = HEIGHT
-api[prefixed232(62)]["inputs"]["length"] = FIRST_WINDOW_FRAMES
+api[prefixed232(62)]["inputs"]["length"] = WINDOW1_LENGTH
 api[prefixed232(62)]["inputs"]["batch_size"] = 1
 api[prefixed232(63)]["inputs"]["seed"] = SEED
 api[prefixed232(63)]["inputs"]["steps"] = 6
@@ -225,84 +244,92 @@ api[prefixed232(63)]["inputs"]["sampler_name"] = "euler"
 api[prefixed232(63)]["inputs"]["scheduler"] = "simple"
 api[prefixed232(63)]["inputs"]["denoise"] = 1.0
 api[prefixed232(15)]["inputs"]["fps"] = FPS
+# Driving audio from GetVideoComponents (node 23) — must reach final CreateVideo.
 api[prefixed232(15)]["inputs"]["audio"] = ["23", 1]
 for dwid in ("100", "101"):
     if dwid in api:
         api[dwid]["inputs"]["pose_estimator"] = "dw-ll_ucoco_384.onnx"
 
+# Default final VIDEO = window-1 CreateVideo (used when N_EXTEND_WINDOWS == 0).
+vid_src = (prefixed232(15), 0)
+
 # ---- generic Video Extend window expansion (reused N times) ----
-sgext_links = sgext["links"]
+if N_EXTEND_WINDOWS > 0:
+    sgext_links = sgext["links"]
 
-# constant external sources for the extend subgraph's boundary inputs (slots 0-19),
-# derived from the top-level links that fed the original node 242 instance.
-const_source_for_slot = {}
-for l in wf["links"]:
-    if l[3] == 242 and l[4] not in (3, 13):  # exclude image1(3) and video_frame_offset(13) - dynamic
-        const_source_for_slot[l[4]] = (str(l[1]), l[2])
-const_source_for_slot[8] = ("facecrop", 0)  # face_video: real cropped RGB pixels, not skeleton
+    # constant external sources for the extend subgraph's boundary inputs (slots 0-19),
+    # derived from the top-level links that fed the original node 242 instance.
+    const_source_for_slot = {}
+    for l in wf["links"]:
+        if l[3] == 242 and l[4] not in (3, 13):  # exclude image1(3) and video_frame_offset(13) - dynamic
+            const_source_for_slot[l[4]] = (str(l[1]), l[2])
+    const_source_for_slot[8] = ("facecrop", 0)  # face_video: real cropped RGB pixels, not skeleton
 
-createvideo_id = next(n["id"] for n in sgext["nodes"] if n["type"] == "CreateVideo")
-imagebatch_id = next(n["id"] for n in sgext["nodes"] if n["type"] == "ImageBatch")
-wanA_id = next(n["id"] for n in sgext["nodes"] if n["type"] == "WanAnimateToVideo")
-ksampler_id = next(n["id"] for n in sgext["nodes"] if n["type"] == "KSampler")
+    createvideo_id = next(n["id"] for n in sgext["nodes"] if n["type"] == "CreateVideo")
+    imagebatch_id = next(n["id"] for n in sgext["nodes"] if n["type"] == "ImageBatch")
+    wanA_id = next(n["id"] for n in sgext["nodes"] if n["type"] == "WanAnimateToVideo")
+    ksampler_id = next(n["id"] for n in sgext["nodes"] if n["type"] == "KSampler")
 
-
-def expand_extend_window(prefix, image1_source, offset_source, window_widgets):
-    """window_widgets: dict node_id(int) -> widgets_values list, override per-window (seed/steps/cfg/etc + length)"""
-    for n in sgext["nodes"]:
-        ntype = n["type"]
-        node_inputs = {}
-        linked_names = set()
-        for inp in n.get("inputs", []) or []:
-            name = inp.get("name")
-            link_id = inp.get("link")
-            if link_id is None:
-                continue
-            l = next((x for x in sgext_links if x["id"] == link_id), None)
-            if l is None:
-                continue
-            if l["origin_id"] == -10:
-                slot = l["origin_slot"]
-                if slot == 3:
-                    node_inputs[name] = list(image1_source)
+    def expand_extend_window(prefix, image1_source, offset_source, window_widgets):
+        """window_widgets: dict node_id(int) -> widgets_values list, override per-window."""
+        for n in sgext["nodes"]:
+            ntype = n["type"]
+            node_inputs = {}
+            linked_names = set()
+            for inp in n.get("inputs", []) or []:
+                name = inp.get("name")
+                link_id = inp.get("link")
+                if link_id is None:
+                    continue
+                l = next((x for x in sgext_links if x["id"] == link_id), None)
+                if l is None:
+                    continue
+                if l["origin_id"] == -10:
+                    slot = l["origin_slot"]
+                    if slot == 3:
+                        node_inputs[name] = list(image1_source)
+                        linked_names.add(name)
+                    elif slot == 13:
+                        node_inputs[name] = list(offset_source)
+                        linked_names.add(name)
+                    elif slot in const_source_for_slot:
+                        node_inputs[name] = list(const_source_for_slot[slot])
+                        linked_names.add(name)
+                else:
+                    node_inputs[name] = [f"{prefix}{l['origin_id']}", l["origin_slot"]]
                     linked_names.add(name)
-                elif slot == 13:
-                    node_inputs[name] = list(offset_source)
-                    linked_names.add(name)
-                elif slot in const_source_for_slot:
-                    node_inputs[name] = list(const_source_for_slot[slot])
-                    linked_names.add(name)
-            else:
-                node_inputs[name] = [f"{prefix}{l['origin_id']}", l["origin_slot"]]
-                linked_names.add(name)
-        wv = window_widgets.get(n["id"], n.get("widgets_values"))
-        fill_widgets(node_inputs, ntype, linked_names, wv)
-        api[f"{prefix}{n['id']}"] = {"class_type": ntype, "inputs": node_inputs}
-    return (f"{prefix}{imagebatch_id}", 0), (f"{prefix}{wanA_id}", 5), (f"{prefix}{createvideo_id}", 0)
+            wv = window_widgets.get(n["id"], n.get("widgets_values"))
+            fill_widgets(node_inputs, ntype, linked_names, wv)
+            api[f"{prefix}{n['id']}"] = {"class_type": ntype, "inputs": node_inputs}
+        return (f"{prefix}{imagebatch_id}", 0), (f"{prefix}{wanA_id}", 5), (f"{prefix}{createvideo_id}", 0)
 
+    wan_widgets = next(n.get("widgets_values") for n in sgext["nodes"] if n["id"] == wanA_id)
+    createvideo_widgets = next(n.get("widgets_values") for n in sgext["nodes"] if n["id"] == createvideo_id)
 
-wan_widgets = next(n.get("widgets_values") for n in sgext["nodes"] if n["id"] == wanA_id)
-createvideo_widgets = next(n.get("widgets_values") for n in sgext["nodes"] if n["id"] == createvideo_id)
+    img_src = (prefixed232(58), 0)
+    off_src = (prefixed232(62), 5)
 
-img_src = (prefixed232(58), 0)
-off_src = (prefixed232(62), 5)
-vid_src = None
-
-for k in range(1, N_EXTEND_WINDOWS + 1):
-    prefix = f"sgext{k}_"
-    window_widgets = {
-        wanA_id: wan_widgets,
-        createvideo_id: createvideo_widgets,
-    }
-    img_src, off_src, vid_src = expand_extend_window(prefix, img_src, off_src, window_widgets)
-    api[f"{prefix}{ksampler_id}"]["inputs"]["seed"] = SEED + k
-    api[f"{prefix}{ksampler_id}"]["inputs"]["steps"] = 6
-    api[f"{prefix}{ksampler_id}"]["inputs"]["cfg"] = 1.0
-    api[f"{prefix}{ksampler_id}"]["inputs"]["sampler_name"] = "euler"
-    api[f"{prefix}{ksampler_id}"]["inputs"]["scheduler"] = "simple"
-    api[f"{prefix}{ksampler_id}"]["inputs"]["denoise"] = 1.0
-    api[f"{prefix}{wanA_id}"]["inputs"]["height"] = ["160", 0]  # extend subgraph only exposes one "width" boundary input that's wired to BOTH width+height internally; force real height here
-    api[f"{prefix}{createvideo_id}"]["inputs"]["fps"] = FPS
+    for k in range(1, N_EXTEND_WINDOWS + 1):
+        prefix = f"sgext{k}_"
+        window_widgets = {
+            wanA_id: wan_widgets,
+            createvideo_id: createvideo_widgets,
+        }
+        img_src, off_src, vid_src = expand_extend_window(prefix, img_src, off_src, window_widgets)
+        api[f"{prefix}{ksampler_id}"]["inputs"]["seed"] = SEED + k
+        api[f"{prefix}{ksampler_id}"]["inputs"]["steps"] = 6
+        api[f"{prefix}{ksampler_id}"]["inputs"]["cfg"] = 1.0
+        api[f"{prefix}{ksampler_id}"]["inputs"]["sampler_name"] = "euler"
+        api[f"{prefix}{ksampler_id}"]["inputs"]["scheduler"] = "simple"
+        api[f"{prefix}{ksampler_id}"]["inputs"]["denoise"] = 1.0
+        api[f"{prefix}{wanA_id}"]["inputs"]["height"] = ["160", 0]
+        # Last window shorter so we don't invent a frozen tail beyond the driving clip.
+        length = LAST_EXTEND_LENGTH if k == N_EXTEND_WINDOWS else FIRST_WINDOW_FRAMES
+        api[f"{prefix}{wanA_id}"]["inputs"]["length"] = length
+        api[f"{prefix}{createvideo_id}"]["inputs"]["fps"] = FPS
+        # Previous bug: audio only on window-1 CreateVideo, but SaveVideo always
+        # consumed the LAST extend CreateVideo → silent outputs.
+        api[f"{prefix}{createvideo_id}"]["inputs"]["audio"] = ["23", 1]
 
 # ---- final SaveVideo consuming the LAST window's VIDEO output ----
 api["9999"] = {
@@ -331,4 +358,8 @@ if _missing_refs:
     )
 
 json.dump(api, open(OUTPUT_JSON, "w"), indent=2)
-print(f"Built API workflow with {len(api)} nodes, {N_EXTEND_WINDOWS} extend windows chained, image={IMAGE_FILE}, driving={DRIVING_FILE}")
+print(
+    f"Built API workflow with {len(api)} nodes, {N_EXTEND_WINDOWS} extend windows, "
+    f"window1_length={WINDOW1_LENGTH}, last_extend_length={LAST_EXTEND_LENGTH}, "
+    f"driving_frames={DRIVING_FRAMES}, image={IMAGE_FILE}, driving={DRIVING_FILE}"
+)

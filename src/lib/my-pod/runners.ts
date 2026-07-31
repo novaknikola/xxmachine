@@ -74,6 +74,87 @@ export async function probeDrivingFrames(videoBuffer: Buffer): Promise<number> {
   return 362
 }
 
+async function probeDurationSec(videoBuffer: Buffer): Promise<number | null> {
+  const tmp = join(tmpdir(), `xxm_anim_dur_${randomUUID().slice(0, 8)}.mp4`)
+  writeFileSync(tmp, videoBuffer)
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'quiet',
+      '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      tmp,
+    ], { timeout: 30_000 })
+    const d = Number.parseFloat(stdout.trim())
+    return Number.isFinite(d) && d > 0 ? d : null
+  } catch {
+    return null
+  } finally {
+    try { unlinkSync(tmp) } catch { /* ignore */ }
+  }
+}
+
+async function probeHasAudio(videoBuffer: Buffer): Promise<boolean> {
+  const tmp = join(tmpdir(), `xxm_anim_aud_${randomUUID().slice(0, 8)}.mp4`)
+  writeFileSync(tmp, videoBuffer)
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'quiet',
+      '-select_streams', 'a',
+      '-show_entries', 'stream=index',
+      '-of', 'csv=p=0',
+      tmp,
+    ], { timeout: 30_000 })
+    return stdout.trim().length > 0
+  } catch {
+    return false
+  } finally {
+    try { unlinkSync(tmp) } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Mux driving-video audio onto Animate output and trim to driving duration.
+ * WAN window math can overshoot a few frames (frozen tail); this cuts it.
+ */
+async function muxTrimAnimateToDriving(
+  generated: Buffer,
+  driving: Buffer,
+): Promise<Buffer> {
+  const id = randomUUID().slice(0, 8)
+  const genPath = join(tmpdir(), `xxm_anim_gen_${id}.mp4`)
+  const drivePath = join(tmpdir(), `xxm_anim_drive_${id}.mp4`)
+  const outPath = join(tmpdir(), `xxm_anim_mux_${id}.mp4`)
+  writeFileSync(genPath, generated)
+  writeFileSync(drivePath, driving)
+  try {
+    const duration = await probeDurationSec(driving)
+    const hasAudio = await probeHasAudio(driving)
+    const args = ['-y', '-i', genPath]
+    if (hasAudio) args.push('-i', drivePath)
+    args.push('-map', '0:v:0')
+    if (hasAudio) args.push('-map', '1:a:0')
+    if (duration != null) args.push('-t', duration.toFixed(3))
+    args.push(
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18',
+      ...(hasAudio ? ['-c:a', 'aac', '-b:a', '192k'] : ['-an']),
+      '-movflags', '+faststart',
+      outPath,
+    )
+    await execFileAsync('ffmpeg', args, { timeout: 300_000 })
+    return readFileSync(outPath)
+  } catch (err) {
+    console.warn(
+      '[my-pod] animate mux/trim failed, keeping Comfy output:',
+      err instanceof Error ? err.message : err,
+    )
+    return generated
+  } finally {
+    for (const p of [genPath, drivePath, outPath]) {
+      try { unlinkSync(p) } catch { /* ignore */ }
+    }
+  }
+}
+
 function runPython(
   script: string,
   env: Record<string, string>,
@@ -222,11 +303,12 @@ export async function runAnimateItem(opts: {
   if (!m) throw new Error(`Animate sidecar unexpected output: ${stdout.slice(-800)}`)
   const filename = m[1]
   const subfolder = m[2] === '-' ? '' : m[2]
-  const buffer = await downloadFromComfy(
+  const raw = await downloadFromComfy(
     opts.comfyBaseUrl,
     { filename, subfolder, type: 'output' },
     opts.apiToken,
   )
+  const buffer = await muxTrimAnimateToDriving(raw, opts.videoBuffer)
   return { buffer, filename }
 }
 
