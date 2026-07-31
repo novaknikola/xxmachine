@@ -16,6 +16,7 @@ export interface NodePack {
 export const ANIMATE_REQUIRED_NODE_TYPES = [
   'DWPreprocessor',
   'Sam2Segmentation',
+  'DownloadAndLoadSAM2Model',
   'WanAnimateToVideo',
   'SaveVideo',
 ] as const
@@ -38,7 +39,7 @@ const ANIMATE_PACKS: NodePack[] = [
     dir: 'comfyui_controlnet_aux',
   },
   {
-    provides: ['Sam2Segmentation'],
+    provides: ['Sam2Segmentation', 'DownloadAndLoadSAM2Model'],
     repo: 'https://github.com/kijai/ComfyUI-segment-anything-2.git',
     dir: 'ComfyUI-segment-anything-2',
   },
@@ -251,15 +252,22 @@ async function installPacks(opts: {
   const { ssh, packs, comfyBaseUrl, apiToken, onProgress } = opts
   const neededTypes = [...new Set(packs.flatMap(p => p.provides))]
 
-  let managerOk = true
+  // Manager over public Comfy URL often returns 200 without installing — always verify.
+  const needShell: NodePack[] = []
   for (const pack of packs) {
     await onProgress?.(`Manager install: ${pack.dir}`)
-    if (!(await tryManagerHttpInstall(comfyBaseUrl, pack, apiToken))) managerOk = false
+    await tryManagerHttpInstall(comfyBaseUrl, pack, apiToken)
+    await new Promise(r => setTimeout(r, 3_000))
+    const still = []
+    for (const t of pack.provides) {
+      if (!(await probeNodeType(comfyBaseUrl, t, apiToken))) still.push(t)
+    }
+    if (still.length) needShell.push(pack)
   }
 
-  if (!managerOk) {
-    await onProgress?.('installing via SSH shell…')
-    await installPacksViaShell(ssh, packs, onProgress)
+  if (needShell.length) {
+    await onProgress?.(`SSH shell install: ${needShell.map(p => p.dir).join(', ')}`)
+    await installPacksViaShell(ssh, needShell, onProgress)
   }
 
   // Reboot + poll until nodes show up on Comfy HTTP.

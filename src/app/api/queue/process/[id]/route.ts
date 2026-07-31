@@ -852,10 +852,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         )
       }
 
-      // Once per batch: probe DWPreprocessor etc.; auto-install via SSH if missing.
+      // Once per batch: install missing Animate nodes via Comfy URL + SSH shell (per pod).
       leaseStage = 'ensuring_nodes'
       await touchLease()
-      {
+      const runAnimateEnsure = async () => {
         const { ensureAnimateNodes } = await import('@/lib/my-pod/ensure-comfy-nodes')
         const ensured = await ensureAnimateNodes({
           comfyBaseUrl: session.comfyBaseUrl,
@@ -868,6 +868,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           console.log(`[my_pod_animate] auto-installed: ${ensured.installed.join(', ')}`)
         }
       }
+      await runAnimateEnsure()
 
       for (let i = doneCount; i < input.items.length; i++) {
         if (!(await myPodJobStillRunning(id))) break
@@ -880,18 +881,45 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           await touchLease()
           leaseStage = 'running_windows'
           await touchLease()
-          const result = await runAnimateItem({
-            comfyBaseUrl: session.comfyBaseUrl,
-            apiToken: session.comfyApiToken,
-            ssh: session.ssh,
-            imageBuffer: refBuf,
-            imageName: input.referenceImageName,
-            videoBuffer: vidBuf,
-            videoName: item.name,
-            jobId: `${id}_${i}`,
-            onHeartbeat: touchLease,
-            skipEnsureNodes: true,
-          })
+          let result
+          try {
+            result = await runAnimateItem({
+              comfyBaseUrl: session.comfyBaseUrl,
+              apiToken: session.comfyApiToken,
+              ssh: session.ssh,
+              imageBuffer: refBuf,
+              imageName: input.referenceImageName,
+              videoBuffer: vidBuf,
+              videoName: item.name,
+              jobId: `${id}_${i}`,
+              onHeartbeat: touchLease,
+              skipEnsureNodes: true,
+            })
+          } catch (firstErr) {
+            const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr)
+            // Node 107 = Sam2Segmentation — re-ensure once then retry this item.
+            if (/missing node ids:\s*107|Sam2Segmentation|DWPreprocessor/i.test(firstMsg)) {
+              leaseStage = 'ensuring_nodes'
+              await touchLease()
+              await runAnimateEnsure()
+              leaseStage = 'running_windows'
+              await touchLease()
+              result = await runAnimateItem({
+                comfyBaseUrl: session.comfyBaseUrl,
+                apiToken: session.comfyApiToken,
+                ssh: session.ssh,
+                imageBuffer: refBuf,
+                imageName: input.referenceImageName,
+                videoBuffer: vidBuf,
+                videoName: item.name,
+                jobId: `${id}_${i}_retry`,
+                onHeartbeat: touchLease,
+                skipEnsureNodes: true,
+              })
+            } else {
+              throw firstErr
+            }
+          }
           const ext = result.filename.split('.').pop() ?? 'mp4'
           const uploaded = await uploadToDriveFolderResilient(
             job.user_id,
@@ -910,7 +938,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         await query(
           `UPDATE generation_queue
               SET done_items=$1, progress=$2, output=$3::jsonb
-            WHERE id=$4`,
+            WHERE id=$4 AND status='processing'`,
           [doneCount, Math.round((doneCount / input.items.length) * 100), packMyPodOutput(rows, 'uploading'), id],
         )
       }
