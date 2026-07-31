@@ -1,6 +1,6 @@
 import { nichePrompt, type NicheDefinition } from '@/lib/niche-utils'
 
-/** 42 additional branded niches (~12 prompts each). */
+/** 43 additional branded niches (~12 prompts each). */
 export const EXTRA_NICHE_DEFINITIONS: NicheDefinition[] = [
   {
     id: 'coquette',
@@ -840,6 +840,26 @@ export const EXTRA_NICHE_DEFINITIONS: NicheDefinition[] = [
       nichePrompt('ice show group number solo crop, elaborate costume, graceful arm position'),
       nichePrompt('morning practice empty rink, simple practice dress, focused solitary skate'),
       nichePrompt('competition kiss-and-cry bench awaiting scores, warm-up jacket, anxious hopeful smile'),
+    ],
+  },
+  {
+    id: 'dubai-car-girl',
+    label: 'Dubai Car Girl',
+    description: 'Luxury car showroom life, supercars, desert skyline, high-end rental hustle glam.',
+    defaultHairLock: 'long sleek glossy blowout, straight and polished with a designer headscarf option',
+    prompts: [
+      nichePrompt('showroom floor leaning against a matte black supercar, fitted blazer dress, showroom lights reflecting off the hood'),
+      nichePrompt('supercar driver seat selfie, one hand on the wheel, sunglasses and gold jewelry, tinted windows'),
+      nichePrompt('rooftop parking garage Dubai skyline behind, hand resting on a bright orange supercar door, wind in hair'),
+      nichePrompt('desert highway pulled over beside a white convertible, headscarf and oversized sunglasses, dunes stretching behind'),
+      nichePrompt('showroom key handoff moment, tailored pantsuit, keys dangling from manicured fingers, gleaming car row behind'),
+      nichePrompt('gas station forecourt fueling a hypercar, casual luxury athleisure, sunglasses pushed up'),
+      nichePrompt('hotel valet stand stepping out of a low sports car, evening gown, valet blurred in background'),
+      nichePrompt('car wash detailing bay, silk shirt tied at waist, soapy supercar hood, playful candid smile'),
+      nichePrompt('Palm Jumeirah villa driveway, sitting on the hood of a convertible, golden hour light'),
+      nichePrompt('showroom glass office negotiating a rental, fitted dress and heels, paperwork and car keys on desk'),
+      nichePrompt('night drive city lights streaking past windows, dashboard glow on face, confident hands on wheel'),
+      nichePrompt('rooftop helipad backdrop, leaning on a matte-finish supercar, floor-length slit dress, skyline haze'),
     ],
   },
 ]

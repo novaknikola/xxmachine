@@ -66,6 +66,7 @@ export const NICHE_HAIR_DEFAULTS: Record<string, string> = {
   'swim-dive': 'wet slicked-back hair, competitive swim-cap ready style',
   'cheerleader': 'high sleek ponytail with team-color ribbon',
   'figure-skater': 'sleek competition bun with sparkling hairpins',
+  'dubai-car-girl': 'long sleek glossy blowout, straight and polished with a designer headscarf option',
 }
 
 export function getNicheHairDefault(nicheId: string): string {

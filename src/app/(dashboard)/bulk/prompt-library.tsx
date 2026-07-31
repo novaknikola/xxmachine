@@ -864,24 +864,42 @@ export function InstagramBundleDialog({
               Brand niches ({NICHE_DEFINITIONS.length})
             </p>
             <input
-              type="text"
-              placeholder="Search niches..."
+              type="search"
+              placeholder="Search niches by name…"
               value={nicheSearch}
               onChange={e => setNicheSearch(e.target.value)}
+              autoComplete="off"
               className="w-full mb-2 h-8 px-2 text-xs rounded-md border border-border bg-background"
             />
             <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-              {NICHE_BUNDLES.filter(b => {
-                if (!nicheSearch.trim()) return true
-                const q = nicheSearch.toLowerCase()
-                return b.label.toLowerCase().includes(q) || b.description.toLowerCase().includes(q)
-              }).map(bundle => {
+              {(() => {
+                const q = nicheSearch.trim().toLowerCase()
+                const filtered = NICHE_BUNDLES.filter(b => {
+                  if (!q) return true
+                  const niche = NICHE_DEFINITIONS.find(n => n.id === b.nicheId)
+                  const hay = [
+                    niche?.label,
+                    niche?.id?.replace(/-/g, ' '),
+                    niche?.description,
+                    b.label,
+                    b.description,
+                  ].filter(Boolean).join(' ').toLowerCase()
+                  return hay.includes(q)
+                })
+                if (!filtered.length) {
+                  return (
+                    <p className="text-xs text-muted-foreground text-center py-6">
+                      No brand niches match &quot;{nicheSearch.trim()}&quot;.
+                    </p>
+                  )
+                }
+                return filtered.map(bundle => {
                 const count = resolveBundle(bundle).length
                 const niche = NICHE_DEFINITIONS.find(n => n.id === bundle.nicheId)
                 const aiBusy = generatingLabel === `${niche?.label ?? bundle.label} AI`
                 const anyBusy = generatingLabel !== null
                 return (
-                  <div key={bundle.label} className={`flex items-start gap-3 p-3 rounded-xl border transition-colors ${
+                  <div key={bundle.nicheId ?? bundle.label} className={`flex items-start gap-3 p-3 rounded-xl border transition-colors ${
                     bundle.nicheId && bundle.nicheId === highlightNicheId
                       ? 'border-primary bg-primary/15 ring-1 ring-primary/40'
                       : 'border-primary/25 bg-primary/5 hover:border-primary/40'
@@ -912,7 +930,8 @@ export function InstagramBundleDialog({
                     </div>
                   </div>
                 )
-              })}
+              })
+              })()}
             </div>
           </div>
 
@@ -924,7 +943,19 @@ export function InstagramBundleDialog({
               Separate from brand niches — tagged <span className="font-mono">mygif</span> in the library. Rewrite of scraped OF-strict prompts.
             </p>
             <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
-              {MYGIF_BUNDLES.map(bundle => {
+              {MYGIF_BUNDLES.filter(b => {
+                const q = nicheSearch.trim().toLowerCase()
+                if (!q) return true
+                const niche = MYGIF_NICHE_DEFINITIONS.find(n => n.id === b.nicheId)
+                const hay = [
+                  niche?.label,
+                  niche?.id?.replace(/-/g, ' '),
+                  niche?.description,
+                  b.label,
+                  b.description,
+                ].filter(Boolean).join(' ').toLowerCase()
+                return hay.includes(q)
+              }).map(bundle => {
                 const count = resolveBundle(bundle).length
                 const niche = MYGIF_NICHE_DEFINITIONS.find(n => n.id === bundle.nicheId)
                 const anyBusy = generatingLabel !== null
