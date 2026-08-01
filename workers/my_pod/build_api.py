@@ -347,8 +347,12 @@ def _compute_sam2_point(filename: str):
                 "bbox_detector": "yolox_l.onnx", "pose_estimator": "dw-ll_ucoco_384.onnx",
                 "scale_stick_for_xinsr_cn": "disable",
             }},
+            # Comfy rejects a prompt with no OUTPUT_NODE at all ("prompt_no_outputs", HTTP 400)
+            # before it ever queues -- DWPreprocessor itself isn't one, so this dummy sink is
+            # required for the submission to be accepted. Its image is never read.
+            "6": {"class_type": "PreviewImage", "inputs": {"images": ["5", 0]}},
         }
-        outputs = _submit_and_wait(preflight, timeout=90)
+        outputs = _submit_and_wait(preflight, timeout=120)
         raw = outputs["5"]["openpose_json"][0]
         frame0 = json.loads(raw)[0]
         kp = frame0["people"][0]["pose_keypoints_2d"]
