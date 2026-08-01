@@ -11,14 +11,18 @@ export async function GET(req: NextRequest) {
   const limit    = Math.min(parseInt(searchParams.get('limit') ?? '50'), 100)
   const offset   = parseInt(searchParams.get('offset') ?? '0')
 
-  const data = await rows(
+  const data = await rows<{ score: string | number }>(
     `select * from discovery_items
       where user_id = $1 and admin_status = $2
       order by score desc, discovered_at desc
       limit $3 offset $4`,
     [user.id, status, limit, offset],
   )
-  return NextResponse.json({ items: data })
+  // `score` is a Postgres `numeric` column; node-postgres returns those as
+  // strings (not JS numbers) to avoid precision loss, which crashes any
+  // caller doing `item.score.toFixed(...)`.
+  const items = data.map(row => ({ ...row, score: Number(row.score) }))
+  return NextResponse.json({ items })
 }
 
 export async function PATCH(req: NextRequest) {
