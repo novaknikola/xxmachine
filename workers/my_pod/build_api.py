@@ -20,6 +20,7 @@ script works for any image/video pair without editing:
   SCENE_CUT_THRESHOLD         ffmpeg scene-score delta that counts as a hard cut (default: 0.12)
   MAX_CUTAWAY_RUN_FRAMES      only auto-neutralize runs up to this long (default: 15)
   DYNAMIC_SAM2_POINT          disable the per-video SAM2 click-point below by setting to "0" (default: "1")
+  AUTO_FPS                    disable driving-video fps auto-detect below by setting to "0" (default: "1")
 
 Each "Video Extend" window contributes 77 frames on the first window and
 ~72 net new frames per additional window (77 minus the 5-frame continue_motion
@@ -53,6 +54,17 @@ output instead of being replaced. _compute_sam2_point() runs a small
 standalone DWPose pass on the driving video's first frame and uses the
 person's neck keypoint (stable regardless of arm/leg pose) as the click-point
 instead, so segmentation targets the actual subject in every clip.
+
+CreateVideo tags every window's output at a hardcoded 30fps regardless of the
+driving video's real frame rate. DRIVING_FRAMES already maps 1 driving frame
+to 1 output frame, so a clip shot at e.g. 24fps still gets all its frames --
+but re-timed to 30fps, the render plays back ~25% faster than the driving
+audio (muxed from the same file at its true pace). The final audio/video mux
+trims to min(video, audio) duration (see the "frozen tail" fix in
+runners.ts), so the now-shorter, sped-up video silently truncates the tail of
+the audio -- the clip looks like it cuts off mid-sentence, when really it's
+just running too fast for its own soundtrack. _detect_driving_fps() probes
+the driving file's real fps and uses that instead of the hardcoded default.
 """
 import json
 import math
@@ -376,6 +388,31 @@ def _compute_sam2_point(filename: str):
 
 SAM2_POINT_X, SAM2_POINT_Y = _compute_sam2_point(DRIVING_FILE)
 
+AUTO_FPS = os.environ.get("AUTO_FPS", "1") != "0"
+
+
+def _detect_driving_fps(filename: str) -> float:
+    """Probes the driving file's real fps; falls back to FPS on any failure."""
+    if not AUTO_FPS:
+        return FPS
+    workdir = tempfile.mkdtemp(prefix="xxm_fps_probe_")
+    try:
+        src = os.path.join(workdir, "src.mp4")
+        _download_comfy_input(filename, src)
+        fps = _probe_fps(src)
+        if fps and fps > 0:
+            print(f"Detected driving fps={fps:.3f} for {filename} (default was {FPS})")
+            return fps
+        return FPS
+    except Exception as e:
+        print(f"WARN: driving fps detection failed for {filename}, using default {FPS}: {e}")
+        return FPS
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+FPS = _detect_driving_fps(DRIVING_FILE)
+
 obj_info = {}
 for t in types_needed:
     try:
@@ -639,5 +676,5 @@ print(
     f"Built API workflow with {len(api)} nodes, {N_EXTEND_WINDOWS} extend windows, "
     f"window1_length={WINDOW1_LENGTH}, last_extend_length={LAST_EXTEND_LENGTH}, "
     f"driving_frames={DRIVING_FRAMES}, image={IMAGE_FILE}, driving={DRIVING_FILE}, "
-    f"sam2_point=({SAM2_POINT_X:.1f},{SAM2_POINT_Y:.1f})"
+    f"sam2_point=({SAM2_POINT_X:.1f},{SAM2_POINT_Y:.1f}), fps={FPS:.3f}"
 )
