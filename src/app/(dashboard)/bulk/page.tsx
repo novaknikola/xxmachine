@@ -303,6 +303,9 @@ function BulkPageInner() {
         fd.append('size', datasetSize)
         fd.append('saveHistory', 'true')
         fd.append('historyPrompt', prompt)
+        // Matches the job row below; without it the Drive archive files these
+        // under _unsorted/ instead of dataset/.
+        fd.append('characterName', 'Dataset')
         const res = await fetch('/api/edit-image', { method: 'POST', body: fd })
         const data = await res.json()
         if (!res.ok || !data.urls?.length) throw new Error(data.error ?? 'Failed')
@@ -446,7 +449,14 @@ function BulkPageInner() {
     prompt: string,
     size: string,
     imageUrls: string[],
-    meta?: { characterId?: string; characterName?: string; contentFormat?: ContentFormat },
+    meta?: {
+      characterId?: string
+      characterName?: string
+      contentFormat?: ContentFormat
+      seriesId?: string
+      seriesIndex?: number
+      seriesTotal?: number
+    },
   ): Promise<string[]> {
     const res = await fetch('/api/edit-image', {
       method: 'POST',
@@ -462,6 +472,9 @@ function BulkPageInner() {
         characterId: meta?.characterId,
         characterName: meta?.characterName,
         contentFormat: meta?.contentFormat ?? contentFormat,
+        seriesId: meta?.seriesId,
+        seriesIndex: meta?.seriesIndex,
+        seriesTotal: meta?.seriesTotal,
       }),
     })
     const data = await res.json()
@@ -572,6 +585,16 @@ function BulkPageInner() {
       return
     }
 
+    // Base + every variant slide of this carousel are separate generation
+    // calls (own random genId each), so nothing normally ties them together
+    // or numbers them for Drive. Sharing one seriesId + this slide's
+    // position groups + orders them correctly — see buildArchiveFilename.
+    // seriesTotal is the INTENDED count (1 base + carouselExtra), fixed
+    // before any variant actually runs, so the base slide can be tagged
+    // up front; some positions may end up missing if a variant call fails.
+    const seriesId = carouselMode ? crypto.randomUUID() : undefined
+    const seriesTotal = carouselMode ? 1 + carouselExtra : undefined
+
     updateJob(job.id, { status: 'processing', startedAt: new Date().toISOString(), sentPrompt: generationPrompt, sentLoraUrl: loraUrl ?? undefined })
     try {
       let baseUrls: string[]
@@ -581,6 +604,9 @@ function BulkPageInner() {
           characterId: job.characterId || undefined,
           characterName: job.characterName,
           contentFormat: carouselMode ? 'carousels' : contentFormat,
+          seriesId,
+          seriesIndex: 0,
+          seriesTotal,
         })
       } else {
         const res = await fetch('/api/generate', {
@@ -596,6 +622,9 @@ function BulkPageInner() {
             characterName: job.characterName,
             userId: user?.id,
             contentFormat: carouselMode ? 'carousels' : contentFormat,
+            seriesId,
+            seriesIndex: 0,
+            seriesTotal,
           }),
         })
         const data = await res.json()
@@ -636,7 +665,7 @@ function BulkPageInner() {
           ? (await ensureCarouselRefUrls()).slice(0, SEEDREAM_MAX_IMAGES - 1)
           : []
 
-        const results = await Promise.allSettled(variantPrompts.map(async variantPrompt => {
+        const results = await Promise.allSettled(variantPrompts.map(async (variantPrompt, vi) => {
           const editUrls = await callSeedreamEdit(
             variantPrompt,
             job.dimension,
@@ -645,6 +674,9 @@ function BulkPageInner() {
               characterId: job.characterId || undefined,
               characterName: job.characterName,
               contentFormat: 'carousels',
+              seriesId,
+              seriesIndex: vi + 1,
+              seriesTotal,
             },
           )
           return editUrls[0]
