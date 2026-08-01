@@ -77,6 +77,20 @@ export async function notifyReplicationDone(opts: {
   })
 }
 
+export async function notifyViralPost(
+  userId: string,
+  profile: string,
+  contentUrl: string,
+  viewsGained: number,
+): Promise<void> {
+  const lines = [
+    `🚀 <b>Viral alert</b> — @${escapeHtml(profile)}`,
+    `+${viewsGained.toLocaleString()} views in ~24h`,
+    escapeHtml(contentUrl),
+  ]
+  await notifyMonitorUser(userId, lines.join('\n'))
+}
+
 export async function notifyReplicationFailed(
   userId: string,
   profile: string,

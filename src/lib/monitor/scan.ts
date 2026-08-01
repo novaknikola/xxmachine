@@ -2,9 +2,14 @@ import { one, query } from '@/lib/db'
 import { resolveKey } from '@/lib/user-keys'
 import { listProfileReels, resolveVideoUrlViaRapidApi, type ApifyReel } from '@/lib/instagram-scrape'
 import { calculateViralityScore, calculateVelocity } from '@/lib/virality'
+import { notifyViralPost } from '@/lib/monitor/notify'
 import type { TrackedProfileRow } from './types'
 
 const ENRICH_CONCURRENCY = 3
+const VIRAL_VIEWS_THRESHOLD = Number(process.env.VIRAL_VIEWS_THRESHOLD ?? 100_000)
+// Guard against alerting on a delta spanning a much longer gap than the ~23h scan cadence
+// (e.g. a profile paused for days then reactivated) — that's not a "went viral in 24h" signal.
+const VIRAL_CHECK_MAX_HOURS = 26
 
 export interface ScanResult {
   added: number
@@ -83,44 +88,82 @@ export async function scanTrackedProfile(
       continue
     }
 
-    const inserted = await one<{ id: string }>(
-      `INSERT INTO discovery_items
-         (user_id, platform, profile, content_url, content_id,
-          views, likes, comments, followers, score, velocity,
-          thumbnail_url, video_url, posted_at, replicate_status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-       ON CONFLICT (user_id, content_id) DO NOTHING
-       RETURNING id`,
-      [
-        userId,
-        'Instagram',
-        profile.username,
-        row.url,
-        row.contentId,
-        row.views,
-        row.likes,
-        row.comments,
-        followers,
-        score,
-        calculateVelocity(row.views, postedAt),
-        row.thumbnailUrl,
-        row.videoUrl,
-        postedAt.toISOString(),
-        profile.autopilot && score >= profile.autopilot_min_score ? 'pending_classify' : 'none',
-      ],
+    const existing = await one<{
+      id: string
+      views_at_last_check: number | null
+      checked_at: string | null
+      viral_alerted_at: string | null
+    }>(
+      `SELECT id, views_at_last_check, checked_at, viral_alerted_at
+         FROM discovery_items WHERE user_id = $1 AND content_id = $2`,
+      [userId, row.contentId],
     )
 
-    if (inserted) {
-      newItemIds.push(inserted.id)
-      if (profile.autopilot && score >= profile.autopilot_min_score) {
-        await query(
-          `UPDATE discovery_items SET admin_status = 'APPROVED' WHERE id = $1`,
-          [inserted.id],
-        )
+    if (!existing) {
+      const inserted = await one<{ id: string }>(
+        `INSERT INTO discovery_items
+           (user_id, platform, profile, content_url, content_id,
+            views, likes, comments, followers, score, velocity,
+            thumbnail_url, video_url, posted_at, replicate_status,
+            views_at_last_check, checked_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,now())
+         ON CONFLICT (user_id, content_id) DO NOTHING
+         RETURNING id`,
+        [
+          userId,
+          'Instagram',
+          profile.username,
+          row.url,
+          row.contentId,
+          row.views,
+          row.likes,
+          row.comments,
+          followers,
+          score,
+          calculateVelocity(row.views, postedAt),
+          row.thumbnailUrl,
+          row.videoUrl,
+          postedAt.toISOString(),
+          profile.autopilot && score >= profile.autopilot_min_score ? 'pending_classify' : 'none',
+          row.views,
+        ],
+      )
+
+      if (inserted) {
+        newItemIds.push(inserted.id)
+        if (profile.autopilot && score >= profile.autopilot_min_score) {
+          await query(
+            `UPDATE discovery_items SET admin_status = 'APPROVED' WHERE id = $1`,
+            [inserted.id],
+          )
+        }
+      } else {
+        skippedDuplicate++
       }
-    } else {
-      skippedDuplicate++
+      continue
     }
+
+    // Already tracked — re-check for a viral spike since the last scan, then refresh stats.
+    if (existing.checked_at && existing.views_at_last_check != null) {
+      const hoursSinceCheck = (Date.now() - new Date(existing.checked_at).getTime()) / 3_600_000
+      const deltaViews = row.views - existing.views_at_last_check
+      if (
+        hoursSinceCheck <= VIRAL_CHECK_MAX_HOURS &&
+        deltaViews >= VIRAL_VIEWS_THRESHOLD &&
+        !existing.viral_alerted_at
+      ) {
+        await notifyViralPost(userId, profile.username, row.url, deltaViews).catch(() => {})
+        await query(`UPDATE discovery_items SET viral_alerted_at = now() WHERE id = $1`, [existing.id])
+      }
+    }
+    await query(
+      `UPDATE discovery_items
+          SET views = $3, likes = $4, comments = $5, score = $6, velocity = $7,
+              views_at_last_check = $3, checked_at = now()
+        WHERE id = $1 AND user_id = $2`,
+      [existing.id, userId, row.views, row.likes, row.comments, score, calculateVelocity(row.views, postedAt)],
+    )
+    skippedDuplicate++
   }
 
   await query(
