@@ -73,6 +73,17 @@ export function buildArchiveFilename(opts: {
   total: number
   /** AI pipeline tag — lives in filename, not folder path. */
   modelKey?: string | null
+  /**
+   * Groups multiple INDEPENDENT generation calls into one ordered set — e.g.
+   * bulk carousel slides, where each slide is its own persistGeneration call
+   * (own random sourceId, own single-url `total`=1), so nothing normally ties
+   * them together or numbers them. When set, this overrides the id segment
+   * (same seriesId → same prefix for every slide) and always appends a
+   * zero-padded position, regardless of this call's own `total`.
+   */
+  seriesId?: string | null
+  seriesIndex?: number | null
+  seriesTotal?: number | null
 }): string {
   const day = archiveDateKey()
   const model = sanitizeDriveKey(opts.modelKey, 'gen').replace(/^_/, '') || 'gen'
@@ -80,9 +91,16 @@ export function buildArchiveFilename(opts: {
     opts.sourceType === 'generation' ? 'gen'
       : opts.sourceType === 'discovery_item' ? 'disc'
         : 'job'
-  const idShort = opts.sourceId.replace(/-/g, '').slice(0, 8)
+  const inSeries = !!opts.seriesId && (opts.seriesTotal ?? 0) > 1
+  const idShort = inSeries
+    ? sanitizeDriveKey(opts.seriesId).replace(/^_/, '').slice(0, 8)
+    : opts.sourceId.replace(/-/g, '').slice(0, 8)
   const hash8 = hashUrl(opts.url).slice(0, 8)
   const ext = extFromUrl(opts.url, opts.mimeType)
-  const suffix = opts.total > 1 ? `_${opts.index + 1}` : ''
-  return `${day}_${model}_${shortType}-${idShort}_${hash8}${suffix}.${ext}`
+  const position = inSeries ? (opts.seriesIndex ?? 0) + 1 : opts.index + 1
+  // Position must sort BEFORE the hash so alphabetical Drive order follows
+  // slide sequence — a trailing position after the (random) hash would sort
+  // by hash first and scatter the slides anyway.
+  const positionTag = inSeries || opts.total > 1 ? `_${String(position).padStart(2, '0')}` : ''
+  return `${day}_${model}_${shortType}-${idShort}${positionTag}_${hash8}.${ext}`
 }

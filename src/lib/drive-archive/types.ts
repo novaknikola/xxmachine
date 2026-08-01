@@ -18,4 +18,8 @@ export interface EnqueueDriveArchiveInput {
   stage?: import('./content-format').DriveArchiveStage | null
   /** UTC YYYY-MM-DD; defaults to today at enqueue time. */
   dateKey?: string | null
+  /** See buildArchiveFilename — groups independent calls (e.g. carousel slides) into one ordered set. */
+  seriesId?: string | null
+  seriesIndex?: number | null
+  seriesTotal?: number | null
 }

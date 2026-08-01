@@ -75,6 +75,10 @@ interface EditImageJsonBody {
   characterId?: string
   characterName?: string
   contentFormat?: string
+  /** Groups sibling calls (e.g. bulk carousel slides) into one ordered Drive set. */
+  seriesId?: string
+  seriesIndex?: number
+  seriesTotal?: number
 }
 
 async function saveToHistory(opts: {
@@ -86,6 +90,9 @@ async function saveToHistory(opts: {
   characterId?: string | null
   characterName?: string | null
   contentFormat?: string | null
+  seriesId?: string | null
+  seriesIndex?: number | null
+  seriesTotal?: number | null
 }) {
   if (!opts.wavespeedUrls.length) return
   try {
@@ -99,6 +106,9 @@ async function saveToHistory(opts: {
       characterId: opts.characterId ?? null,
       characterName: opts.characterName ?? null,
       contentFormat: opts.contentFormat ?? null,
+      seriesId: opts.seriesId ?? null,
+      seriesIndex: opts.seriesIndex ?? null,
+      seriesTotal: opts.seriesTotal ?? null,
     })
   } catch (e) {
     // History is best-effort: never fail the edit because of it.
@@ -152,6 +162,9 @@ export async function POST(req: NextRequest) {
           characterId: body.characterId ?? null,
           characterName: body.characterName ?? null,
           contentFormat: body.contentFormat ?? null,
+          seriesId: body.seriesId ?? null,
+          seriesIndex: body.seriesIndex ?? null,
+          seriesTotal: body.seriesTotal ?? null,
         })
       }
 
@@ -176,6 +189,11 @@ export async function POST(req: NextRequest) {
     // always been filed under `wan_edit` in History.
     const historyKind = (form.get('kind') as string | null)?.trim() || 'wan_edit'
     const resolution = parseResolution((form.get('resolution') as string | null)?.trim())
+    const seriesId = (form.get('seriesId') as string | null)?.trim() || null
+    const seriesIndexRaw = form.get('seriesIndex') as string | null
+    const seriesTotalRaw = form.get('seriesTotal') as string | null
+    const seriesIndex = seriesIndexRaw != null ? Number(seriesIndexRaw) : null
+    const seriesTotal = seriesTotalRaw != null ? Number(seriesTotalRaw) : null
 
     if (!prompt) return NextResponse.json({ error: 'Missing prompt' }, { status: 400 })
 
@@ -228,6 +246,9 @@ export async function POST(req: NextRequest) {
         characterId: (form.get('characterId') as string | null) || null,
         characterName: (form.get('characterName') as string | null) || null,
         contentFormat: (form.get('contentFormat') as string | null) || null,
+        seriesId,
+        seriesIndex,
+        seriesTotal,
       })
     }
 

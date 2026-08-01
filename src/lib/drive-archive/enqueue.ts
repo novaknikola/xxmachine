@@ -65,6 +65,9 @@ export async function enqueueDriveArchive(
       index: i,
       total: urls.length,
       modelKey,
+      seriesId: input.seriesId,
+      seriesIndex: input.seriesIndex,
+      seriesTotal: input.seriesTotal,
     })
 
     const result = await query(

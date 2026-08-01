@@ -21,6 +21,15 @@ export interface PersistGenerationInput {
   skipRepurpose?: boolean
   /** Override the row timestamp — used when recovering older provider outputs. */
   createdAt?: Date | string | null
+  /**
+   * Groups this call with sibling persistGeneration calls into one ordered
+   * Drive set — e.g. bulk carousel slides, each generated via its own
+   * independent call. Same seriesId across the batch + this slide's
+   * 0-based position + the batch size. See buildArchiveFilename.
+   */
+  seriesId?: string | null
+  seriesIndex?: number | null
+  seriesTotal?: number | null
 }
 
 export interface PersistGenerationResult {
@@ -49,7 +58,10 @@ export async function persistGeneration(
   const genId = crypto.randomUUID()
   const basePath = `${input.userId}/${genId}`
   const contentFormat = normalizeContentFormat(input.contentFormat)
-  const characterKey = input.characterName ?? input.characterId ?? '_none'
+  // `??` would let an empty-string name win over a perfectly good id and drop the
+  // whole generation into _unsorted/, so fall through on blanks too.
+  const characterKey =
+    input.characterName?.trim() || input.characterId?.trim() || '_none'
   const modelKey = input.kind || 'text2img'
 
   let permanentUrls: string[]
@@ -117,6 +129,9 @@ export async function persistGeneration(
     characterKey,
     kind: contentFormat,
     modelKey,
+    seriesId: input.seriesId,
+    seriesIndex: input.seriesIndex,
+    seriesTotal: input.seriesTotal,
   }
 
   // Originals → raw/ only. Ready variants → ready/ (VA) — only successful repurposes.

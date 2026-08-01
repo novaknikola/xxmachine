@@ -441,6 +441,13 @@ function WanVariationsMode({ textStyle, fontSizePx, defaultPosition }: {
 
     for (let i = 0; i < activePrompts.length; i++) updateSlide(i, { status: 'generating' })
 
+    // Each slide is its own independent /api/edit-image call (own random
+    // generation id), so nothing normally ties them together in Drive or
+    // encodes slide order. Sharing one seriesId + this slide's position
+    // groups + numbers them correctly — see buildArchiveFilename.
+    const seriesId = crypto.randomUUID()
+    const seriesTotal = activePrompts.length
+
     await Promise.allSettled(
       activePrompts.map(({ prompt }, i) =>
         (async () => {
@@ -457,6 +464,9 @@ function WanVariationsMode({ textStyle, fontSizePx, defaultPosition }: {
           fd.append('size', '756*1344')
           fd.append('saveHistory', 'true')
           fd.append('historyPrompt', fullPrompt)
+          fd.append('seriesId', seriesId)
+          fd.append('seriesIndex', String(i))
+          fd.append('seriesTotal', String(seriesTotal))
           try {
             const res = await fetch('/api/edit-image', { method: 'POST', body: fd })
             const data = await res.json()
