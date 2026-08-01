@@ -19,6 +19,7 @@ script works for any image/video pair without editing:
   NEUTRALIZE_CUTAWAYS         disable the scene-cut cleanup below by setting to "0" (default: "1")
   SCENE_CUT_THRESHOLD         ffmpeg scene-score delta that counts as a hard cut (default: 0.12)
   MAX_CUTAWAY_RUN_FRAMES      only auto-neutralize runs up to this long (default: 15)
+  DYNAMIC_SAM2_POINT          disable the per-video SAM2 click-point below by setting to "0" (default: "1")
 
 Each "Video Extend" window contributes 77 frames on the first window and
 ~72 net new frames per additional window (77 minus the 5-frame continue_motion
@@ -38,6 +39,20 @@ via ffmpeg scene-score and hold-frames over them (before the video reaches
 Comfy) so a driving clip with editing cuts doesn't corrupt the render. Only
 touches the local copy of THIS job's driving file; never modifies the Talk
 (build_infinitetalk_api.py) or I2V pipelines.
+
+Sam2Segmentation (node 107) isolates the driving video's own person so it can
+be masked out and replaced with the reference character. The template's
+PointsEditor (node 229) hardcodes ONE static click-point (192, 332.8) in the
+480x832 frame for this -- assuming every driving video frames its subject the
+same way (centered, chest-height, normal seated/standing pose). When a driving
+video frames the subject differently (closer/further away, lying down,
+unusual pose), that fixed point lands on the wrong thing -- a body/background
+edge, an unrelated limb, or nothing coherent at all -- Sam2Segmentation grabs
+the wrong region, and the ORIGINAL driving-video person leaks through in the
+output instead of being replaced. _compute_sam2_point() runs a small
+standalone DWPose pass on the driving video's first frame and uses the
+person's neck keypoint (stable regardless of arm/leg pose) as the click-point
+instead, so segmentation targets the actual subject in every clip.
 """
 import json
 import math
@@ -46,6 +61,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 
@@ -279,6 +295,83 @@ def _neutralize_driving_cutaways(filename: str) -> str:
 
 DRIVING_FILE = _neutralize_driving_cutaways(DRIVING_FILE)
 
+DYNAMIC_SAM2_POINT = os.environ.get("DYNAMIC_SAM2_POINT", "1") != "0"
+SAM2_POINT_DEFAULT = (192, 332.8)  # template's original static point, used as fallback
+
+
+def _submit_and_wait(prompt: dict, timeout: int = 90) -> dict:
+    payload = json.dumps({"prompt": prompt}).encode()
+    req = _comfy_req("/prompt", method="POST", data=payload,
+                      extra_headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        resp = json.loads(r.read())
+    if resp.get("node_errors"):
+        raise RuntimeError(f"preflight submit rejected: {json.dumps(resp['node_errors'])[:500]}")
+    prompt_id = resp["prompt_id"]
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with urllib.request.urlopen(_comfy_req(f"/history/{prompt_id}"), timeout=30) as r:
+            hist = json.loads(r.read())
+        entry = hist.get(prompt_id)
+        if entry:
+            status = entry.get("status", {})
+            if status.get("completed") or status.get("status_str") == "success":
+                return entry.get("outputs", {})
+            if status.get("status_str") == "error":
+                raise RuntimeError(f"preflight job failed: {json.dumps(status)[:500]}")
+        time.sleep(2)
+    raise TimeoutError("preflight DWPose point-detection job timed out")
+
+
+def _compute_sam2_point(filename: str):
+    """
+    Runs a standalone DWPose pass on the driving video's first frame and
+    returns (x, y) of the person's neck keypoint in WIDTH x HEIGHT space, for
+    use as the Sam2Segmentation click-point (see module docstring). Falls
+    back to SAM2_POINT_DEFAULT on any failure — never blocks the main render.
+    """
+    if not DYNAMIC_SAM2_POINT:
+        return SAM2_POINT_DEFAULT
+    try:
+        preflight = {
+            "1": {"class_type": "LoadVideo", "inputs": {"file": filename}},
+            "2": {"class_type": "GetVideoComponents", "inputs": {"video": ["1", 0]}},
+            "3": {"class_type": "ImageFromBatch", "inputs": {"image": ["2", 0], "batch_index": 0, "length": 1}},
+            "4": {"class_type": "ImageScale", "inputs": {
+                "image": ["3", 0], "width": WIDTH, "height": HEIGHT,
+                "upscale_method": "lanczos", "crop": "center",
+            }},
+            "5": {"class_type": "DWPreprocessor", "inputs": {
+                "image": ["4", 0], "resolution": 512,
+                "detect_hand": "disable", "detect_body": "enable", "detect_face": "disable",
+                "bbox_detector": "yolox_l.onnx", "pose_estimator": "dw-ll_ucoco_384.onnx",
+                "scale_stick_for_xinsr_cn": "disable",
+            }},
+        }
+        outputs = _submit_and_wait(preflight, timeout=90)
+        raw = outputs["5"]["openpose_json"][0]
+        frame0 = json.loads(raw)[0]
+        kp = frame0["people"][0]["pose_keypoints_2d"]
+
+        def _pt(idx):
+            x, y, conf = kp[idx * 3], kp[idx * 3 + 1], kp[idx * 3 + 2]
+            return (x, y) if conf > 0.1 else None
+
+        point = _pt(1) or _pt(0)  # OpenPose index 1 = neck (stable across arm/leg pose), else nose
+        if point is None:
+            print(f"WARN: no confident neck/nose keypoint for {filename}, using template default")
+            return SAM2_POINT_DEFAULT
+        x = min(max(point[0], 20), WIDTH - 20)
+        y = min(max(point[1], 20), HEIGHT - 20)
+        print(f"Dynamic SAM2 point for {filename}: ({x:.1f}, {y:.1f}) (template default was {SAM2_POINT_DEFAULT})")
+        return (x, y)
+    except Exception as e:
+        print(f"WARN: dynamic SAM2 point detection failed for {filename}, using template default: {e}")
+        return SAM2_POINT_DEFAULT
+
+
+SAM2_POINT_X, SAM2_POINT_Y = _compute_sam2_point(DRIVING_FILE)
+
 obj_info = {}
 for t in types_needed:
     try:
@@ -423,6 +516,12 @@ api[prefixed232(15)]["inputs"]["audio"] = ["23", 1]
 for dwid in ("100", "101"):
     if dwid in api:
         api[dwid]["inputs"]["pose_estimator"] = "dw-ll_ucoco_384.onnx"
+if "229" in api:
+    api["229"]["inputs"]["points_store"] = json.dumps({
+        "positive": [{"x": SAM2_POINT_X, "y": SAM2_POINT_Y}],
+        "negative": [{"x": 0, "y": 0}],
+    })
+    api["229"]["inputs"]["coordinates"] = json.dumps([{"x": SAM2_POINT_X, "y": SAM2_POINT_Y}])
 
 # Default final VIDEO = window-1 CreateVideo (used when N_EXTEND_WINDOWS == 0).
 vid_src = (prefixed232(15), 0)
@@ -535,5 +634,6 @@ json.dump(api, open(OUTPUT_JSON, "w"), indent=2)
 print(
     f"Built API workflow with {len(api)} nodes, {N_EXTEND_WINDOWS} extend windows, "
     f"window1_length={WINDOW1_LENGTH}, last_extend_length={LAST_EXTEND_LENGTH}, "
-    f"driving_frames={DRIVING_FRAMES}, image={IMAGE_FILE}, driving={DRIVING_FILE}"
+    f"driving_frames={DRIVING_FRAMES}, image={IMAGE_FILE}, driving={DRIVING_FILE}, "
+    f"sam2_point=({SAM2_POINT_X:.1f},{SAM2_POINT_Y:.1f})"
 )
