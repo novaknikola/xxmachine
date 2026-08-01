@@ -25,6 +25,15 @@ export NVM_DIR="${HOME}/.nvm"
 
 cd "${APP_DIR}"
 
+# ── Prune old backups (keep last N) — unbounded pre-deploy-* dirs filled the
+# disk to 100% once already (each is ~4GB); this runs before creating a new one.
+BACKUP_RETENTION="${BACKUP_RETENTION:-5}"
+mapfile -t old_backups < <(ls -1dt "${BACKUP_ROOT}"/pre-deploy-* 2>/dev/null | tail -n +$((BACKUP_RETENTION + 1)))
+if [[ ${#old_backups[@]} -gt 0 ]]; then
+  log "Pruning ${#old_backups[@]} old backup(s), keeping last ${BACKUP_RETENTION}"
+  rm -rf "${old_backups[@]}"
+fi
+
 # ── Pre-deploy backup ──────────────────────────────────────────
 mkdir -p "${BACKUP_DIR}"
 cp -a .env.local "${BACKUP_DIR}/.env.local" 2>/dev/null || true
@@ -33,6 +42,7 @@ tar -czf "${BACKUP_DIR}/app-src.tgz" \
   --exclude=.next \
   --exclude='.next-before-*' \
   --exclude=.git \
+  --exclude=chrome-profiles \
   .
 log "Backup → ${BACKUP_DIR}"
 
