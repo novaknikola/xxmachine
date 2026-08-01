@@ -1158,6 +1158,33 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               if (r.status === 'fulfilled') images.push(r.value)
             }
 
+            // bulk_carousel had no automatic Drive archive at all before this --
+            // only a manual ZIP download. Each slide gets its own enqueueDriveArchive
+            // call (own dedup key) but shares one seriesId + this slide's position,
+            // so Drive sorts them in order instead of not having them at all.
+            try {
+              const { enqueueDriveArchive } = await import('@/lib/drive-archive/enqueue')
+              const characterKey = item.characterName || item.characterId || null
+              const seriesId = `${id}:${i}`
+              for (let si = 0; si < images.length; si++) {
+                await enqueueDriveArchive({
+                  userId: job.user_id,
+                  sourceType: 'queue_job',
+                  sourceId: `${seriesId}:${si}`,
+                  urls: [images[si]],
+                  characterKey,
+                  kind: 'carousels',
+                  stage: 'ready',
+                  modelKey: 'bulk_carousel',
+                  seriesId,
+                  seriesIndex: si,
+                  seriesTotal: images.length,
+                })
+              }
+            } catch (err) {
+              console.error(`[queue/process] bulk_carousel ${id} item ${i} drive archive failed:`, err)
+            }
+
             return { prompt: item.prompt, images, status: 'done' }
           } catch (err) {
             const msg = err instanceof Error ? err.message : 'failed'
