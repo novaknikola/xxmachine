@@ -59,6 +59,10 @@ interface DiscoveryItem {
   admin_status: 'PENDING' | 'APPROVED' | 'REJECTED'
   notes: string | null
   pipeline_job_id: string | null
+  // Returned by the API all along (it selects *), just never typed until the
+  // cards started previewing the scraped clip.
+  video_url: string | null
+  thumbnail_url: string | null
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────
@@ -151,7 +155,42 @@ function DiscoveryCard({
       }`}
       onClick={onToggle}
     >
-      <div className="p-4 space-y-3">
+      <div className="p-4 flex gap-4">
+        {/* Preview + its link, together — you judge a reel by watching it. */}
+        <div className="shrink-0 w-24 space-y-1.5" onClick={e => e.stopPropagation()}>
+          <div className="w-full aspect-[9/16] rounded-lg overflow-hidden bg-secondary/50 ring-1 ring-border/60">
+            {item.video_url ? (
+              <video
+                src={item.video_url}
+                poster={item.thumbnail_url ?? undefined}
+                muted
+                loop
+                playsInline
+                preload="none"
+                className="w-full h-full object-cover"
+                onMouseEnter={e => { void e.currentTarget.play().catch(() => {}) }}
+                onMouseLeave={e => { e.currentTarget.pause(); e.currentTarget.currentTime = 0 }}
+              />
+            ) : item.thumbnail_url ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={item.thumbnail_url} alt="" className="w-full h-full object-cover" />
+            ) : (
+              <div className="w-full h-full flex items-center justify-center text-muted-foreground">
+                <Telescope className="w-5 h-5 opacity-30" />
+              </div>
+            )}
+          </div>
+          <a
+            href={item.content_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center justify-center gap-1 text-[11px] text-muted-foreground hover:text-primary transition-colors"
+          >
+            <ExternalLink className="w-3 h-3" /> Original
+          </a>
+        </div>
+
+        <div className="min-w-0 flex-1 space-y-3">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-2 min-w-0">
             <input
@@ -212,17 +251,9 @@ function DiscoveryCard({
             >
               <XCircle className="w-3 h-3 mr-1" /> Reject
             </Button>
-            <a
-              href={item.content_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="h-7 px-2.5 flex items-center justify-center rounded-md border border-border text-muted-foreground hover:text-foreground transition-colors"
-              onClick={e => e.stopPropagation()}
-            >
-              <ExternalLink className="w-3 h-3" />
-            </a>
           </div>
         )}
+        </div>
       </div>
     </div>
   )
