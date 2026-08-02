@@ -11,7 +11,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Field, FieldLabel } from '@/components/ui/field'
 import {
   Loader2, Play, RefreshCw, CheckCircle2, XCircle, ExternalLink,
-  ImageIcon, Video, Sparkles, Eye, SquareStack,
+  ImageIcon, Video, Sparkles, Eye, SquareStack, Copy,
 } from 'lucide-react'
 import { useStudioSettings } from './studio-settings'
 import type { CopyPasteSpec } from '@/lib/monitor/copy-paste-spec'
@@ -229,6 +229,47 @@ export function RunTab() {
       && i.replicate_status !== 'done'
       && i.replicate_status !== 'skipped',
     ))
+  }
+
+  /**
+   * Fan an already-finished video out again. Replicate cannot do this: it
+   * returns the cached video before reaching the repurpose step, so a done item
+   * can never gain variants that way. Goes straight to the same queue job the
+   * Copy-Paste chain enqueues, with the same all-effects-on settings.
+   */
+  async function repurposeAgain(item: ReplicateItem) {
+    if (!item.kling_video_url || studio.repurposeCount < 1) return
+    setWorking(item.id)
+    try {
+      const res = await fetch('/api/queue/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job_type: 'video_repurpose',
+          input: {
+            videoUrl: item.kling_video_url,
+            videoName: `copypaste_${item.id.slice(0, 8)}.mp4`,
+            count: studio.repurposeCount,
+            effects: {
+              brightness: true, contrast: true, saturation: true,
+              hue: true, speed: true, flipH: true, crop: true, fade: false,
+            },
+            archiveToDrive: true,
+            characterKey: item.profile,
+          },
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      toast.success(`${studio.repurposeCount} variants queued — archiving to Drive`, {
+        description: 'Starts within a minute; you can leave the page',
+        action: { label: 'Open Queue', onClick: () => { window.location.href = '/captions?tab=queue' } },
+      })
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Repurpose submit failed')
+    } finally {
+      setWorking(null)
+    }
   }
 
   function toggleSelect(id: string) {
@@ -531,6 +572,20 @@ export function RunTab() {
                           >
                             <Video className="w-4 h-4" /> Video
                           </a>
+                        )}
+                        {item.replicate_status === 'done'
+                          && item.kling_video_url
+                          && studio.repurposeCount > 0 && (
+                          <Button
+                            variant="outline"
+                            disabled={working === item.id}
+                            onClick={() => repurposeAgain(item)}
+                          >
+                            {working === item.id
+                              ? <Loader2 className="w-4 h-4 animate-spin" />
+                              : <Copy className="w-4 h-4" />}
+                            Repurpose ×{studio.repurposeCount}
+                          </Button>
                         )}
                         {item.replicate_status === 'done' && (
                           <CheckCircle2 className="w-5 h-5 text-emerald-400 ml-1" />
