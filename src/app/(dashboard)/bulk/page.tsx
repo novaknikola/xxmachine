@@ -14,6 +14,7 @@ import {
   recommendedCarouselExtras,
   getCarouselVariantPrompts,
 } from '@/lib/carousel-presets'
+import { cleanSceneRefUrls } from '@/lib/scene-refs'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
@@ -146,21 +147,6 @@ function cleanPromptLines(raw: string): string[] {
     .filter(l => l.length > 0 && !/^```/.test(l) && !/^[-=*_~]{3,}$/.test(l))
 }
 
-/**
- * One scene-reference image URL per line (Pinterest pin, CDN link, ...). These
- * are handed to Seedream as-is — it fetches them itself, so nothing is
- * downloaded or re-hosted here. Duplicates are dropped so a pin pasted twice
- * does not silently double the generation bill.
- */
-function cleanSceneRefUrls(raw: string): string[] {
-  const seen = new Set<string>()
-  for (const line of raw.split('\n')) {
-    const url = line.trim()
-    if (!/^https?:\/\//i.test(url)) continue
-    seen.add(url)
-  }
-  return [...seen]
-}
 
 // ─── Main Page ────────────────────────────────────────────────
 
