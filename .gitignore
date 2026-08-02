@@ -48,3 +48,19 @@ yarn-error.log*
 next-env.d.ts
 
 *.zip
+
+# Local scratch — one-shot scripts and their dumps. tmp-e2e alone reached
+# ~100 MB of scraped samples, so `git add .` from DEPLOY.md would push it
+# straight past GitHub's file size limit and bloat the repo permanently.
+/tmp-e2e
+/tmp-ig
+tmp-*.mjs
+tmp-*.js
+
+# Scraped prompt corpora (~50 MB) — source data for the DB importers, not
+# something the app reads at runtime.
+/prompts
+
+# Editor / tooling local state
+/.cursor
+__pycache__/
