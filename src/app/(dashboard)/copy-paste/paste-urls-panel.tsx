@@ -106,7 +106,7 @@ export function PasteUrlsPanel({ onEnqueued }: PasteUrlsPanelProps) {
           {referenceImageUrl ? (
             <div className="relative group w-28 aspect-square rounded-lg overflow-hidden border border-border bg-secondary/30">
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={referenceImageUrl} alt="" className="w-full h-full object-cover" />
+              <img src={referenceImageUrl} alt="" className="absolute inset-0 w-full h-full object-cover" />
               <button
                 type="button"
                 onClick={() => setReferenceImageUrl(null)}

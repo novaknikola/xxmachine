@@ -539,7 +539,7 @@ function WanVariationsMode({ textStyle, fontSizePx, defaultPosition }: {
                   {baseImageFiles.map(img => (
                     <div key={img.id} className="relative group aspect-square rounded-lg overflow-hidden border border-border">
                       {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={img.url} alt="" className="w-full h-full object-cover" />
+                      <img src={img.url} alt="" className="absolute inset-0 w-full h-full object-cover" />
                       <button onClick={() => setBaseImageFiles(prev => prev.filter(f => f.id !== img.id))}
                         className="absolute top-1 right-1 w-4 h-4 rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                         <X className="w-2.5 h-2.5" />
@@ -577,7 +577,7 @@ function WanVariationsMode({ textStyle, fontSizePx, defaultPosition }: {
               <div className="relative w-full aspect-[9/16] rounded-lg overflow-hidden border border-border bg-secondary/30">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={`/api/proxy-image?url=${encodeURIComponent(baseImageUrl)}`} alt="base"
-                  className="w-full h-full object-cover"
+                  className="absolute inset-0 w-full h-full object-cover"
                   onError={e => { (e.target as HTMLImageElement).style.display = 'none' }} />
               </div>
             )}
@@ -760,11 +760,11 @@ function WanVariationsMode({ textStyle, fontSizePx, defaultPosition }: {
                     {historyImages.map(img => (
                       <button
                         key={img.id}
-                        className="aspect-[9/16] rounded-lg overflow-hidden border border-border hover:border-primary transition-colors"
+                        className="relative aspect-[9/16] rounded-lg overflow-hidden border border-border hover:border-primary transition-colors"
                         onClick={() => { setBaseImageUrl(img.url); setShowPicker(false) }}
                       >
                         {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={img.url} alt="" className="w-full h-full object-cover" />
+                        <img src={img.url} alt="" className="absolute inset-0 w-full h-full object-cover" />
                       </button>
                     ))}
                   </div>

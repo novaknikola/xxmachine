@@ -110,7 +110,7 @@ function GenCard({ row, onDelete, onSchedule, onAddToCarousel }: {
         {row.outputUrls.map((url, i) => (
           <div key={i} className="relative aspect-square overflow-hidden group/img">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={url} alt="" className="w-full h-full object-cover transition-opacity group-hover/img:opacity-70" />
+            <img src={url} alt="" className="absolute inset-0 w-full h-full object-cover transition-opacity group-hover/img:opacity-70" />
             <div className="absolute inset-0 flex items-center justify-center gap-2 opacity-0 group-hover/img:opacity-100 transition-opacity bg-black/30">
               <a href={url} target="_blank" rel="noopener noreferrer"
                 className="w-7 h-7 rounded-full bg-black/60 flex items-center justify-center hover:bg-black/80 transition-colors"

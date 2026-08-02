@@ -169,7 +169,7 @@ export function ReproduceTab() {
                     {sources.slice(0, 12).map(src => (
                       <div key={src.id} className="relative group aspect-square rounded-lg overflow-hidden border border-border">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={src.url} alt="" className="w-full h-full object-cover" />
+                        <img src={src.url} alt="" className="absolute inset-0 w-full h-full object-cover" />
                         <button onClick={() => setSources(prev => prev.filter(s => s.id !== src.id))}
                           className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                           <X className="w-2.5 h-2.5" />
@@ -316,9 +316,9 @@ export function ReproduceTab() {
               <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-2">
                 {variants.map((v, i) => (
                   <div key={v.id} className="group relative">
-                    <div className="aspect-square rounded-lg overflow-hidden border border-border">
+                    <div className="relative aspect-square rounded-lg overflow-hidden border border-border">
                       {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={v.url} alt="" className="w-full h-full object-cover" />
+                      <img src={v.url} alt="" className="absolute inset-0 w-full h-full object-cover" />
                     </div>
                     <p className="text-[9px] text-muted-foreground/50 mt-0.5 text-center font-mono truncate">
                       #{i + 1} · {v.seed.toString(16).slice(-6)}

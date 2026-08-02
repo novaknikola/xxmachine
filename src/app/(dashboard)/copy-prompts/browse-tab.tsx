@@ -139,10 +139,15 @@ export function BrowseTab() {
                   className={`cursor-pointer overflow-hidden py-0 transition-colors ${isSelected ? 'ring-2 ring-primary' : 'hover:ring-1 hover:ring-border'}`}
                   onClick={() => toggleSelect(item)}
                 >
-                  <div className="relative aspect-square bg-secondary/40">
+                  {/* Fixed 3:4 window. The image is taken out of flow because a
+                      flex/grid child's automatic minimum size is its content
+                      height -- an in-flow <img> reports its intrinsic height and
+                      stretches the tile past the aspect ratio, which is what made
+                      every card a different height. */}
+                  <div className="relative aspect-[3/4] shrink-0 bg-secondary/40">
                     {item.preview_image_url ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={item.preview_image_url} alt="" className="w-full h-full object-cover" />
+                      <img src={item.preview_image_url} alt="" className="absolute inset-0 w-full h-full object-cover" />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center text-muted-foreground/40">
                         <Sparkles className="w-6 h-6" />
@@ -159,10 +164,15 @@ export function BrowseTab() {
                       </Badge>
                     )}
                   </div>
+                  {/* Every line is always rendered and clamped, so the caption
+                      block is the same height on every card whether or not the
+                      prompt is long and the author known. */}
                   <CardContent className="p-2.5 space-y-1">
                     <p className="text-xs font-medium truncate">{item.title || 'Untitled'}</p>
-                    <p className="text-[10px] text-muted-foreground line-clamp-2">{item.prompt}</p>
-                    {item.author && <p className="text-[10px] text-muted-foreground/70 truncate">@{item.author}</p>}
+                    <p className="text-[10px] text-muted-foreground line-clamp-2 h-[26px]">{item.prompt}</p>
+                    <p className="text-[10px] text-muted-foreground/70 truncate">
+                      {item.author ? `@${item.author}` : ' '}
+                    </p>
                   </CardContent>
                 </Card>
               )

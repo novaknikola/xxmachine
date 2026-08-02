@@ -875,7 +875,7 @@ function BulkPageInner() {
                     {refImages.map(img => (
                       <div key={img.id} className="relative group aspect-square rounded-lg overflow-hidden border border-border">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={img.url} alt="" className="w-full h-full object-cover" />
+                        <img src={img.url} alt="" className="absolute inset-0 w-full h-full object-cover" />
                         <button onClick={() => setRefImages(prev => prev.filter(i => i.id !== img.id))}
                           className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                           <X className="w-2.5 h-2.5" />
@@ -1046,10 +1046,10 @@ function BulkPageInner() {
                   {datasetImages.map((img, i) => (
                     <div key={img.id} className="group relative">
                       <div
-                        className={`aspect-square rounded-lg overflow-hidden border-2 cursor-pointer transition-all ${img.selected ? 'border-primary' : 'border-transparent opacity-50'}`}
+                        className={`relative aspect-square rounded-lg overflow-hidden border-2 cursor-pointer transition-all ${img.selected ? 'border-primary' : 'border-transparent opacity-50'}`}
                         onClick={() => setDatasetImages(prev => prev.map(d => d.id === img.id ? { ...d, selected: !d.selected } : d))}>
                         {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={img.url} alt="" className="w-full h-full object-cover" />
+                        <img src={img.url} alt="" className="absolute inset-0 w-full h-full object-cover" />
                         {img.selected && (
                           <div className="absolute top-1 right-1 w-4 h-4 rounded-full bg-primary flex items-center justify-center">
                             <CheckCircle2 className="w-2.5 h-2.5 text-primary-foreground" />
@@ -1533,7 +1533,7 @@ function BulkPageInner() {
                         {carouselRefImages.map(img => (
                           <div key={img.id} className="relative group aspect-square rounded-lg overflow-hidden border border-border">
                             {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img src={img.url} alt="" className="w-full h-full object-cover" />
+                            <img src={img.url} alt="" className="absolute inset-0 w-full h-full object-cover" />
                             <button
                               type="button"
                               onClick={() => setCarouselRefImages(prev => prev.filter(i => i.id !== img.id))}
@@ -1634,9 +1634,9 @@ function BulkPageInner() {
                     {expandedJobs.has(job.id) && job.outputUrls.length > 0 && (
                       <div className="px-4 pb-4 grid grid-cols-4 gap-2">
                         {job.outputUrls.map((url, i) => (
-                          <a key={i} href={url} target="_blank" rel="noopener noreferrer" className="aspect-square rounded-lg overflow-hidden border border-border block">
+                          <a key={i} href={url} target="_blank" rel="noopener noreferrer" className="relative aspect-square rounded-lg overflow-hidden border border-border block">
                             {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img src={url} alt="" className="w-full h-full object-cover hover:scale-105 transition-transform" />
+                            <img src={url} alt="" className="absolute inset-0 w-full h-full object-cover hover:scale-105 transition-transform" />
                           </a>
                         ))}
                       </div>

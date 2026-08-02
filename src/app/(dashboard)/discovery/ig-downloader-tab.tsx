@@ -413,14 +413,14 @@ export function IgDownloaderTab() {
                   <div key={reel.id} className="group relative">
                     <div
                       onClick={() => toggle(reel.id)}
-                      className={`aspect-[9/16] rounded-lg overflow-hidden border-2 cursor-pointer transition-all bg-secondary/40 ${isSelected ? 'border-primary' : 'border-transparent opacity-60'}`}
+                      className={`relative aspect-[9/16] rounded-lg overflow-hidden border-2 cursor-pointer transition-all bg-secondary/40 ${isSelected ? 'border-primary' : 'border-transparent opacity-60'}`}
                     >
                       {reel.thumbnailUrl ? (
                         // eslint-disable-next-line @next/next/no-img-element
                         <img
                           src={`/api/proxy-image?url=${encodeURIComponent(reel.thumbnailUrl)}`}
                           alt=""
-                          className="w-full h-full object-cover"
+                          className="absolute inset-0 w-full h-full object-cover"
                           onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
                         />
                       ) : (

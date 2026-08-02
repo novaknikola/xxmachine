@@ -638,7 +638,7 @@ function VideoMode() {
               <div className="relative w-full aspect-[9/16] rounded-lg overflow-hidden border border-border bg-secondary/30 mt-2">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={imagePreview || `/api/proxy-image?url=${encodeURIComponent(imageUrl)}`} alt="reference"
-                  className="w-full h-full object-cover"
+                  className="absolute inset-0 w-full h-full object-cover"
                   onError={e => { (e.target as HTMLImageElement).style.display = 'none' }} />
               </div>
             )}

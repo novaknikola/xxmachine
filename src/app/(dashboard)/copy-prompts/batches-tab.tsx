@@ -45,10 +45,10 @@ function JobResultsGrid({ rows }: { rows: CopyPromptsRow[] }) {
               href={img.url}
               target="_blank"
               rel="noreferrer"
-              className="aspect-square rounded-lg overflow-hidden border border-border block"
+              className="relative aspect-square rounded-lg overflow-hidden border border-border block"
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={img.url} alt="" className="w-full h-full object-cover" />
+              <img src={img.url} alt="" className="absolute inset-0 w-full h-full object-cover" />
             </a>
           ))}
         </div>

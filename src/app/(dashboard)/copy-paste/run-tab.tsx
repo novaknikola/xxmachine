@@ -452,10 +452,10 @@ export function RunTab() {
                           target="_blank"
                           rel="noopener noreferrer"
                           title="Reference photo"
-                          className="w-10 aspect-square rounded-lg overflow-hidden bg-secondary/50 ring-1 ring-primary/40"
+                          className="relative w-10 aspect-square rounded-lg overflow-hidden bg-secondary/50 ring-1 ring-primary/40"
                         >
                           {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img src={item.reference_image_url} alt="" className="w-full h-full object-cover" />
+                          <img src={item.reference_image_url} alt="" className="absolute inset-0 w-full h-full object-cover" />
                         </a>
                       )}
                     </div>
