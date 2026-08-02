@@ -17,6 +17,61 @@ import type { DiscoveryItemRow, EndFrameMode, TrackedProfileRow } from './types'
 const PROBE_FRAME_COUNT = 8
 
 /**
+ * Fan a finished video out into N repurposed variants, archived to Drive.
+ * Enqueued rather than run inline: ffmpeg on N variants is minutes of work and
+ * belongs on the queue, not inside an already-long replicate call. Failure here
+ * must never fail the replicate that produced the video, so callers catch.
+ */
+async function enqueueRepurpose(opts: {
+  userId: string
+  videoUrl: string
+  count: number
+  characterKey: string | null
+  itemId: string
+}): Promise<void> {
+  if (!opts.count || opts.count < 1) return
+
+  const job = await one<{ id: string }>(
+    `INSERT INTO generation_queue (user_id, job_type, input, total_items)
+     VALUES ($1, 'video_repurpose', $2, $3)
+     RETURNING id`,
+    [
+      opts.userId,
+      JSON.stringify({
+        videoUrl: opts.videoUrl,
+        videoName: `copypaste_${opts.itemId.slice(0, 8)}.mp4`,
+        count: opts.count,
+        baseSeed: Math.floor(Math.random() * 0xffffff),
+        // Everything on: the point is maximum spread between variants.
+        effects: {
+          brightness: true, contrast: true, saturation: true,
+          hue: true, speed: true, flipH: true, crop: true, fade: false,
+        },
+        archiveToDrive: true,
+        characterKey: opts.characterKey,
+      }),
+      opts.count,
+    ],
+  )
+  if (!job) return
+
+  const secret = process.env.CRON_SECRET
+  if (!secret) return   // cron will pick it up on the next tick
+  const claimed = await one<{ id: string }>(
+    `UPDATE generation_queue
+        SET status = 'processing', started_at = now(), attempts = attempts + 1
+      WHERE id = $1 AND status = 'pending'
+      RETURNING id`,
+    [job.id],
+  ).catch(() => null)
+  if (!claimed) return
+  fetch(`http://127.0.0.1:${process.env.PORT ?? 3000}/api/queue/process/${job.id}`, {
+    method: 'POST',
+    headers: { 'x-cron-secret': secret },
+  }).catch(err => console.error('[monitor/replicate] fire repurpose worker:', err))
+}
+
+/**
  * Analysis-only step: probes the source clip and produces the CopyPasteSpec +
  * rendered prompt so they can be reviewed/edited before paying for a Seedance call.
  * Requires a source video — Copy-Paste has no still-image path.
@@ -52,6 +107,7 @@ export async function classifyDiscoveryItem(itemId: string, userId: string) {
               source_width = $7,
               source_height = $8,
               source_first_frame_url = coalesce($9, source_first_frame_url),
+              source_last_frame_url = coalesce($10, source_last_frame_url),
               replicate_status = 'classified',
               replicate_error = NULL
         WHERE id = $1`,
@@ -65,6 +121,10 @@ export async function classifyDiscoveryItem(itemId: string, userId: string) {
         probe.width,
         probe.height,
         probe.firstFrameUrl,
+        // Without this the end-frame variant silently never fires: Replicate
+        // skips its probe when a spec already exists, so the only chance to
+        // capture the last frame is here.
+        probe.lastFrameUrl,
       ],
     )
 
@@ -87,7 +147,7 @@ export async function classifyDiscoveryItem(itemId: string, userId: string) {
 export async function replicateCopyPasteItem(
   itemId: string,
   userId: string,
-  opts?: { endFrame?: EndFrameMode },
+  opts?: { endFrame?: EndFrameMode; repurposeCount?: number },
 ) {
   const endFrameMode: EndFrameMode = opts?.endFrame ?? 'auto'
   const item = await one<DiscoveryItemRow>(
@@ -96,8 +156,22 @@ export async function replicateCopyPasteItem(
   )
   if (!item) throw new Error('Item not found')
   if (item.admin_status !== 'APPROVED') throw new Error('Item must be approved before replication')
-  if (!item.reference_image_url) throw new Error('No reference photo uploaded for this batch')
   if (!item.video_url) throw new Error('Item has no source video')
+
+  // Items that came from a profile scan were never part of a manual paste, so
+  // they carry no per-batch photo. Fall back to the account default before
+  // failing, otherwise the whole scan → approve → replicate loop is unusable.
+  let referenceImageUrl = item.reference_image_url
+  if (!referenceImageUrl) {
+    const defaults = await one<{ default_reference_image_url: string | null }>(
+      `SELECT default_reference_image_url FROM users WHERE id = $1`,
+      [userId],
+    )
+    referenceImageUrl = defaults?.default_reference_image_url ?? null
+  }
+  if (!referenceImageUrl) {
+    throw new Error('No reference photo — upload one with the batch, or set a default in Settings')
+  }
 
   // Idempotent: a requeued/retried job must not pay for a second Seedance render.
   if (item.kling_video_url) {
@@ -167,7 +241,7 @@ export async function replicateCopyPasteItem(
       await query(`UPDATE discovery_items SET replicate_status = 'image_generating' WHERE id = $1`, [itemId])
       const keyframe = await generateCopyPasteKeyframe({
         sourceFrameUrl: firstFrameUrl,
-        referenceImageUrl: item.reference_image_url,
+        referenceImageUrl,
         prompt: renderKeyframeEditPrompt(spec),
         aspectRatio,
         itemId,
@@ -188,7 +262,7 @@ export async function replicateCopyPasteItem(
       await query(`UPDATE discovery_items SET replicate_status = 'image_generating' WHERE id = $1`, [itemId])
       const endKeyframe = await generateCopyPasteKeyframe({
         sourceFrameUrl: lastFrameUrl,
-        referenceImageUrl: item.reference_image_url,
+        referenceImageUrl,
         prompt: renderEndKeyframeEditPrompt(spec),
         aspectRatio,
         itemId,
@@ -224,6 +298,13 @@ export async function replicateCopyPasteItem(
     )
     await archiveDiscoveryItem(itemId, { characterName: item.profile })
       .catch(err => console.error('[monitor/replicate] drive archive failed:', err))
+    await enqueueRepurpose({
+      userId,
+      videoUrl: result.videoUrl,
+      count: opts?.repurposeCount ?? 0,
+      characterKey: item.profile,
+      itemId,
+    }).catch(err => console.error('[monitor/replicate] repurpose enqueue failed:', err))
     await notifyReplicationDone({
       userId,
       profile: item.profile,

@@ -21,8 +21,16 @@ export async function GET(req: NextRequest) {
   if (auth instanceof NextResponse) return auth
 
   const [userRow, settingsRow] = await Promise.all([
-    one<{ display_name: string; telegram: string | null; totp_enabled: boolean; subscription_status: string }>(
-      `SELECT display_name, telegram, totp_enabled, subscription_status FROM users WHERE id = $1`,
+    one<{
+      display_name: string
+      telegram: string | null
+      totp_enabled: boolean
+      subscription_status: string
+      default_reference_image_url: string | null
+    }>(
+      `SELECT display_name, telegram, totp_enabled, subscription_status,
+              default_reference_image_url
+         FROM users WHERE id = $1`,
       [auth.id],
     ),
     one<Record<string, string | null>>(
@@ -44,6 +52,9 @@ export async function GET(req: NextRequest) {
       subscription_status: userRow?.subscription_status ?? 'inactive',
     },
     apiKeys: apiKeyPresence,
+    copyPaste: {
+      default_reference_image_url: userRow?.default_reference_image_url ?? null,
+    },
   })
 }
 
@@ -97,6 +108,23 @@ export async function PATCH(req: NextRequest) {
     const hash = await bcrypt.hash(newPassword, 11)
     await one(`UPDATE users SET password_hash = $1 WHERE id = $2`, [hash, auth.id])
     return NextResponse.json({ ok: true })
+  }
+
+  // ── Copy-Paste defaults ───────────────────────────────────────
+  // Fallback identity photo for reels that came from a profile scan rather
+  // than a manual paste, which have no per-batch upload of their own.
+  if (body.type === 'copy_paste') {
+    const raw = (body as { default_reference_image_url?: string | null })
+      .default_reference_image_url
+    const url = typeof raw === 'string' ? raw.trim() : null
+    if (url && !/^https?:\/\//i.test(url)) {
+      return NextResponse.json({ error: 'Reference photo must be an http(s) URL' }, { status: 400 })
+    }
+    await one(
+      `UPDATE users SET default_reference_image_url = $1 WHERE id = $2`,
+      [url || null, auth.id],
+    )
+    return NextResponse.json({ ok: true, default_reference_image_url: url || null })
   }
 
   // ── API keys update ───────────────────────────────────────────

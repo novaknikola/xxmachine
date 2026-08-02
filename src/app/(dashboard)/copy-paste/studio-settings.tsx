@@ -27,6 +27,9 @@ interface StudioSettings {
   setRunMode: (v: 'one' | 'batch') => void
   endFrame: EndFrameMode
   setEndFrame: (v: EndFrameMode) => void
+  /** Repurposed variants to fan each finished video into. 0 = off. */
+  repurposeCount: number
+  setRepurposeCount: (v: number) => void
   stopRequested: boolean
   isStopRequested: () => boolean
   requestStopAll: () => Promise<void>
@@ -59,6 +62,7 @@ const Ctx = createContext<StudioSettings | null>(null)
 export function StudioSettingsProvider({ children }: { children: ReactNode }) {
   const [runMode, setRunMode] = useState<'one' | 'batch'>('one')
   const [endFrame, setEndFrame] = useState<EndFrameMode>('auto')
+  const [repurposeCount, setRepurposeCount] = useState(0)
   const [stopRequested, setStopRequested] = useState(false)
   const stopRef = useRef(false)
   const [queueBusy, setQueueBusy] = useState(0)
@@ -142,6 +146,8 @@ export function StudioSettingsProvider({ children }: { children: ReactNode }) {
       setRunMode,
       endFrame,
       setEndFrame,
+      repurposeCount,
+      setRepurposeCount,
       stopRequested,
       isStopRequested: () => stopRef.current,
       requestStopAll,
@@ -162,6 +168,7 @@ export function StudioSettingsProvider({ children }: { children: ReactNode }) {
     [
       runMode,
       endFrame,
+      repurposeCount,
       stopRequested,
       requestStopAll,
       queueBusy,

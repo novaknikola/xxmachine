@@ -21,6 +21,8 @@ export interface CopyPasteJobInput {
   itemIds: string[]
   /** Pin the clip's end with a matching second keyframe. Default 'auto'. */
   endFrame?: 'auto' | 'always' | 'off'
+  /** Fan each finished video out into N repurposed variants. 0 = off. */
+  repurposeCount?: number
 }
 
 export interface BulkCarouselJobInput {
@@ -42,6 +44,13 @@ export interface VideoRepurposeJobInput {
   count: number
   baseSeed: number
   effects: VideoEffectOpts
+  /**
+   * Opt-in so the existing Repurpose page keeps behaving exactly as before.
+   * Set by the Copy-Paste chain, which does want its variants in Drive.
+   */
+  archiveToDrive?: boolean
+  /** Drive folder to file under when archiving — the source profile label. */
+  characterKey?: string | null
 }
 
 export interface VideoCaptionItem {
@@ -231,7 +240,8 @@ export async function POST(req: NextRequest) {
   }
 
   if (body.job_type === 'video_repurpose') {
-    const { videoUrl, videoName, count, baseSeed, effects } = body.input ?? {}
+    const { videoUrl, videoName, count, baseSeed, effects, archiveToDrive, characterKey } =
+      body.input ?? {}
     if (!videoUrl || typeof videoUrl !== 'string') {
       return NextResponse.json({ error: 'videoUrl required' }, { status: 400 })
     }
@@ -248,6 +258,8 @@ export async function POST(req: NextRequest) {
         brightness: true, contrast: true, saturation: true,
         hue: false, speed: false, flipH: false, crop: true, fade: false,
       },
+      archiveToDrive: archiveToDrive === true,
+      characterKey: characterKey ?? null,
     }
 
     const row = await one<{ id: string }>(
@@ -683,17 +695,22 @@ export async function POST(req: NextRequest) {
   }
 
   if (body.job_type === 'copy_paste_v2') {
-    const { itemIds, endFrame } = body.input ?? {}
+    const { itemIds, endFrame, repurposeCount } = body.input ?? {}
     if (!Array.isArray(itemIds) || itemIds.length === 0) {
       return NextResponse.json({ error: 'itemIds required' }, { status: 400 })
     }
     if (itemIds.length > 100) {
       return NextResponse.json({ error: 'Max 100 items per submission' }, { status: 400 })
     }
+    const repurpose = Number(repurposeCount) || 0
+    if (repurpose < 0 || repurpose > 20) {
+      return NextResponse.json({ error: 'repurposeCount must be 0–20' }, { status: 400 })
+    }
 
     const input: CopyPasteJobInput = {
       itemIds,
       endFrame: endFrame === 'always' || endFrame === 'off' ? endFrame : 'auto',
+      repurposeCount: repurpose,
     }
     const row = await one<{ id: string }>(
       `INSERT INTO generation_queue (user_id, job_type, input, total_items)

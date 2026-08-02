@@ -235,7 +235,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
     // ── video_repurpose ───────────────────────────────────────────────────────
     if (job.job_type === 'video_repurpose') {
-      const { videoUrl, count, baseSeed, effects } = job.input as unknown as VideoRepurposeJobInput
+      const { videoUrl, count, baseSeed, effects, archiveToDrive, characterKey } =
+        job.input as unknown as VideoRepurposeJobInput
       let doneCount = job.done_items
 
       // Resume: load existing output URLs from DB
@@ -301,6 +302,33 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           WHERE id=$3`,
         [count, JSON.stringify(finalUrls), id],
       )
+
+      // Opt-in only: the Repurpose page never sets this, so its behaviour is
+      // unchanged. Variants share one seriesId so Drive sorts them together
+      // instead of scattering them by hash — same pattern as bulk_carousel.
+      if (archiveToDrive) {
+        try {
+          const { enqueueDriveArchive } = await import('@/lib/drive-archive/enqueue')
+          const good = finalUrls.filter(u => !u.startsWith('error:'))
+          for (let vi = 0; vi < good.length; vi++) {
+            await enqueueDriveArchive({
+              userId: job.user_id,
+              sourceType: 'queue_job',
+              sourceId: `${id}:${vi}`,
+              urls: [good[vi]],
+              characterKey: characterKey ?? null,
+              kind: 'reels',
+              stage: 'ready',
+              modelKey: 'repurpose',
+              seriesId: id,
+              seriesIndex: vi,
+              seriesTotal: good.length,
+            })
+          }
+        } catch (err) {
+          console.error(`[queue/process] video_repurpose ${id} drive archive failed:`, err)
+        }
+      }
 
       return NextResponse.json({ ok: true, done: count })
     }
@@ -1220,7 +1248,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
     // ── copy_paste_v2 ─────────────────────────────────────────────────────────
     if (job.job_type === 'copy_paste_v2') {
-      const { itemIds, endFrame } = job.input as unknown as CopyPasteJobInput
+      const { itemIds, endFrame, repurposeCount } = job.input as unknown as CopyPasteJobInput
       if (!itemIds?.length) throw new Error('No items in job input')
 
       const copyPasteRows: CopyPasteRow[] = job.output?.copyPasteRows ? [...job.output.copyPasteRows] : []
@@ -1238,7 +1266,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
         const results = await Promise.all(batchIds.map(async (itemId): Promise<CopyPasteRow> => {
           try {
-            const result = await replicateCopyPasteItem(itemId, job.user_id, { endFrame })
+            const result = await replicateCopyPasteItem(itemId, job.user_id, {
+              endFrame,
+              repurposeCount,
+            })
             return { itemId, status: 'done', videoUrl: result.videoUrl }
           } catch (err) {
             const msg = err instanceof Error ? err.message : 'failed'

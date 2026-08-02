@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { toast } from 'sonner'
@@ -18,6 +18,8 @@ import {
   HardDrive,
   ExternalLink,
   Unplug,
+  Upload,
+  Image as ImageIcon,
 } from 'lucide-react'
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -442,6 +444,8 @@ function ContentEngineTab() {
         )}
       </div>
 
+      <DefaultReferencePhoto />
+
       <div className="glass-card rounded-2xl p-5 space-y-3 text-xs text-muted-foreground">
         <p className="font-semibold text-foreground text-sm">Where to find the keys</p>
         <ul className="space-y-1.5">
@@ -451,6 +455,123 @@ function ContentEngineTab() {
           <li>• <span className="text-foreground">Google Drive Folder ID</span> — from the folder URL (/folders/&lt;ID&gt;)</li>
         </ul>
       </div>
+    </div>
+  )
+}
+
+// ─── Copy-Paste default reference photo ───────────────────────────
+
+/**
+ * Identity fallback for reels that arrive from a profile scan rather than a
+ * manual paste — those have no per-batch photo, so without this the whole
+ * scan → approve → replicate loop cannot run unattended.
+ */
+function DefaultReferencePhoto() {
+  const fileRef = useRef<HTMLInputElement>(null)
+  const [url, setUrl] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    fetch('/api/settings')
+      .then(r => r.json())
+      .then(d => { setUrl(d.copyPaste?.default_reference_image_url ?? null); setLoading(false) })
+      .catch(() => setLoading(false))
+  }, [])
+
+  async function save(next: string | null) {
+    setBusy(true)
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'copy_paste', default_reference_image_url: next }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error ?? 'Save failed')
+      setUrl(next)
+      toast.success(next ? 'Default reference photo saved' : 'Default reference photo removed')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Save failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function onPick(files: FileList | null) {
+    const file = files?.[0]
+    if (!file) return
+    setBusy(true)
+    try {
+      const res = await fetch('/api/queue/upload-input', {
+        method: 'POST',
+        headers: {
+          'content-type': file.type || 'image/jpeg',
+          'x-file-name': encodeURIComponent(file.name),
+        },
+        body: file,
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Upload failed')
+      await save(data.url as string)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Upload failed')
+      setBusy(false)
+    } finally {
+      if (fileRef.current) fileRef.current.value = ''
+    }
+  }
+
+  return (
+    <div className="glass-card rounded-2xl p-6 space-y-4">
+      <div>
+        <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+          <ImageIcon className="w-4 h-4 text-primary" /> Copy-Paste default reference photo
+        </h3>
+        <p className="text-xs text-muted-foreground mt-0.5">
+          Used when a reel comes from a tracked-profile scan instead of a manual paste.
+          A photo uploaded with a batch always wins over this one.
+        </p>
+      </div>
+
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+        className="hidden"
+        onChange={e => onPick(e.target.files)}
+      />
+
+      {loading ? (
+        <div className="flex items-center justify-center py-6">
+          <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+        </div>
+      ) : url ? (
+        <div className="flex items-center gap-4">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={url} alt="" className="w-24 aspect-square object-cover rounded-xl border border-border" />
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => fileRef.current?.click()}>
+              {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" /> : null}
+              Replace
+            </Button>
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => save(null)}>
+              Remove
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => fileRef.current?.click()}
+          className="w-full border-2 border-dashed border-border rounded-xl p-6 flex flex-col items-center gap-2 hover:border-primary/50 hover:bg-primary/5 transition-colors text-muted-foreground hover:text-foreground disabled:opacity-50"
+        >
+          {busy ? <Loader2 className="w-5 h-5 animate-spin" /> : <Upload className="w-5 h-5" />}
+          <span className="text-sm">{busy ? 'Uploading…' : 'Upload default reference photo'}</span>
+          <span className="text-xs opacity-60">JPEG, PNG or WebP</span>
+        </button>
+      )}
     </div>
   )
 }

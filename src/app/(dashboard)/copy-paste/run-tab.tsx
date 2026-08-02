@@ -190,7 +190,11 @@ export function RunTab() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           job_type: 'copy_paste_v2',
-          input: { itemIds: targets.map(i => i.id), endFrame: studio.endFrame },
+          input: {
+            itemIds: targets.map(i => i.id),
+            endFrame: studio.endFrame,
+            repurposeCount: studio.repurposeCount,
+          },
         }),
       })
       const data = await res.json()
@@ -286,6 +290,24 @@ export function RunTab() {
                 <SelectItem value="auto">Auto (single-shot only)</SelectItem>
                 <SelectItem value="always">Always</SelectItem>
                 <SelectItem value="off">Off</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+
+          <Field className="w-[190px]">
+            <FieldLabel>Repurpose after</FieldLabel>
+            <Select
+              value={String(studio.repurposeCount)}
+              onValueChange={v => studio.setRepurposeCount(Number(v) || 0)}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="0">Off</SelectItem>
+                <SelectItem value="3">×3 variants</SelectItem>
+                <SelectItem value="5">×5 variants</SelectItem>
+                <SelectItem value="10">×10 variants</SelectItem>
               </SelectContent>
             </Select>
           </Field>
