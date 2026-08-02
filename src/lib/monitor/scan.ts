@@ -42,9 +42,19 @@ export async function scanTrackedProfile(
   } = await listProfileReels(profile.username, limit, rapidApiKey)
 
   // The lister already knows the follower count when it went through RapidAPI; only the
-  // Apify path needs a separate lookup. Falling back to 1 would inflate every score.
+  // Apify path needs a separate lookup.
   const followers = listedFollowers
-    ?? (rapidApiKey ? await fetchIgFollowers(profile.username, rapidApiKey).catch(() => 1) : 1)
+    ?? (rapidApiKey ? await fetchIgFollowers(profile.username, rapidApiKey).catch(() => null) : null)
+
+  // Every part of the score is normalised by follower count, so a missing value
+  // does not degrade the score — it multiplies it by ~50000 (views/1 instead of
+  // views/50k) and makes min_score meaningless. Refuse the scan instead of
+  // filling the review queue with numbers nobody can act on.
+  if (!followers || followers < 1) {
+    throw new Error(
+      `Could not read follower count for @${profile.username} — virality scores would be meaningless, so nothing was saved. Check the RapidAPI key/quota in Settings and re-scan.`,
+    )
+  }
 
   const cutoff = Date.now() - profile.max_age_days * 86_400_000
   const newItemIds: string[] = []
@@ -281,7 +291,8 @@ async function enrichReels(
   return results.filter((r): r is NonNullable<typeof r> => r !== null)
 }
 
-async function fetchIgFollowers(username: string, apiKey: string): Promise<number> {
+/** Null when the API answered but carried no follower count — the caller must not guess. */
+async function fetchIgFollowers(username: string, apiKey: string): Promise<number | null> {
   const INSTAGRAM_HOST = 'instagram-scraper-stable-api.p.rapidapi.com'
   const res = await fetch(`https://${INSTAGRAM_HOST}/get_ig_user_info.php`, {
     method: 'POST',
@@ -293,5 +304,6 @@ async function fetchIgFollowers(username: string, apiKey: string): Promise<numbe
     body: `username_or_url=${encodeURIComponent(username)}`,
   })
   const data = await res.json()
-  return data?.result?.follower_count ?? data?.follower_count ?? 1
+  const count = data?.result?.follower_count ?? data?.follower_count
+  return typeof count === 'number' && count > 0 ? count : null
 }

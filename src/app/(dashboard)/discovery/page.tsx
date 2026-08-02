@@ -350,6 +350,15 @@ function AddProfilePanel({ onAdd }: { onAdd: (p: Profile) => void }) {
 
 type ViewTab = 'pending' | 'approved' | 'rejected'
 
+/**
+ * Approving here is what moves a reel into Copy-Paste, but the two pages are
+ * otherwise unconnected — without this the items look like they vanished.
+ */
+const OPEN_COPY_PASTE = {
+  label: 'Open',
+  onClick: () => { window.location.href = '/copy-paste' },
+}
+
 function ViralFeedTab() {
   const [profiles, setProfiles]       = useState<Profile[]>([])
   const [items, setItems]             = useState<DiscoveryItem[]>([])
@@ -438,7 +447,11 @@ function ViralFeedTab() {
       body: JSON.stringify({ id, admin_status: status }),
     })
     setItems(prev => prev.filter(i => i.id !== id))
-    toast.success(status === 'APPROVED' ? 'Odobren → ide u Pipeline' : 'Odbijen')
+    if (status === 'APPROVED') {
+      toast.success('Approved — waiting in Copy-Paste Studio', { action: OPEN_COPY_PASTE })
+    } else {
+      toast.success('Rejected')
+    }
   }
 
   async function batchUpdate(status: 'APPROVED' | 'REJECTED') {
@@ -451,8 +464,13 @@ function ViralFeedTab() {
         body: JSON.stringify({ ids: [...selected], admin_status: status }),
       })
       setItems(prev => prev.filter(i => !selected.has(i.id)))
+      const n = selected.size
       setSelected(new Set())
-      toast.success(`${selected.size} items ${status === 'APPROVED' ? 'approved' : 'rejected'}`)
+      if (status === 'APPROVED') {
+        toast.success(`${n} approved — waiting in Copy-Paste Studio`, { action: OPEN_COPY_PASTE })
+      } else {
+        toast.success(`${n} rejected`)
+      }
     } finally {
       setBatchWorking(false)
     }
@@ -511,6 +529,15 @@ function ViralFeedTab() {
           <button className={tabStyle('pending')} onClick={() => setViewTab('pending')}>Pending</button>
           <button className={tabStyle('approved')} onClick={() => setViewTab('approved')}>Approved</button>
           <button className={tabStyle('rejected')} onClick={() => setViewTab('rejected')}>Rejected</button>
+
+          {viewTab === 'approved' && items.length > 0 && (
+            <a
+              href="/copy-paste"
+              className="text-xs text-primary hover:underline ml-1 flex items-center gap-1"
+            >
+              {items.length} waiting in Copy-Paste Studio →
+            </a>
+          )}
 
           {selected.size > 0 && (
             <div className="flex items-center gap-2 ml-auto">
