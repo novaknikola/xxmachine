@@ -23,6 +23,7 @@ import type {
   BulkImageJobItem, VideoRepurposeJobInput, VideoCaptionJobInput, VideoCaptionItem,
   VideoTranscribeJobInput, VideoOcrJobInput, CaptionShuffleJobInput, CaptionGenerateJobInput, ComfyUIPodBulkJobInput,
   BulkCarouselJobInput, MyPodI2vJobInput, MyPodAnimateJobInput, MyPodTalkJobInput, CopyPasteJobInput,
+  CopyPromptsJobInput,
 } from '../../submit/route'
 import { getPodSessionSecrets } from '@/lib/my-pod/session'
 import { ensureRemoteWorkDir, cleanupRemoteJobDir } from '@/lib/my-pod/ssh'
@@ -65,6 +66,14 @@ interface CopyPasteRow {
   error?: string
 }
 
+interface CopyPromptsRow {
+  promptId: string
+  prompt: string
+  images: string[]
+  status: 'done' | 'error'
+  error?: string
+}
+
 const execFileAsync = promisify(execFile)
 const CRON_SECRET = process.env.CRON_SECRET
 const VIDEO_BATCH_SIZE = 3
@@ -72,6 +81,7 @@ const GENERATE_BATCH_SIZE = 20
 const EXAMPLE_SAMPLE_SIZE = 25
 const CAROUSEL_BATCH_SIZE = 2
 const COPY_PASTE_BATCH_SIZE = 2
+const COPY_PROMPTS_BATCH_SIZE = 2
 
 /** Lease heartbeat so cron can requeue zombie My Pod workers after deploy/crash. */
 function packMyPodOutput(rows: MyPodRow[], stage: string) {
@@ -136,6 +146,7 @@ interface JobRow {
     texts?: string[]
     carouselRows?: CarouselRow[]
     copyPasteRows?: CopyPasteRow[]
+    copyPromptsRows?: CopyPromptsRow[]
     progressAt?: string
   } | null
   attempts: number
@@ -1107,7 +1118,9 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     if (job.job_type === 'bulk_carousel') {
       const { items, variantsExtra, presetId, grokSmart, referenceImageUrls, seedreamOnly, seedreamResolution } = job.input as unknown as BulkCarouselJobInput
       if (!items?.length) throw new Error('No items in job input')
-      if (seedreamOnly && !referenceImageUrls?.length) {
+      // Per-item scene references satisfy seedream-only on their own — see the
+      // matching check in queue/submit.
+      if (seedreamOnly && !referenceImageUrls?.length && !items.every(it => it.referenceImageUrls?.length)) {
         throw new Error('Seedream-only carousel requires referenceImageUrls')
       }
 
@@ -1134,11 +1147,15 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             const carouselPreset = presetId ?? DEFAULT_CAROUSEL_PRESET_ID
             const baseGenerationPrompt = buildCarouselBasePrompt(item.prompt, carouselPreset)
             const seedreamRes = seedreamResolution === '2k' ? '2k' : '1k'
+            // Shared job refs (the character) first, then this item's own scene
+            // reference, so identity keeps the primary slot and items without
+            // per-item refs produce exactly the array this used to send.
+            const itemRefUrls = [...(referenceImageUrls ?? []), ...(item.referenceImageUrls ?? [])]
 
             let baseStoredUrl: string
             if (seedreamOnly) {
               const baseUrls = await editImage({
-                imageUrls: referenceImageUrls!,
+                imageUrls: itemRefUrls.slice(0, SEEDREAM_MAX_IMAGES),
                 prompt: baseGenerationPrompt,
                 size: item.dimension,
                 resolution: seedreamRes,
@@ -1176,7 +1193,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                   imageUrls: [
                     baseStoredUrl,
                     // Base slide takes one of Seedream's image slots.
-                    ...(referenceImageUrls ?? []).slice(0, SEEDREAM_MAX_IMAGES - 1),
+                    ...itemRefUrls.slice(0, SEEDREAM_MAX_IMAGES - 1),
                   ],
                   prompt: variantPrompt,
                   size: item.dimension,
@@ -1289,6 +1306,144 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                   output=jsonb_build_object('copyPasteRows', $3::jsonb, 'progressAt', $5::text)
             WHERE id=$4`,
           [doneCount, progress, JSON.stringify(copyPasteRows), id, new Date().toISOString()],
+        )
+      }
+
+      await query(
+        `UPDATE generation_queue SET status='done', finished_at=now(), progress=100 WHERE id=$1`,
+        [id],
+      )
+
+      return NextResponse.json({ ok: true, done: doneCount })
+    }
+
+    // ── copy_prompts_generate ───────────────────────────────────────────────
+    if (job.job_type === 'copy_prompts_generate') {
+      const {
+        items, mode, loraUrl, loraScale, referenceImageUrls, dimension,
+        folderName, carousel, seedreamResolution,
+      } = job.input as unknown as CopyPromptsJobInput
+      if (!items?.length) throw new Error('No items in job input')
+
+      const apiKey = process.env.WAVESPEED_API_KEY ?? ''
+      const hfToken = process.env.HF_TOKEN ?? ''
+      if (!apiKey) {
+        await query(
+          `UPDATE generation_queue SET status='failed', error=$1, finished_at=now() WHERE id=$2`,
+          ['WAVESPEED_API_KEY not configured', id],
+        )
+        return NextResponse.json({ error: 'Missing API key' }, { status: 500 })
+      }
+
+      const copyPromptsRows: CopyPromptsRow[] = job.output?.copyPromptsRows ? [...job.output.copyPromptsRows] : []
+      let doneCount = job.done_items
+
+      for (let batchStart = doneCount; batchStart < items.length; batchStart += COPY_PROMPTS_BATCH_SIZE) {
+        const batchEnd = Math.min(batchStart + COPY_PROMPTS_BATCH_SIZE, items.length)
+        const batchIndices = Array.from({ length: batchEnd - batchStart }, (_, i) => batchStart + i)
+
+        const results = await Promise.all(batchIndices.map(async (i): Promise<CopyPromptsRow> => {
+          const item = items[i]
+          try {
+            const seedreamRes = seedreamResolution === '2k' ? '2k' : '1k'
+
+            let baseStoredUrl: string
+            if (mode === 'seedream-edit') {
+              const baseUrls = await editImage({
+                imageUrls: referenceImageUrls!,
+                prompt: item.prompt,
+                size: dimension,
+                resolution: seedreamRes,
+                apiKey,
+                signal: AbortSignal.timeout(600_000),
+              })
+              if (!baseUrls.length) throw new Error('No base image returned from Seedream')
+              baseStoredUrl = await uploadImageFromUrl(baseUrls[0], `queue/${id}/${i + 1}_base.jpg`)
+            } else {
+              const baseUrls = await generateImage({
+                prompt: item.prompt,
+                dimension,
+                loraUrl,
+                loraScale,
+                apiKey,
+                hfToken,
+                signal: AbortSignal.timeout(130_000),
+              })
+              if (!baseUrls.length) throw new Error('No base image returned')
+              baseStoredUrl = await uploadImageFromUrl(baseUrls[0], `queue/${id}/${i + 1}_base.jpg`)
+            }
+
+            const images: string[] = [baseStoredUrl]
+            if (carousel?.enabled) {
+              const variantPrompts = await resolveCarouselVariantPrompts({
+                presetId: carousel.presetId,
+                count: carousel.count,
+                scenePrompt: item.prompt,
+                grokSmart: carousel.grokSmart ?? false,
+                baseImageUrl: baseStoredUrl,
+              })
+
+              const variantResults = await Promise.allSettled(
+                variantPrompts.map(async (variantPrompt, vi) => {
+                  const editUrls = await editImage({
+                    imageUrls: [
+                      baseStoredUrl,
+                      ...(referenceImageUrls ?? []).slice(0, SEEDREAM_MAX_IMAGES - 1),
+                    ],
+                    prompt: variantPrompt,
+                    size: dimension,
+                    resolution: seedreamRes,
+                    apiKey,
+                    signal: AbortSignal.timeout(600_000),
+                  })
+                  if (!editUrls.length) throw new Error('No variant image returned')
+                  return uploadImageFromUrl(editUrls[0], `queue/${id}/${i + 1}_v${vi + 1}.jpg`)
+                }),
+              )
+              for (const r of variantResults) {
+                if (r.status === 'fulfilled') images.push(r.value)
+              }
+            }
+
+            try {
+              const { enqueueDriveArchive } = await import('@/lib/drive-archive/enqueue')
+              const kind = carousel?.enabled ? 'carousels' : 'stories'
+              const seriesId = `${id}:${i}`
+              for (let si = 0; si < images.length; si++) {
+                await enqueueDriveArchive({
+                  userId: job.user_id,
+                  sourceType: 'queue_job',
+                  sourceId: `${seriesId}:${si}`,
+                  urls: [images[si]],
+                  characterKey: folderName,
+                  kind,
+                  stage: 'ready',
+                  modelKey: 'copy_prompts_generate',
+                  seriesId,
+                  seriesIndex: si,
+                  seriesTotal: images.length,
+                })
+              }
+            } catch (err) {
+              console.error(`[queue/process] copy_prompts_generate ${id} item ${i} drive archive failed:`, err)
+            }
+
+            return { promptId: item.promptId, prompt: item.prompt, images, status: 'done' }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : 'failed'
+            console.error(`[queue/process] copy_prompts_generate ${id} item ${i} failed:`, msg)
+            return { promptId: item.promptId, prompt: item.prompt, images: [], status: 'error', error: msg }
+          }
+        }))
+
+        copyPromptsRows.push(...results)
+        doneCount = batchEnd
+        const progress = Math.round((doneCount / items.length) * 100)
+        await query(
+          `UPDATE generation_queue
+              SET done_items=$1, progress=$2, output=jsonb_build_object('copyPromptsRows', $3::jsonb)
+            WHERE id=$4`,
+          [doneCount, progress, JSON.stringify(copyPromptsRows), id],
         )
       }
 

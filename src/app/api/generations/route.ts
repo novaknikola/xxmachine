@@ -79,6 +79,11 @@ function extractQueueUrls(output: unknown): string[] {
       if (Array.isArray(row.images)) urls.push(...row.images.filter(Boolean))
     }
   }
+  if (Array.isArray(o.copyPromptsRows)) {
+    for (const row of o.copyPromptsRows as Array<{ images?: string[] }>) {
+      if (Array.isArray(row.images)) urls.push(...row.images.filter(Boolean))
+    }
+  }
   return [...new Set(urls)]
 }
 

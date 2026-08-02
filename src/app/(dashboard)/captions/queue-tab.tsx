@@ -63,6 +63,7 @@ function JobCard({ job, onCancel, onDownload, downloading }: {
   const usesRows = job.job_type === 'video_transcribe' || job.job_type === 'video_ocr'
   const usesTexts = job.job_type === 'caption_shuffle' || job.job_type === 'caption_generate'
   const usesCarousel = job.job_type === 'bulk_carousel'
+  const usesCopyPrompts = job.job_type === 'copy_prompts_generate'
   const successUrls = job.output?.urls?.filter(u => !u.startsWith('error:')) ?? []
   const failedCount = usesRows
     ? job.output?.rows?.filter(r => r.text.startsWith('error:')).length ?? 0
@@ -95,13 +96,14 @@ function JobCard({ job, onCancel, onDownload, downloading }: {
                 : job.job_type === 'caption_shuffle' ? 'Caption Shuffle'
                 : job.job_type === 'caption_generate' ? 'Caption Generate'
                 : job.job_type === 'bulk_carousel' ? 'Bulk Carousel'
+                : job.job_type === 'copy_prompts_generate' ? 'Copy Prompts'
                 : job.job_type}
             </span>
             <StatusBadge status={job.status} />
           </div>
           <p className="text-xs text-muted-foreground">
             {new Date(job.created_at).toLocaleString()}
-            {' · '}{`${job.total_items} ${job.job_type === 'bulk_image' ? 'images' : usesTexts ? 'captions' : usesCarousel ? 'carousels' : 'videos'}`}
+            {' · '}{`${job.total_items} ${job.job_type === 'bulk_image' ? 'images' : usesTexts ? 'captions' : usesCarousel ? 'carousels' : usesCopyPrompts ? 'prompts' : 'videos'}`}
             {dur && <> · {dur}</>}
             {job.attempts > 1 && <> · Attempt {job.attempts}</>}
           </p>

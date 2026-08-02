@@ -52,6 +52,7 @@ const KIND_LABEL: Record<string, string> = {
   my_pod_i2v: 'My Pod · I2V',
   my_pod_animate: 'My Pod · Animate',
   my_pod_talk: 'My Pod · Talk',
+  copy_prompts_generate: 'Copy Prompts',
 }
 
 const FILTER_GROUPS: {

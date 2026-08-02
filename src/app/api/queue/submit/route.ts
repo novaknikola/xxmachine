@@ -15,6 +15,13 @@ export interface BulkImageJobItem {
   loraScale?: number
   characterId?: string
   characterName?: string
+  /**
+   * Per-item Seedream reference URLs — one scene/composition reference for this
+   * carousel alone (e.g. a pasted Pinterest pin). Job-level referenceImageUrls
+   * stay shared across items and are sent first, so the character keeps the
+   * primary image slot and items without their own refs behave as before.
+   */
+  referenceImageUrls?: string[]
 }
 
 export interface CopyPasteJobInput {
@@ -23,6 +30,34 @@ export interface CopyPasteJobInput {
   endFrame?: 'auto' | 'always' | 'off'
   /** Fan each finished video out into N repurposed variants. 0 = off. */
   repurposeCount?: number
+}
+
+export interface CopyPromptsJobItem {
+  /** scraped_prompts.id — provenance / links results back to the source card. */
+  promptId: string
+  /** Fully composed final prompt text (style prefix + trigger word already applied client-side). */
+  prompt: string
+}
+
+export interface CopyPromptsJobInput {
+  items: CopyPromptsJobItem[]
+  mode: 'turbo-lora' | 'seedream-edit'
+  loraUrl?: string | null
+  loraScale?: number
+  /** Required for mode === 'seedream-edit' — the character's reference photo(s). */
+  referenceImageUrls?: string[]
+  dimension: string
+  /** User-typed Drive folder name — passed through as characterKey, unsanitized. */
+  folderName: string
+  characterId?: string | null
+  characterName?: string | null
+  carousel?: {
+    enabled: boolean
+    count: 1 | 2 | 3 | 4
+    presetId?: string
+    grokSmart?: boolean
+  }
+  seedreamResolution?: '1k' | '2k'
 }
 
 export interface BulkCarouselJobInput {
@@ -214,6 +249,7 @@ export type QueueSubmitBody =
     }
   | { job_type: 'bulk_carousel'; input: BulkCarouselJobInput }
   | { job_type: 'copy_paste_v2'; input: CopyPasteJobInput }
+  | { job_type: 'copy_prompts_generate'; input: CopyPromptsJobInput }
 
 export async function POST(req: NextRequest) {
   const user = await requireUser(req)
@@ -665,12 +701,29 @@ export async function POST(req: NextRequest) {
     if (![1, 2, 3, 4].includes(variantsExtra)) {
       return NextResponse.json({ error: 'variantsExtra must be 1, 2, 3, or 4' }, { status: 400 })
     }
-    if (body.input?.seedreamOnly && !body.input.referenceImageUrls?.length) {
+    const carouselItems = items as BulkImageJobItem[]
+    const jobRefCount = body.input?.referenceImageUrls?.length ?? 0
+    // A per-item scene reference is a valid Seedream base on its own, so
+    // seedream-only no longer demands job-level refs — it only demands that
+    // every item ends up with at least one image from either level.
+    if (
+      body.input?.seedreamOnly
+      && !jobRefCount
+      && !carouselItems.every(it => it.referenceImageUrls?.length)
+    ) {
       return NextResponse.json({ error: 'referenceImageUrls required for Seedream-only carousel' }, { status: 400 })
     }
-    if ((body.input?.referenceImageUrls?.length ?? 0) > SEEDREAM_MAX_IMAGES) {
+    if (jobRefCount > SEEDREAM_MAX_IMAGES) {
       return NextResponse.json(
         { error: `referenceImageUrls accepts at most ${SEEDREAM_MAX_IMAGES} images` },
+        { status: 400 },
+      )
+    }
+    // Both levels compete for the same Seedream image slots, so they are capped
+    // together rather than each on its own.
+    if (carouselItems.some(it => jobRefCount + (it.referenceImageUrls?.length ?? 0) > SEEDREAM_MAX_IMAGES)) {
+      return NextResponse.json(
+        { error: `Job-level and per-item referenceImageUrls together accept at most ${SEEDREAM_MAX_IMAGES} images` },
         { status: 400 },
       )
     }
@@ -738,6 +791,91 @@ export async function POST(req: NextRequest) {
         }).catch(err => console.error('[queue/submit] fire copy_paste_v2 worker:', err))
       }
     }
+    return NextResponse.json({ id: row!.id })
+  }
+
+  if (body.job_type === 'copy_prompts_generate') {
+    const {
+      items, mode, loraUrl, loraScale, referenceImageUrls, dimension,
+      folderName, characterId, characterName, carousel, seedreamResolution,
+    } = body.input ?? {}
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return NextResponse.json({ error: 'items required' }, { status: 400 })
+    }
+    if (items.some(it => !it?.promptId || !it?.prompt?.trim())) {
+      return NextResponse.json({ error: 'Every item needs a promptId and prompt' }, { status: 400 })
+    }
+    if (mode !== 'turbo-lora' && mode !== 'seedream-edit') {
+      return NextResponse.json({ error: 'mode must be turbo-lora or seedream-edit' }, { status: 400 })
+    }
+    if (mode === 'turbo-lora' && !loraUrl?.trim()) {
+      return NextResponse.json({ error: 'loraUrl required for turbo-lora mode' }, { status: 400 })
+    }
+    if (mode === 'seedream-edit' && !referenceImageUrls?.length) {
+      return NextResponse.json({ error: 'referenceImageUrls required for seedream-edit mode' }, { status: 400 })
+    }
+    if ((referenceImageUrls?.length ?? 0) > SEEDREAM_MAX_IMAGES) {
+      return NextResponse.json(
+        { error: `referenceImageUrls accepts at most ${SEEDREAM_MAX_IMAGES} images` },
+        { status: 400 },
+      )
+    }
+    if (!folderName?.trim()) {
+      return NextResponse.json({ error: 'folderName required' }, { status: 400 })
+    }
+    if (carousel?.enabled && ![1, 2, 3, 4].includes(carousel.count)) {
+      return NextResponse.json({ error: 'carousel.count must be 1, 2, 3, or 4' }, { status: 400 })
+    }
+
+    const usesSeedream = mode === 'seedream-edit' || carousel?.enabled
+    const maxItems = usesSeedream ? 25 : 50
+    if (items.length > maxItems) {
+      return NextResponse.json({ error: `Max ${maxItems} items per submission` }, { status: 400 })
+    }
+
+    const input: CopyPromptsJobInput = {
+      items,
+      mode,
+      loraUrl: loraUrl ?? null,
+      loraScale,
+      referenceImageUrls,
+      dimension: dimension || '9:16',
+      folderName: folderName.trim(),
+      characterId: characterId ?? null,
+      characterName: characterName ?? null,
+      carousel: carousel?.enabled
+        ? { enabled: true, count: carousel.count, presetId: carousel.presetId, grokSmart: carousel.grokSmart ?? false }
+        : undefined,
+      seedreamResolution: seedreamResolution === '2k' ? '2k' : '1k',
+    }
+
+    const row = await one<{ id: string }>(
+      `INSERT INTO generation_queue (user_id, job_type, input, total_items)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [user.id, body.job_type, JSON.stringify(input), items.length],
+    )
+
+    // Start now instead of waiting up to a minute for cron — same pattern as copy_paste_v2.
+    const secret = process.env.CRON_SECRET
+    if (row && secret) {
+      const claimed = await one<{ id: string }>(
+        `UPDATE generation_queue
+            SET status = 'processing', started_at = now(), attempts = attempts + 1
+          WHERE id = $1 AND status = 'pending'
+          RETURNING id`,
+        [row.id],
+      ).catch(() => null)
+      if (claimed) {
+        const internalBase = `http://127.0.0.1:${process.env.PORT ?? 3000}`
+        fetch(`${internalBase}/api/queue/process/${row.id}`, {
+          method: 'POST',
+          headers: { 'x-cron-secret': secret },
+        }).catch(err => console.error('[queue/submit] fire copy_prompts_generate worker:', err))
+      }
+    }
+
     return NextResponse.json({ id: row!.id })
   }
 

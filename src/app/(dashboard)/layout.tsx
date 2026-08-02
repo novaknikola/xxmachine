@@ -14,6 +14,7 @@ const ROUTE_MODULES: Record<string, string> = {
   '/socials': 'socials',
   '/motion': 'motion',
   '/copy-paste': 'generator',
+  '/copy-prompts': 'generator',
   '/schedule': 'schedule',
   '/history': 'history',
 }

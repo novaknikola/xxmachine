@@ -24,6 +24,7 @@ import {
   Sparkles,
   Layers,
   Captions,
+  Images,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -73,6 +74,7 @@ const NAV_ITEMS: NavItem[] = [
     ],
   },
   { href: '/copy-paste', label: 'Copy-Paste Studio', icon: Copy },
+  { href: '/copy-prompts', label: 'Copy Prompts', icon: Images, module: 'generator' },
   { href: '/my-pod', label: 'My Pod', icon: Zap },
   { href: '/history', label: 'History', icon: History, module: 'history' },
   { href: '/settings', label: 'Settings', icon: Settings },
