@@ -31,7 +31,8 @@ export async function GET(req: NextRequest) {
             content_type, source_duration, source_cut_count,
             source_aspect_ratio, source_width, source_height,
             video_model, thumbnail_url, video_url,
-            reference_image_url, copy_paste_spec, rendered_prompt,
+            reference_image_url, source_first_frame_url, generated_image_url,
+            copy_paste_spec, rendered_prompt,
             kling_video_url, replicate_status, replicate_error,
             admin_status, posted_at, discovered_at
        FROM discovery_items

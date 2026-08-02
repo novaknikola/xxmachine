@@ -54,7 +54,7 @@ export function CostsTab() {
           <div>
             <CardTitle>Recent runs</CardTitle>
             <CardDescription>
-              Seedance 2.0 estimate recorded when you finish a Replicate from this browser. Not a WaveSpeed invoice.
+              Seedream Edit keyframe + Seedance 2.0 estimate recorded when you finish a Replicate from this browser. Not a WaveSpeed invoice.
             </CardDescription>
           </div>
           <Button
@@ -78,7 +78,9 @@ export function CostsTab() {
                   <tr className="text-left text-muted-foreground border-b border-border/50">
                     <th className="py-3 pr-4 font-medium">When</th>
                     <th className="py-3 pr-4 font-medium">Profile</th>
-                    <th className="py-3 font-medium text-right">Video (Seedance)</th>
+                    <th className="py-3 pr-4 font-medium text-right">Keyframe</th>
+                    <th className="py-3 pr-4 font-medium text-right">Video</th>
+                    <th className="py-3 font-medium text-right">Total</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -88,6 +90,8 @@ export function CostsTab() {
                         {new Date(e.at).toLocaleString()}
                       </td>
                       <td className="py-3 pr-4">@{e.profile || '—'}</td>
+                      <td className="py-3 pr-4 text-right tabular-nums">{studio.formatUsd(e.keyframeUsd)}</td>
+                      <td className="py-3 pr-4 text-right tabular-nums">{studio.formatUsd(e.videoUsd)}</td>
                       <td className="py-3 text-right tabular-nums font-medium">{studio.formatUsd(e.totalUsd)}</td>
                     </tr>
                   ))}

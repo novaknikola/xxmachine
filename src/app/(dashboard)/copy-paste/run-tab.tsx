@@ -31,6 +31,8 @@ interface ReplicateItem {
   replicate_status: string
   replicate_error: string | null
   reference_image_url: string | null
+  source_first_frame_url: string | null
+  generated_image_url: string | null
   copy_paste_spec: CopyPasteSpec | null
   rendered_prompt: string | null
   kling_video_url: string | null
@@ -52,6 +54,8 @@ const STATUS_LABEL: Record<string, string> = {
   pending_classify: 'Classifying…',
   classified: 'Ready',
   analyzing: 'Analyzing',
+  image_generating: 'Generating keyframe',
+  image_done: 'Keyframe ready',
   video_generating: 'Generating video',
   done: 'Done',
   failed: 'Failed',
@@ -63,6 +67,8 @@ const PIPELINE_STEPS = [
   'pending_classify',
   'classified',
   'analyzing',
+  'image_generating',
+  'image_done',
   'video_generating',
   'done',
 ] as const
@@ -219,7 +225,7 @@ export function RunTab() {
           </Field>
 
           <div className="ml-auto flex flex-col items-end gap-1 pb-0.5">
-            <span className="text-xs text-muted-foreground">Est. / video (Seedance)</span>
+            <span className="text-xs text-muted-foreground">Est. / video (keyframe + Seedance)</span>
             <span className="text-lg font-semibold tabular-nums">
               {studio.formatUsd(avgEstimate.totalUsd)}
             </span>
@@ -293,14 +299,18 @@ export function RunTab() {
                     )}
                     <div className="shrink-0 flex gap-1.5">
                       <a
-                        href={item.thumbnail_url || item.content_url}
+                        href={item.generated_image_url || item.thumbnail_url || item.content_url}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="w-24 sm:w-28 aspect-[9/16] rounded-lg overflow-hidden bg-secondary/50 ring-1 ring-border/60"
                       >
-                        {item.thumbnail_url ? (
+                        {item.generated_image_url || item.thumbnail_url ? (
                           // eslint-disable-next-line @next/next/no-img-element
-                          <img src={item.thumbnail_url} alt="" className="w-full h-full object-cover" />
+                          <img
+                            src={item.generated_image_url || item.thumbnail_url || ''}
+                            alt=""
+                            className="w-full h-full object-cover"
+                          />
                         ) : (
                           <div className="w-full h-full flex items-center justify-center text-muted-foreground">
                             <ImageIcon className="w-6 h-6 opacity-40" />
@@ -401,6 +411,7 @@ export function RunTab() {
                         {item.replicate_status !== 'done'
                           && item.replicate_status !== 'skipped'
                           && item.replicate_status !== 'analyzing'
+                          && item.replicate_status !== 'image_generating'
                           && item.replicate_status !== 'video_generating'
                           && !stillClassifying && (
                           <Button
@@ -414,11 +425,16 @@ export function RunTab() {
                           </Button>
                         )}
                         {(item.replicate_status === 'analyzing'
+                          || item.replicate_status === 'image_generating'
                           || item.replicate_status === 'video_generating'
                           || stillClassifying) && (
                           <Button variant="outline" disabled>
                             <Loader2 className="w-4 h-4 animate-spin" />
-                            {item.replicate_status === 'video_generating' ? 'Generating video…' : 'Analyzing…'}
+                            {item.replicate_status === 'video_generating'
+                              ? 'Generating video…'
+                              : item.replicate_status === 'image_generating'
+                                ? 'Generating keyframe…'
+                                : 'Analyzing…'}
                           </Button>
                         )}
                         <Button variant="ghost" onClick={() => setDetailId(item.id)}>

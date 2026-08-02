@@ -5,6 +5,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { isPlayableVideoUrl } from './video-url'
+import { uploadBuffer } from '@/lib/supabase-storage'
 
 const execFileAsync = promisify(execFile)
 
@@ -43,6 +44,8 @@ export interface SourceProbe {
   width: number | null
   height: number | null
   aspectRatio: SourceAspectRatio
+  /** Frame 0 (always ≤0.4s in) re-hosted publicly — the Seedream Edit keyframe input. Best-effort. */
+  firstFrameUrl: string | null
 }
 
 async function downloadVideo(videoUrl: string, path: string): Promise<void> {
@@ -197,6 +200,18 @@ export async function probeSourceVideo(
       console.warn('[monitor/probe] no frames extracted from', videoUrl.slice(0, 80))
       return null
     }
+
+    let firstFrameUrl: string | null = null
+    try {
+      firstFrameUrl = await uploadBuffer(
+        Buffer.from(frames[0], 'base64'),
+        `monitor/${id}/first-frame.jpg`,
+        'image/jpeg',
+      )
+    } catch (err) {
+      console.warn('[monitor/probe] first-frame upload failed:', err instanceof Error ? err.message : err)
+    }
+
     return {
       frames,
       duration,
@@ -206,6 +221,7 @@ export async function probeSourceVideo(
       width,
       height,
       aspectRatio: bucketAspectRatio(width, height),
+      firstFrameUrl,
     }
   } catch (err) {
     console.warn('[monitor/probe] failed:', err instanceof Error ? err.message : err)

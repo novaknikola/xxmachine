@@ -71,6 +71,7 @@ export function StudioSettingsProvider({ children }: { children: ReactNode }) {
       recordSpend({
         itemId: input.itemId,
         profile: input.profile,
+        keyframeUsd: est.keyframeUsd,
         videoUsd: est.videoUsd,
         totalUsd: est.totalUsd,
       })

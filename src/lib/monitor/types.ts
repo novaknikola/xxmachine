@@ -5,6 +5,8 @@ export type ReplicateStatus =
   | 'pending_classify'
   | 'classified'
   | 'analyzing'
+  | 'image_generating'
+  | 'image_done'
   | 'video_generating'
   | 'done'
   | 'failed'
@@ -41,8 +43,10 @@ export interface DiscoveryItemRow {
   thumbnail_url: string | null
   video_url: string | null
   content_type: ContentType | null
-  /** User-uploaded identity photo for this batch — becomes Seedance's `image`. */
+  /** User-uploaded identity photo for this batch — the Seedream Edit identity input. */
   reference_image_url: string | null
+  /** Frame 0 of the source reel, re-hosted publicly — the Seedream Edit scene input. */
+  source_first_frame_url: string | null
   /** The full CopyPasteSpec JSON produced by analysis. */
   copy_paste_spec: Record<string, unknown> | null
   /** Flattened prose sent to Seedance as `prompt` — user-editable before Replicate. */
@@ -52,6 +56,8 @@ export interface DiscoveryItemRow {
   source_height: number | null
   source_duration: number | null
   source_cut_count: number | null
+  /** Seedream Edit output — identity composited onto the source frame; becomes Seedance's `image`. */
+  generated_image_url: string | null
   kling_video_url: string | null
   video_model: string | null
   replicate_status: ReplicateStatus

@@ -1,13 +1,18 @@
 /**
- * WaveSpeed unit-cost estimate for Copy-Paste v2 (Seedance 2.0 only).
+ * WaveSpeed unit-cost estimate for Copy-Paste v2 (Seedream v5 Pro Edit keyframe + Seedance 2.0 video).
  *
- * Rate matches POST https://api.wavespeed.ai/api/v3/model/pricing (probed Jul 2026).
+ * Seedance rate matches POST https://api.wavespeed.ai/api/v3/model/pricing (probed Jul 2026).
+ * Seedream rate matches https://wavespeed.ai/models/bytedance/seedream-v5.0-pro/edit
+ * (probed Aug 2026): $0.045/run at 1k + $0.003 per image beyond the first — we always
+ * send exactly 2 (source frame + reference photo), so it's a flat $0.048/keyframe.
  * Not a live ledger — Grok vision tokens / HF Whisper ASR are outside WaveSpeed.
  */
 
 const SEEDANCE_PER_SEC_USD = 0.24
+const SEEDREAM_KEYFRAME_USD = 0.048
 
 export interface CostBreakdown {
+  keyframeUsd: number
   videoUsd: number
   totalUsd: number
   note: string
@@ -20,12 +25,14 @@ function seedanceSeconds(durationSec?: number | null): number {
 
 export function estimateCopyPasteCost(durationSec?: number | null): CostBreakdown {
   const billedSec = seedanceSeconds(durationSec)
+  const keyframeUsd = SEEDREAM_KEYFRAME_USD
   const videoUsd = roundUsd(SEEDANCE_PER_SEC_USD * billedSec)
 
   return {
+    keyframeUsd,
     videoUsd,
-    totalUsd: videoUsd,
-    note: `WaveSpeed Seedance 2.0 (720p): ≈$${SEEDANCE_PER_SEC_USD.toFixed(2)}/s × ${billedSec}s billed. Grok / HF Whisper not included.`,
+    totalUsd: roundUsd(keyframeUsd + videoUsd),
+    note: `Seedream v5 Pro Edit keyframe: $${keyframeUsd.toFixed(3)}. WaveSpeed Seedance 2.0 (720p): ≈$${SEEDANCE_PER_SEC_USD.toFixed(2)}/s × ${billedSec}s billed. Grok / HF Whisper not included.`,
   }
 }
 
@@ -46,6 +53,7 @@ export interface SpendEntry {
   at: string
   itemId?: string
   profile?: string
+  keyframeUsd: number
   videoUsd: number
   totalUsd: number
 }
@@ -77,6 +85,7 @@ export function recordSpend(entry: Omit<SpendEntry, 'id' | 'at'> & { id?: string
     at: entry.at ?? new Date().toISOString(),
     itemId: entry.itemId,
     profile: entry.profile,
+    keyframeUsd: entry.keyframeUsd,
     videoUsd: entry.videoUsd,
     totalUsd: entry.totalUsd,
   })

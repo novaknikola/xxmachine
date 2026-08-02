@@ -367,3 +367,25 @@ export function renderCopyPastePrompt(spec: CopyPasteSpec): string {
 
   return blocks.join('\n\n')
 }
+
+/**
+ * Short, instructional Seedream Edit prompt (terse comma/period directives,
+ * not narrative prose) — composites the reference photo's identity onto the
+ * source frame's exact pose/background/framing, wardrobe applied from the
+ * already-normalized spec. Distinct from renderCopyPastePrompt above, which
+ * is narrative and feeds Seedance's video prompt, not a still-image edit.
+ */
+export function renderKeyframeEditPrompt(spec: CopyPasteSpec): string {
+  const locked = spec.people[0]
+  const bits = [
+    'Image 1 is the scene reference, image 2 is the identity reference.',
+    'Keep the exact pose, camera framing, and background from image 1 unchanged.',
+    "Replace the main subject's face and body identity with the person from image 2.",
+    locked?.wardrobe && `Wardrobe: ${locked.wardrobe}.`,
+    spec.environment && `Environment: ${spec.environment}.`,
+    spec.lighting && `Lighting: ${spec.lighting}.`,
+    'Photorealistic, natural skin texture, no beauty filter, no AI skin smoothing.',
+    'Do not add any other people. Do not change the composition, angle, or background.',
+  ].filter(Boolean)
+  return bits.join(' ')
+}

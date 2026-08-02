@@ -4,8 +4,8 @@ import type { SourceAspectRatio } from './analyze'
 export const SEEDANCE_MODEL = 'bytedance/seedance-2.0/image-to-video'
 
 export interface SeedanceCallInput {
-  /** User's uploaded photo, unmodified — becomes Seedance's `image` (identity + start frame). */
-  referenceImageUrl: string
+  /** The Seedream Edit keyframe (identity composited onto the source frame) — becomes Seedance's `image` (start frame). */
+  imageUrl: string
   /** renderCopyPastePrompt(spec) output. */
   prompt: string
   durationSec: number | null
@@ -19,7 +19,7 @@ function seedanceDuration(durationSec: number | null): number {
 
 export function buildSeedancePayload(input: SeedanceCallInput): Record<string, unknown> {
   return {
-    image: input.referenceImageUrl,
+    image: input.imageUrl,
     prompt: input.prompt,
     aspect_ratio: input.aspectRatio === 'other' ? '9:16' : input.aspectRatio,
     resolution: '720p',

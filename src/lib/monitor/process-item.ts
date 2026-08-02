@@ -3,10 +3,11 @@ import {
   extractCopyPasteSpec,
   normalizeCopyPasteSpec,
   renderCopyPastePrompt,
+  renderKeyframeEditPrompt,
   type CopyPasteSpec,
 } from './copy-paste-spec'
 import { probeSourceVideo, type SourceAspectRatio } from './analyze'
-import { generateSeedanceVideo } from './replicate'
+import { generateCopyPasteKeyframe, generateSeedanceVideo } from './replicate'
 import { notifyReplicationDone, notifyReplicationFailed } from './notify'
 import { archiveDiscoveryItem } from '@/lib/drive-archive/from-discovery-item'
 import type { DiscoveryItemRow, TrackedProfileRow } from './types'
@@ -49,6 +50,7 @@ export async function classifyDiscoveryItem(itemId: string, userId: string) {
               source_aspect_ratio = $6,
               source_width = $7,
               source_height = $8,
+              source_first_frame_url = coalesce($9, source_first_frame_url),
               replicate_status = 'classified',
               replicate_error = NULL
         WHERE id = $1`,
@@ -61,6 +63,7 @@ export async function classifyDiscoveryItem(itemId: string, userId: string) {
         probe.aspectRatio,
         probe.width,
         probe.height,
+        probe.firstFrameUrl,
       ],
     )
 
@@ -76,7 +79,8 @@ export async function classifyDiscoveryItem(itemId: string, userId: string) {
 }
 
 /**
- * Single-path replication: reference photo + rendered prompt straight into
+ * Replication: reference photo + source first-frame composited into a
+ * Seedream v5 Pro Edit keyframe, then that keyframe + rendered prompt into
  * Seedance 2.0 i2v. Runs analysis first if it hasn't happened yet.
  */
 export async function replicateCopyPasteItem(itemId: string, userId: string) {
@@ -95,6 +99,7 @@ export async function replicateCopyPasteItem(itemId: string, userId: string) {
       : null
     let durationSec = item.source_duration
     let aspectRatio: SourceAspectRatio = item.source_aspect_ratio ?? 'other'
+    let firstFrameUrl = item.source_first_frame_url
     // A user edit to rendered_prompt in Details always wins over a freshly rendered one.
     let renderedPrompt = item.rendered_prompt
 
@@ -107,6 +112,7 @@ export async function replicateCopyPasteItem(itemId: string, userId: string) {
       renderedPrompt = renderCopyPastePrompt(spec)
       durationSec = probe.duration
       aspectRatio = probe.aspectRatio
+      firstFrameUrl = probe.firstFrameUrl ?? firstFrameUrl
 
       await query(
         `UPDATE discovery_items
@@ -117,7 +123,8 @@ export async function replicateCopyPasteItem(itemId: string, userId: string) {
                 source_cut_count = $5,
                 source_aspect_ratio = $6,
                 source_width = $7,
-                source_height = $8
+                source_height = $8,
+                source_first_frame_url = coalesce($9, source_first_frame_url)
           WHERE id = $1`,
         [
           itemId,
@@ -128,13 +135,32 @@ export async function replicateCopyPasteItem(itemId: string, userId: string) {
           aspectRatio,
           probe.width,
           probe.height,
+          probe.firstFrameUrl,
         ],
+      )
+    }
+
+    let generatedImageUrl = item.generated_image_url
+    if (!generatedImageUrl) {
+      if (!firstFrameUrl) throw new Error('No source frame captured — re-run Classify')
+      await query(`UPDATE discovery_items SET replicate_status = 'image_generating' WHERE id = $1`, [itemId])
+      const keyframe = await generateCopyPasteKeyframe({
+        sourceFrameUrl: firstFrameUrl,
+        referenceImageUrl: item.reference_image_url,
+        prompt: renderKeyframeEditPrompt(spec),
+        aspectRatio,
+        itemId,
+      })
+      generatedImageUrl = keyframe.imageUrl
+      await query(
+        `UPDATE discovery_items SET generated_image_url = $2, replicate_status = 'image_done' WHERE id = $1`,
+        [itemId, generatedImageUrl],
       )
     }
 
     await query(`UPDATE discovery_items SET replicate_status = 'video_generating' WHERE id = $1`, [itemId])
     const result = await generateSeedanceVideo({
-      referenceImageUrl: item.reference_image_url,
+      imageUrl: generatedImageUrl,
       prompt: renderedPrompt,
       durationSec,
       aspectRatio,
