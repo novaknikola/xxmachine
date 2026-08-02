@@ -48,8 +48,16 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
   const [grokSmart, setGrokSmart] = useState(false)
   const [uploadedRefs, setUploadedRefs] = useState<UploadedRef[]>([])
   const [sceneRefUrlsRaw, setSceneRefUrlsRaw] = useState('')
+  const [pinPrompt, setPinPrompt] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Pins arrive with an image but no prompt of their own, so the batch needs
+  // one prompt describing what to do with every selected scene.
+  const pinBatch = items.length > 0 && items.every(it => it.sceneRefUrl)
+  // A pin batch is a Seedream edit by definition -- LoRA + Turbo ignores
+  // reference images entirely, so the choice is not offered for pins.
+  const effMode: Mode = pinBatch ? 'seedream-edit' : mode
 
   useEffect(() => {
     if (!open) return
@@ -110,7 +118,7 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
     // The two modes are independent: LoRA + Turbo generates from a trained
     // character, Seedream Edit generates from reference images. Neither should
     // demand what the other needs.
-    if (mode === 'turbo-lora') {
+    if (effMode === 'turbo-lora') {
       if (!character) { toast.error('Pick a character — LoRA + Turbo generates from its trained LoRA'); return }
       if (!character.loraUrl) {
         toast.error('This character has no trained LoRA — pick Seedream Edit instead')
@@ -119,11 +127,17 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
     }
     // Any of the three sources is a valid Seedream reference, so a character
     // without stored face refs is no longer a dead end here.
-    if (mode === 'seedream-edit' && totalRefCount === 0) {
+    if (pinBatch && !pinPrompt.trim()) {
+      toast.error('Describe what to generate from the selected pins')
+      return
+    }
+    // A pin is its own reference, so the per-item count carries the batch even
+    // when no character refs or uploads were supplied.
+    if (effMode === 'seedream-edit' && totalRefCount === 0 && !pinBatch) {
       toast.error('Seedream Edit needs at least one reference image — upload one, paste a URL, or add face refs in Admin')
       return
     }
-    if (mode === 'seedream-edit' && overCap) {
+    if (effMode === 'seedream-edit' && overCap) {
       toast.error(`Seedream takes at most ${SEEDREAM_MAX_IMAGES} images — you have ${totalRefCount}`)
       return
     }
@@ -131,16 +145,22 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
 
     setSubmitting(true)
     try {
-      const isSeedream = mode === 'seedream-edit'
+      const isSeedream = effMode === 'seedream-edit'
       const referenceImageUrls = isSeedream
         ? [...faceRefUrls, ...(await uploadRefFiles()), ...sceneRefUrls].slice(0, SEEDREAM_MAX_IMAGES)
         : undefined
 
       const composedItems = items.map(it => {
-        const styled = buildStyledScenePrompt(character, it.prompt)
+        const styled = buildStyledScenePrompt(character, pinBatch ? pinPrompt.trim() : it.prompt)
         // A trigger word only means anything to a LoRA — injecting it into a
         // Seedream prompt just adds a stray token like "sofia_lora".
-        return { promptId: it.id, prompt: isSeedream ? styled : withTriggerWord(styled, triggerWord) }
+        return {
+          promptId: it.id,
+          prompt: isSeedream ? styled : withTriggerWord(styled, triggerWord),
+          // Each pin generates against its own scene, so refs go per item
+          // rather than being merged into one shared set.
+          referenceImageUrls: it.sceneRefUrl ? [it.sceneRefUrl] : undefined,
+        }
       })
 
       const res = await fetch('/api/queue/submit', {
@@ -150,7 +170,7 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
           job_type: 'copy_prompts_generate',
           input: {
             items: composedItems,
-            mode,
+            mode: effMode,
             loraUrl: isSeedream ? null : character?.loraUrl ?? null,
             loraScale: isSeedream ? undefined : character?.loraScale,
             referenceImageUrls,
@@ -198,17 +218,17 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
         <div className="flex-1 overflow-y-auto px-4 space-y-4">
           <div className="space-y-1.5">
             <p className="text-xs font-medium text-muted-foreground">
-              Character{mode === 'seedream-edit' && <span className="opacity-60"> (optional)</span>}
+              Character{effMode === 'seedream-edit' && <span className="opacity-60"> (optional)</span>}
             </p>
             <Select value={characterId} onValueChange={v => setCharacterId(v ?? '')}>
               <SelectTrigger className="w-full">
-                <SelectValue placeholder={mode === 'seedream-edit' ? 'None — identity comes from the references' : 'Pick a character'} />
+                <SelectValue placeholder={effMode === 'seedream-edit' ? 'None — identity comes from the references' : 'Pick a character'} />
               </SelectTrigger>
               <SelectContent>
                 {characters.map(c => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
               </SelectContent>
             </Select>
-            {mode === 'seedream-edit' && (
+            {effMode === 'seedream-edit' && (
               <div className="flex items-center justify-between gap-2">
                 <p className="text-[10px] text-muted-foreground/60">
                   Only used for its style prefix and stored face refs — Seedream Edit needs no LoRA.
@@ -228,28 +248,49 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
             )}
           </div>
 
-          <div className="space-y-1.5">
-            <p className="text-xs font-medium text-muted-foreground">Mode</p>
-            <div className="flex rounded-lg border border-border overflow-hidden text-sm">
-              <button
-                onClick={() => setMode('turbo-lora')}
-                className={`flex-1 px-3 py-2 transition-colors ${mode === 'turbo-lora' ? 'bg-primary text-primary-foreground font-medium' : 'text-muted-foreground hover:bg-secondary'}`}
-              >
-                LoRA + Turbo
-              </button>
-              <button
-                onClick={() => setMode('seedream-edit')}
-                className={`flex-1 px-3 py-2 transition-colors ${mode === 'seedream-edit' ? 'bg-primary text-primary-foreground font-medium' : 'text-muted-foreground hover:bg-secondary'}`}
-              >
-                Seedream Edit
-              </button>
+          {pinBatch && (
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-muted-foreground">
+                Prompt <span className="opacity-60">(applied to every selected pin)</span>
+              </p>
+              <Textarea
+                value={pinPrompt}
+                onChange={e => setPinPrompt(e.target.value)}
+                placeholder="Recreate this scene with my character — same pose, composition and lighting"
+                className="text-xs min-h-[72px]"
+              />
+              <p className="text-[10px] text-muted-foreground/60">
+                {items.length} pin{items.length === 1 ? '' : 's'} → {items.length} job
+                {items.length === 1 ? '' : 's'}, each generated against its own scene. Seedream Edit,
+                since LoRA + Turbo cannot read reference images.
+              </p>
             </div>
-            {mode === 'turbo-lora' && character && !character.loraUrl && (
-              <p className="text-[11px] text-destructive">This character has no trained LoRA.</p>
-            )}
-          </div>
+          )}
 
-          {mode === 'seedream-edit' && (
+          {!pinBatch && (
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-muted-foreground">Mode</p>
+              <div className="flex rounded-lg border border-border overflow-hidden text-sm">
+                <button
+                  onClick={() => setMode('turbo-lora')}
+                  className={`flex-1 px-3 py-2 transition-colors ${effMode === 'turbo-lora' ? 'bg-primary text-primary-foreground font-medium' : 'text-muted-foreground hover:bg-secondary'}`}
+                >
+                  LoRA + Turbo
+                </button>
+                <button
+                  onClick={() => setMode('seedream-edit')}
+                  className={`flex-1 px-3 py-2 transition-colors ${effMode === 'seedream-edit' ? 'bg-primary text-primary-foreground font-medium' : 'text-muted-foreground hover:bg-secondary'}`}
+                >
+                  Seedream Edit
+                </button>
+              </div>
+              {effMode === 'turbo-lora' && character && !character.loraUrl && (
+                <p className="text-[11px] text-destructive">This character has no trained LoRA.</p>
+              )}
+            </div>
+          )}
+
+          {effMode === 'seedream-edit' && (
             <div className="space-y-2 rounded-xl border border-border p-3">
               <div className="flex items-center justify-between">
                 <p className="text-xs font-medium">Reference images</p>
@@ -316,7 +357,7 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
               </div>
 
               <div className="space-y-1">
-                <p className="text-[10px] text-muted-foreground">Scene reference URLs — one per line</p>
+                <p className="text-[10px] text-muted-foreground">Scene reference URLs — Pinterest, CDN (one per line)</p>
                 <Textarea
                   value={sceneRefUrlsRaw}
                   onChange={e => setSceneRefUrlsRaw(e.target.value)}
@@ -397,7 +438,7 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
           </div>
 
           {/* LoRA-only: Seedream Edit has no trigger word to fire. */}
-          {mode === 'turbo-lora' && (
+          {effMode === 'turbo-lora' && (
             <div className="space-y-1.5">
               <p className="text-xs font-medium text-muted-foreground">
                 Trigger word <span className="opacity-60">(applied to every prompt in this batch)</span>

@@ -1346,11 +1346,14 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           const item = items[i]
           try {
             const seedreamRes = seedreamResolution === '2k' ? '2k' : '1k'
+            // Shared job refs (the character) first, then this item's own scene
+            // reference. Items without one send exactly what this used to send.
+            const itemRefUrls = [...(referenceImageUrls ?? []), ...(item.referenceImageUrls ?? [])]
 
             let baseStoredUrl: string
             if (mode === 'seedream-edit') {
               const baseUrls = await editImage({
-                imageUrls: referenceImageUrls!,
+                imageUrls: itemRefUrls.slice(0, SEEDREAM_MAX_IMAGES),
                 prompt: item.prompt,
                 size: dimension,
                 resolution: seedreamRes,
@@ -1388,7 +1391,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                   const editUrls = await editImage({
                     imageUrls: [
                       baseStoredUrl,
-                      ...(referenceImageUrls ?? []).slice(0, SEEDREAM_MAX_IMAGES - 1),
+                      ...itemRefUrls.slice(0, SEEDREAM_MAX_IMAGES - 1),
                     ],
                     prompt: variantPrompt,
                     size: dimension,

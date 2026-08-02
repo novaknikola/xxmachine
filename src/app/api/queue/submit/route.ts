@@ -33,8 +33,18 @@ export interface CopyPasteJobInput {
 }
 
 export interface CopyPromptsJobItem {
-  /** scraped_prompts.id — provenance / links results back to the source card. */
+  /**
+   * Provenance — links a result back to its source card. A scraped_prompts.id
+   * for library prompts, a pinterest_pins.id when the batch came from a board.
+   * Carried through to the output row, not a foreign key.
+   */
   promptId: string
+  /**
+   * This item's own Seedream reference — the pin it was built from. Merged
+   * after the job-level referenceImageUrls (the character), so identity keeps
+   * the primary slot and prompt-library batches are unaffected.
+   */
+  referenceImageUrls?: string[]
   /** Fully composed final prompt text (style prefix + trigger word already applied client-side). */
   prompt: string
 }
@@ -812,12 +822,27 @@ export async function POST(req: NextRequest) {
     if (mode === 'turbo-lora' && !loraUrl?.trim()) {
       return NextResponse.json({ error: 'loraUrl required for turbo-lora mode' }, { status: 400 })
     }
-    if (mode === 'seedream-edit' && !referenceImageUrls?.length) {
+    const cpItems = items as CopyPromptsJobItem[]
+    const cpJobRefs = referenceImageUrls?.length ?? 0
+    // A per-item scene reference (a picked pin) is a valid Seedream base on its
+    // own, so job-level refs are only required when some item lacks one.
+    if (
+      mode === 'seedream-edit'
+      && !cpJobRefs
+      && !cpItems.every(it => it.referenceImageUrls?.length)
+    ) {
       return NextResponse.json({ error: 'referenceImageUrls required for seedream-edit mode' }, { status: 400 })
     }
-    if ((referenceImageUrls?.length ?? 0) > SEEDREAM_MAX_IMAGES) {
+    if (cpJobRefs > SEEDREAM_MAX_IMAGES) {
       return NextResponse.json(
         { error: `referenceImageUrls accepts at most ${SEEDREAM_MAX_IMAGES} images` },
+        { status: 400 },
+      )
+    }
+    // Both levels share Seedream's image slots, so they are capped together.
+    if (cpItems.some(it => cpJobRefs + (it.referenceImageUrls?.length ?? 0) > SEEDREAM_MAX_IMAGES)) {
+      return NextResponse.json(
+        { error: `Job-level and per-item referenceImageUrls together accept at most ${SEEDREAM_MAX_IMAGES} images` },
         { status: 400 },
       )
     }

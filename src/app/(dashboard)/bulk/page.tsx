@@ -746,6 +746,12 @@ function BulkPageInner() {
         toast.error('Seedream-only (refs, no character) — use Run on this page; Queue needs a character/LoRA or Generate carousel')
         return
       }
+      // bulk_image is a plain text2img job and never reads referenceImageUrls,
+      // so queueing here would drop the pasted URLs without saying so.
+      if (!carouselMode && sceneRefUrls.length > 0) {
+        toast.error('Scene reference URLs only apply to carousels — turn on Generate carousel, or use Run')
+        return
+      }
       let referenceImageUrls: string[] | undefined
       if (carouselMode && carouselRefImages.length) {
         referenceImageUrls = await uploadCarouselRefImages()
@@ -1396,34 +1402,6 @@ function BulkPageInner() {
                             </Select>
                           </div>
                         )}
-                        <div className="space-y-1">
-                          <Label className="text-xs text-muted-foreground">Scene reference URLs</Label>
-                          <Textarea
-                            value={sceneRefUrlsRaw}
-                            onChange={e => setSceneRefUrlsRaw(e.target.value)}
-                            placeholder={'One URL per line — Pinterest pin, CDN...\nhttps://i.pinimg.com/originals/...'}
-                            className="text-xs font-mono min-h-[72px]"
-                          />
-                          <p className="text-[10px] text-muted-foreground/60 leading-relaxed">
-                            {sceneRefUrls.length > 0
-                              ? `${sceneRefUrls.length} scene ref${sceneRefUrls.length === 1 ? '' : 's'} — each one becomes its own carousel (× ${cleanPromptLines(promptsRaw).length || 0} prompt${cleanPromptLines(promptsRaw).length === 1 ? '' : 's'}). Not downloaded — Seedream fetches the URL.`
-                              : 'Optional. Each URL becomes its own carousel, on top of the uploaded character references.'}
-                          </p>
-                          {sceneRefUrls.length > 0 && (
-                            <div className="grid grid-cols-6 gap-1 pt-1">
-                              {sceneRefUrls.slice(0, 12).map(url => (
-                                /* eslint-disable-next-line @next/next/no-img-element */
-                                <img
-                                  key={url}
-                                  src={`/api/proxy-image?url=${encodeURIComponent(url)}`}
-                                  alt=""
-                                  className="aspect-square w-full rounded object-cover border border-border"
-                                  onError={e => { (e.target as HTMLImageElement).style.visibility = 'hidden' }}
-                                />
-                              ))}
-                            </div>
-                          )}
-                        </div>
                         <div className="flex items-center gap-2">
                           <Label className="text-xs text-muted-foreground shrink-0">Seedream:</Label>
                           <Select value={seedreamResolution} onValueChange={v => { if (v) setSeedreamResolution(v as SeedreamResolution) }}>
@@ -1562,6 +1540,45 @@ function BulkPageInner() {
                         )}
                       </p>
                     )}
+
+                    {/* Lives beside the uploads rather than inside the carousel
+                        block, where it was invisible unless you first turned
+                        carousel on -- nobody found it there. */}
+                    <div className="space-y-1 pt-1">
+                      <Label className="text-xs text-muted-foreground">Scene reference URLs — Pinterest, CDN</Label>
+                      <Textarea
+                        value={sceneRefUrlsRaw}
+                        onChange={e => setSceneRefUrlsRaw(e.target.value)}
+                        placeholder={'One URL per line\nhttps://i.pinimg.com/originals/...'}
+                        className="text-xs font-mono min-h-[72px]"
+                      />
+                      <p className="text-[10px] text-muted-foreground/60 leading-relaxed">
+                        {sceneRefUrls.length > 0
+                          ? `${sceneRefUrls.length} scene ref${sceneRefUrls.length === 1 ? '' : 's'} × ${cleanPromptLines(promptsRaw).length || 0} prompt${cleanPromptLines(promptsRaw).length === 1 ? '' : 's'} — each pairing is its own job. Not downloaded; Seedream fetches the URL.`
+                          : 'Optional. Each URL becomes its own job, on top of the uploaded reference photos.'}
+                      </p>
+                      {sceneRefUrls.length > 0 && !carouselMode && !seedreamRefOnly && (
+                        <p className="text-[10px] text-amber-400/80 leading-relaxed">
+                          A character or LoRA is selected and carousel is off, so these run as plain
+                          Z-image prompts and the URLs are ignored. Turn on Generate carousel, or
+                          clear the character to run Seedream-only.
+                        </p>
+                      )}
+                      {sceneRefUrls.length > 0 && (
+                        <div className="grid grid-cols-6 gap-1 pt-1">
+                          {sceneRefUrls.slice(0, 12).map(url => (
+                            /* eslint-disable-next-line @next/next/no-img-element */
+                            <img
+                              key={url}
+                              src={`/api/proxy-image?url=${encodeURIComponent(url)}`}
+                              alt=""
+                              className="aspect-square w-full rounded object-cover border border-border"
+                              onError={e => { (e.target as HTMLImageElement).style.visibility = 'hidden' }}
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
                   <Button className="w-full" onClick={buildJobs}
                     disabled={promptCount === 0 || bulkModelCount === 0}>

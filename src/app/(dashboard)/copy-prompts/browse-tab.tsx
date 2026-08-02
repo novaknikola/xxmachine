@@ -22,6 +22,12 @@ export interface ScrapedPromptItem {
   author: string | null
   source_url: string | null
   has_template_args: boolean
+  /**
+   * Set when the item is a Pinterest pin rather than a library prompt: the
+   * pin's own image, sent as that item's Seedream scene reference. Pins carry
+   * no prompt of their own, so the panel asks for one shared across the batch.
+   */
+  sceneRefUrl?: string
 }
 
 const PAGE_SIZE = 24
