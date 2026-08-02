@@ -26,26 +26,67 @@ bash /var/www/xxmachine/scripts/deploy.sh
 
 What it does: backup → `git pull` → `npm ci` → `npm run build` → migrations → `pm2 reload`.
 
-## Deploy from Cursor (after git push)
+## Deploy from your PC
+
+**Never `git add .` in this repo.** Scratch dirs grow into the hundreds of MB
+(`tmp-e2e` once hit 100 MB, `prompts/` 50 MB). They are in `.gitignore` now, but
+new ones appear — check what you are staging first:
 
 ```powershell
-git add .
+git status                       # read this, every time
+git add <the files you mean>
+```
+
+**Stage features whole.** A tracked file often points at an untracked one — a
+modified `sidebar.tsx` linking to a brand new `src/app/(dashboard)/<route>/`.
+Committing only the tracked half puts a dead link in production navigation.
+`git status` lists modified and untracked separately, which is exactly how this
+gets missed. New route → its page, its API route, its migration, and the nav
+entry all go in one commit.
+
+Then:
+
+```powershell
+npm run build                    # catches what tsc alone does not
 git commit -m "your message"
 git push origin main
 ssh -i $env:USERPROFILE\.ssh\xxmachine_vps root@153.92.223.89 "bash /var/www/xxmachine/scripts/deploy.sh"
 ```
 
-## GitHub Actions (optional)
+When several editor windows are open on this repo at once, the working tree
+holds all of their work, not just yours. `git status` before committing tells
+you whose changes you are about to ship.
 
-Add repository secrets:
+## GitHub Actions — has never worked (checked 2026-08-03)
+
+**All 84 runs of `Deploy to VPS` have failed — every one since the workflow was
+added.** It does trigger on every push to `main`; `Set up job` passes and the
+single `Deploy over SSH` step is what fails, so the workflow file is fine and
+the problem is inside `appleboy/ssh-action`. Use the manual SSH line above; the
+workflow has never once deployed anything.
+
+Verified against the public API — the repo is public, so run history is readable
+without a token:
+
+```bash
+curl -s "https://api.github.com/repos/novaknikola/xxmachine/actions/runs?per_page=5" \
+  | grep -o '"\(run_number\|conclusion\)": *[^,]*'
+```
+
+Step logs need auth (the endpoint returns 403 unauthenticated), so the exact
+error still has to be read in the browser under **Actions → Deploy to VPS**.
+The likeliest cause is missing or malformed repository secrets — the step reads
+all three and fails immediately on an empty or truncated key:
 
 | Secret | Value |
 |--------|--------|
 | `VPS_HOST` | `153.92.223.89` |
 | `VPS_USER` | `root` |
-| `VPS_SSH_KEY` | contents of `~/.ssh/xxmachine_vps` (private key) |
+| `VPS_SSH_KEY` | contents of `~/.ssh/xxmachine_vps` (private key, whole file including header/footer lines) |
 
-Then every push to `main` runs deploy, or trigger manually under Actions → Deploy to VPS.
+Check under **Settings → Secrets and variables → Actions**, and read the failure
+under **Actions → Deploy to VPS**. Confirming this needs the GitHub web UI or
+`gh` (not installed on this PC).
 
 ## Environment
 
@@ -65,16 +106,36 @@ Audit on server:
 cd /var/www/xxmachine && node scripts/vps-db-audit.mjs
 ```
 
-## Repo sync status (2026-07-25)
+### Expected noise in the deploy log
 
-| | Server (live) | Local (Cursor) |
-|--|---------------|----------------|
-| Git commit | `2fb5a8b` video reproduce fix | `02206a0` initial release |
-| Migration files on disk | 17 (older naming 008–016) | 19 (queue/carousel path) |
+`scripts/migrate-threads.js` throws `ECONNREFUSED 127.0.0.1:5432` on every
+deploy — it opens its own connection to a *local* Postgres, which this VPS does
+not run (the app uses a managed database via `DATABASE_URL`). `deploy.sh` marks
+it `WARN` and continues, so the deploy still succeeds. Every other migration
+runs normally. Treat that stack trace as known, not as a failed deploy; confirm
+by checking the table you expected, e.g.:
+
+```sql
+select to_regclass('public.scraped_prompts');
+select name from schema_migrations order by name desc limit 5;
+```
+
+## Repo sync status (2026-08-03)
+
+| | Server (live) | Local |
+|--|---------------|-------|
+| Git commit | `36bb658` repurpose variant profiles | `36bb658` — in sync |
+| Migration files on disk | 50 (through `043_scraped_prompts`) | 50 |
 | DB tables | 35 tables, hybrid schema | matches most local features |
 | Users in DB | 3 | — |
 
-**Do not** `git reset --hard` on the server without backup. Server had ~70 untracked files and ~20 modified tracked files outside git.
+The two histories were unified on 2026-08-03: `main` was pushed and `deploy.sh`
+pulled it, so server and local now sit on the same commit. Re-check this table
+whenever you read it — it is a snapshot, not a live value.
+
+**Do not** `git reset --hard` on the server without backup. `deploy.sh` stashes
+server-side edits on every run, so anything the server had outside git is in
+`git stash list`, not lost — but also not automatically restored.
 
 ### Safe path to unify code
 
