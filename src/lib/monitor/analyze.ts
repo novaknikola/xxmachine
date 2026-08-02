@@ -35,6 +35,12 @@ export type SourceAspectRatio = '9:16' | '16:9' | '1:1' | 'other'
 export interface SourceProbe {
   /** Evenly spaced JPEG frames as base64, first to last. */
   frames: string[]
+  /**
+   * Seconds into the clip each frame was taken, aligned with `frames`. Lets the
+   * vision model line a spoken line up against whether the visible subject's
+   * mouth was actually moving at that moment.
+   */
+  frameTimes: number[]
   duration: number | null
   /** Hard cuts detected by ffmpeg scene scoring. 0 means one continuous shot. */
   cutCount: number
@@ -191,11 +197,17 @@ export async function probeSourceVideo(
     const step = frameCount > 1 ? (last - first) / (frameCount - 1) : 0
 
     const frames: string[] = []
+    const frameTimes: number[] = []
     for (let i = 0; i < frameCount; i++) {
       const outPath = join(tmpdir(), `mon_probe_${id}_${i}.jpg`)
       framePaths.push(outPath)
-      const frame = await extractFrameAt(videoPath, first + step * i, outPath)
-      if (frame) frames.push(frame)
+      const at = first + step * i
+      const frame = await extractFrameAt(videoPath, at, outPath)
+      // Kept in lockstep: a dropped frame must not shift every later timestamp.
+      if (frame) {
+        frames.push(frame)
+        frameTimes.push(at)
+      }
     }
 
     if (!frames.length) {
@@ -220,6 +232,7 @@ export async function probeSourceVideo(
 
     return {
       frames,
+      frameTimes,
       duration,
       cutCount: cutTimes.length,
       cutTimes,

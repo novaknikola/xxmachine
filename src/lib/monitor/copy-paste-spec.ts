@@ -58,7 +58,10 @@ export const NEGATIVE_PROMPT_TEMPLATE =
   'no smooth gimbal motion, no cinematic stabilization, no professional lighting, ' +
   'no beauty filter, no AI skin smoothing, no young girl, no young woman, no teenager, ' +
   'no child, no perfectly centered framing, no overly dramatic acting, no slow motion, ' +
-  'no music video energy, no drone footage feel'
+  'no music video energy, no drone footage feel, ' +
+  // The on-camera subject kept inheriting the camera operator's dialogue.
+  'the on-camera subject does not speak other people\'s lines, ' +
+  'no lip-syncing to off-screen dialogue, no mouthing words spoken by someone behind the camera'
 
 /** Forced value for whichever person (always people[0]) gets the reference photo. */
 function referenceLockAppearance(genderHint: string): string {
@@ -67,7 +70,7 @@ function referenceLockAppearance(genderHint: string): string {
 }
 
 const NORMALIZATION_RULES = `
-- Hair color: if the source subject's hair reads as pink (or any dyed pink/fantasy tone), describe it as "brown and white" hair instead. Never write "pink hair" for anyone.
+- Hair color: if the source subject's hair reads as pink (or any dyed pink/fantasy tone), describe it as wavy hair instead. Never write "pink hair","red hair", "ginger hair", "blonde hair" for anyone.
 - Outfit color: if a garment reads as pink, describe it as white instead. Never write "pink" as a wardrobe color for anyone.
 - Ethnicity: never write "Asian" (or any specific Asian ethnicity/descent) for anyone — describe the person as European instead.
 - Skin tone: never write "black skin" / "dark skin" as a descriptor for anyone — describe skin tone as white/fair instead.
@@ -99,7 +102,7 @@ Return ONLY this JSON shape (fill every key; no markdown, no commentary):
   "pacing": "editing rhythm — single continuous take, quick cuts, etc.",
   "background_activity": "anything happening behind/around the main action",
   "scene_events": [
-    { "timestamp": "0:00", "speaker": "person id or none", "line": "spoken words, or empty", "delivery": "tone of delivery", "action": "physical action at this moment" }
+    { "timestamp": "0:00", "speaker": "a person id from people[], or \\"offscreen\\" for a voice behind the camera, or \\"none\\" when nobody speaks — SEE RULE D", "line": "spoken words, or empty", "delivery": "tone of delivery", "action": "physical action at this moment" }
   ],
   "style": "overall visual/production style in one phrase",
   "camera_logic": "how the camera behaves across the whole clip — handheld/static/framing logic",
@@ -130,6 +133,24 @@ RULE B — FIXED NORMALIZATION (apply while writing, not as an afterthought):
 ${NORMALIZATION_RULES}
 
 RULE C — NEVER WRITE negative_prompt YOURSELF. Always return it as an empty string.
+
+RULE D — SPEECH ATTRIBUTION (CRITICAL):
+The transcript has NO speaker labels, and whoever holds the camera is usually
+not in frame at all. Do not assume the visible person said everything.
+- Attribute a line to a person ONLY if that person is visible AND their mouth
+  is open / mid-speech in the frame closest to that line's timestamp.
+- If a line's timestamp lands on a frame where the visible person is silent,
+  listening, reacting, or facing away, the speaker is behind the camera:
+  set "speaker" to exactly "offscreen".
+- If the transcript reads as a back-and-forth (a question then an answer, or
+  two clearly different registers) but only one person is ever visible, then
+  the second voice IS "offscreen". Never hand both halves to one person.
+- A person may only be given lines that are plausibly their own. Never assign
+  two different voices to the same person just because they are the only one
+  on screen.
+- When unsure, prefer "offscreen" over guessing. An unattributed line is
+  harmless; a line put in the wrong mouth makes the recreated subject speak
+  someone else's words.
 
 OTHER RULES:
 - Be concrete and specific, not vague. Every field should read like a director's shot list, not a vibe description.
@@ -241,7 +262,13 @@ async function downloadForTranscript(videoUrl: string): Promise<string> {
   return path
 }
 
-/** Best-effort speech capture. Missing token or HF errors must not fail analysis. */
+/**
+ * Best-effort speech capture, kept **timestamped**. Whisper has no speaker
+ * diarization, so timing is the only handle the vision model has for telling
+ * an on-camera line from a voice behind the camera: it can check whether the
+ * visible subject's mouth was moving in the frame nearest that moment.
+ * Flattening this to one blob (as it once was) throws that signal away.
+ */
 export async function transcribeSourceSpeech(videoUrl: string): Promise<string> {
   const token = process.env.HF_TOKEN
   if (!token) return ''
@@ -250,7 +277,11 @@ export async function transcribeSourceSpeech(videoUrl: string): Promise<string> 
   try {
     path = await downloadForTranscript(videoUrl)
     const segments = await transcribeVideoFile(path, token, 12, 8)
-    return segments.map(s => s.text).join(' ').replace(/\s+/g, ' ').trim()
+    return segments
+      .map(s => `[${s.start.toFixed(1)}s-${s.end.toFixed(1)}s] ${s.text.trim()}`)
+      .filter(l => l.length > 12)
+      .join('\n')
+      .trim()
   } catch (err) {
     console.warn('[monitor/copy-paste-spec] transcript failed:', err instanceof Error ? err.message : err)
     return ''
@@ -266,7 +297,7 @@ export async function transcribeSourceSpeech(videoUrl: string): Promise<string> 
  * injected as ground truth), then optional audio transcription merged in.
  */
 export async function extractCopyPasteSpec(
-  probe: Pick<SourceProbe, 'frames' | 'hasAudio' | 'duration' | 'aspectRatio'>,
+  probe: Pick<SourceProbe, 'frames' | 'frameTimes' | 'hasAudio' | 'duration' | 'aspectRatio'>,
   videoUrl?: string | null,
 ): Promise<CopyPasteSpec> {
   if (!probe.frames.length) throw new Error('No frames for copy-paste spec')
@@ -288,13 +319,16 @@ export async function extractCopyPasteSpec(
           type: 'text',
           text: [
             `These ${probe.frames.length} frames are sampled in chronological order from one Reel.`,
+            probe.frameTimes?.length === probe.frames.length
+              ? `Each frame's exact time in the clip, in order: ${probe.frameTimes.map(t => `${t.toFixed(1)}s`).join(', ')}.`
+              : '',
             `Measured from the source file: duration ${probe.duration != null ? `${probe.duration.toFixed(1)}s` : 'unknown'}, aspect ratio ${probe.aspectRatio}.`,
             'Use these exact numbers in "format" — do not invent your own duration or aspect ratio.',
             transcript
-              ? `Transcript of the spoken audio: "${transcript}"`
+              ? `Timestamped transcript of the audio (the speaker is NOT labelled — you must work out who is talking using RULE D):\n${transcript}`
               : 'No speech detected — leave scene_events speaker/line empty where nobody talks.',
-            'Fill the JSON completely, following RULE A (reference lock) and RULE B (normalization) exactly.',
-          ].join(' '),
+            'Fill the JSON completely, following RULE A (reference lock), RULE B (normalization) and RULE D (speech attribution) exactly.',
+          ].filter(Boolean).join(' '),
         },
       ],
     }],
@@ -336,12 +370,26 @@ export function renderCopyPastePrompt(spec: CopyPasteSpec): string {
   if (spec.audio) blocks.push(`Audio: ${spec.audio}.`)
 
   if (spec.scene_events.length) {
+    // Only people actually in the cast may be given words to say. Anything the
+    // model could not pin to a visible person — "offscreen", "none", a name
+    // that is not in people[] — is reduced to an unquoted mention, so Seedance
+    // has no text to lip-sync onto the on-camera subject. RULE D asks the model
+    // to get this right; this is what makes it true regardless.
+    const cast = new Set(spec.people.map(p => p.id).filter(Boolean))
     const lines = spec.scene_events.map(e => {
-      const who = e.speaker && e.speaker !== 'none' ? e.speaker : null
-      const spoken = e.line ? `"${e.line}"${e.delivery ? ` (${e.delivery})` : ''}` : null
-      return [e.timestamp, who && spoken ? `${who} says ${spoken}` : spoken, e.action]
-        .filter(Boolean)
-        .join(' — ')
+      const named = e.speaker && cast.has(e.speaker) ? e.speaker : null
+      const quoted = e.line
+        ? `"${e.line}"${e.delivery ? ` (${e.delivery})` : ''}`
+        : null
+
+      let speech: string | null = null
+      if (named && quoted) {
+        speech = `${named} says ${quoted}`
+      } else if (quoted) {
+        speech = 'a voice from behind the camera speaks, off-screen and unseen'
+      }
+
+      return [e.timestamp, speech, e.action].filter(Boolean).join(' — ')
     }).filter(Boolean)
     if (lines.length) blocks.push(`Timeline: ${lines.join(' → ')}.`)
   }
