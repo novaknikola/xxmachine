@@ -7,8 +7,6 @@ import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { StudioSettingsProvider, useStudioSettings } from './studio-settings'
 import { RunTab } from './run-tab'
-import { AutopilotTab } from './autopilot-tab'
-import { RecipesTab } from './recipes-tab'
 import { CostsTab } from './costs-tab'
 
 function StudioChrome({ children }: { children: React.ReactNode }) {
@@ -23,7 +21,7 @@ function StudioChrome({ children }: { children: React.ReactNode }) {
             <div className="min-w-0">
               <h1 className="text-xl font-bold tracking-tight">Copy-Paste Studio</h1>
               <p className="text-sm text-muted-foreground mt-0.5">
-                Run · Autopilot · Recipes · Costs — one pipeline, roomier controls
+                Reel → analysis JSON → reference photo → Seedance 2.0
               </p>
             </div>
           </div>
@@ -74,18 +72,10 @@ function StudioBody() {
         <Tabs defaultValue="run" className="gap-6">
           <TabsList variant="line" className="w-full sm:w-auto justify-start h-auto flex-wrap">
             <TabsTrigger value="run">Run</TabsTrigger>
-            <TabsTrigger value="autopilot">Autopilot</TabsTrigger>
-            <TabsTrigger value="recipes">Recipes</TabsTrigger>
             <TabsTrigger value="costs">Costs</TabsTrigger>
           </TabsList>
           <TabsContent value="run" className="mt-2">
             <RunTab />
-          </TabsContent>
-          <TabsContent value="autopilot" className="mt-2">
-            <AutopilotTab />
-          </TabsContent>
-          <TabsContent value="recipes" className="mt-2">
-            <RecipesTab />
           </TabsContent>
           <TabsContent value="costs" className="mt-2">
             <CostsTab />

@@ -11,6 +11,11 @@ export interface EnqueueReelInput {
   postedAt?: string | null
 }
 
+export interface EnqueueDiscoveryOptions {
+  /** Shared reference photo for this batch — written onto every row. */
+  referenceImageUrl?: string | null
+}
+
 export interface EnqueueResult {
   added: number
   refreshed: number
@@ -30,11 +35,13 @@ export async function enqueueDiscoveryReels(
   userId: string,
   username: string,
   reels: EnqueueReelInput[],
+  options?: EnqueueDiscoveryOptions,
 ): Promise<EnqueueResult> {
   const cleanUsername = username.trim().replace(/^@/, '')
   if (!cleanUsername) throw new Error('username required')
   if (!reels.length) throw new Error('reels[] required')
   if (reels.length > 100) throw new Error('Max 100 reels per request')
+  const referenceImageUrl = options?.referenceImageUrl?.trim() || null
 
   const tracked = await one<{ username: string; character_id: string | null }>(
     `SELECT username, character_id FROM tracked_profiles
@@ -97,7 +104,8 @@ export async function enqueueDiscoveryReels(
            views = greatest(views, $7),
            likes = greatest(likes, $8),
            comments = greatest(comments, $9),
-           posted_at = coalesce($10::timestamptz, posted_at)
+           posted_at = coalesce($10::timestamptz, posted_at),
+           reference_image_url = coalesce($11, reference_image_url)
          WHERE id = $1 AND user_id = $2`,
         [
           existing.id,
@@ -110,6 +118,7 @@ export async function enqueueDiscoveryReels(
           likes,
           comments,
           postedIso,
+          referenceImageUrl,
         ],
       )
       refreshed++
@@ -122,10 +131,10 @@ export async function enqueueDiscoveryReels(
          (user_id, platform, profile, content_url, content_id,
           views, likes, comments, followers, score, velocity,
           thumbnail_url, video_url, posted_at,
-          admin_status, replicate_status)
+          admin_status, replicate_status, reference_image_url)
        VALUES
          ($1,'Instagram',$2,$3,$4,$5,$6,$7,0,0,0,$8,$9,$10::timestamptz,
-          'APPROVED','pending_classify')
+          'APPROVED','pending_classify',$11)
        RETURNING id`,
       [
         userId,
@@ -138,6 +147,7 @@ export async function enqueueDiscoveryReels(
         reel.thumbnailUrl ?? null,
         reel.videoUrl ?? null,
         postedIso,
+        referenceImageUrl,
       ],
     )
     if (inserted) {

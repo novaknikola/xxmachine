@@ -13,12 +13,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import type { CostBreakdown } from '@/lib/monitor/cost-estimate'
-
-interface ActionBeat {
-  t?: number
-  subject?: string
-  background?: string
-}
+import type { CopyPasteSpec } from '@/lib/monitor/copy-paste-spec'
 
 interface ItemLike {
   id: string
@@ -26,30 +21,18 @@ interface ItemLike {
   content_url: string
   replicate_status: string
   replicate_error: string | null
-  scene_prompt: string | null
-  motion_prompt?: string | null
-  technique_reasoning: string | null
-  video_technique: string | null
-  technique_confidence: number | null
   source_duration: number | null
   source_cut_count: number | null
-  generated_image_url: string | null
-  generated_end_image_url: string | null
+  source_aspect_ratio: string | null
+  reference_image_url: string | null
+  copy_paste_spec: CopyPasteSpec | null
+  rendered_prompt: string | null
   kling_video_url: string | null
   thumbnail_url: string | null
-  scene_spec?: {
-    speech?: { transcript?: string; kind?: string }
-    on_screen_text?: string
-    on_screen_text_style?: string
-    action_beats?: ActionBeat[]
-    must_include_events?: string[]
-    background_people?: Array<{ who?: string; action?: string; position?: string }>
-  } | null
 }
 
 const EDITABLE_STATUSES = new Set([
   'classified',
-  'image_done',
   'needs_review',
   'failed',
   'pending_classify',
@@ -61,64 +44,44 @@ export function JobDetailSheet({
   open,
   onOpenChange,
   estimate,
-  imageModelLabel,
-  videoLabel,
-  soundLabel,
   formatUsd,
-  onPromptsSaved,
+  onPromptSaved,
 }: {
   item: ItemLike | null
   open: boolean
   onOpenChange: (open: boolean) => void
   estimate: CostBreakdown | null
-  imageModelLabel: string
-  videoLabel: string
-  soundLabel: string
   formatUsd: (n: number) => string
-  onPromptsSaved?: (update: { id: string; scene_prompt: string | null; motion_prompt: string | null }) => void
+  onPromptSaved?: (update: { id: string; rendered_prompt: string | null }) => void
 }) {
-  const [scenePrompt, setScenePrompt] = useState('')
-  const [motionPrompt, setMotionPrompt] = useState('')
+  const [renderedPrompt, setRenderedPrompt] = useState('')
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     if (!item) return
-    setScenePrompt(item.scene_prompt ?? '')
-    setMotionPrompt(item.motion_prompt ?? '')
-  }, [item?.id, item?.scene_prompt, item?.motion_prompt])
+    setRenderedPrompt(item.rendered_prompt ?? '')
+  }, [item?.id, item?.rendered_prompt])
 
   if (!item) return null
 
-  const spec = item.scene_spec
-  const transcript = spec?.speech?.transcript?.trim()
-  const speechKind = spec?.speech?.kind
-  const caption = spec?.on_screen_text?.trim()
-  const beats = (spec?.action_beats ?? []).filter(b => b.subject?.trim())
-  const events = (spec?.must_include_events ?? []).filter(Boolean)
-  const cast = (spec?.background_people ?? []).filter(p => p.who || p.action)
+  const spec = item.copy_paste_spec
   const canEdit = EDITABLE_STATUSES.has(item.replicate_status)
-  const dirty =
-    scenePrompt !== (item.scene_prompt ?? '') ||
-    motionPrompt !== (item.motion_prompt ?? '')
+  const dirty = renderedPrompt !== (item.rendered_prompt ?? '')
 
-  async function savePrompts() {
+  async function savePrompt() {
     setSaving(true)
     try {
       const res = await fetch(`/api/monitor/items/${item!.id}/prompts`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          scene_prompt: scenePrompt,
-          motion_prompt: motionPrompt,
-        }),
+        body: JSON.stringify({ rendered_prompt: renderedPrompt }),
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data.error ?? 'Save failed')
-      toast.success('Prompts saved')
-      onPromptsSaved?.({
+      toast.success('Prompt saved')
+      onPromptSaved?.({
         id: item!.id,
-        scene_prompt: data.item?.scene_prompt ?? (scenePrompt.trim() || null),
-        motion_prompt: data.item?.motion_prompt ?? (motionPrompt.trim() || null),
+        rendered_prompt: data.item?.rendered_prompt ?? (renderedPrompt.trim() || null),
       })
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Save failed')
@@ -133,21 +96,18 @@ export function JobDetailSheet({
         <SheetHeader className="gap-2 text-left">
           <SheetTitle>@{item.profile}</SheetTitle>
           <SheetDescription>
-            Full analysis, pipeline, prompts, and outputs.
+            Analysis JSON, editable prompt, and outputs.
           </SheetDescription>
         </SheetHeader>
 
         <div className="mt-6 space-y-6 text-sm">
           <div className="flex flex-wrap gap-2">
             <Badge variant="secondary">{item.replicate_status}</Badge>
-            {item.video_technique && <Badge variant="outline">{item.video_technique}</Badge>}
-            {item.technique_confidence != null && (
-              <Badge variant="outline">
-                {Math.round(item.technique_confidence * 100)}% confidence
-              </Badge>
-            )}
             {item.source_duration != null && (
               <Badge variant="outline">{Number(item.source_duration).toFixed(1)}s</Badge>
+            )}
+            {item.source_aspect_ratio && (
+              <Badge variant="outline">{item.source_aspect_ratio}</Badge>
             )}
             {item.source_cut_count != null && (
               <Badge variant="outline">
@@ -156,21 +116,14 @@ export function JobDetailSheet({
                   : `${item.source_cut_count} cut${item.source_cut_count === 1 ? '' : 's'}`}
               </Badge>
             )}
-            {transcript && <Badge variant="outline">has speech</Badge>}
           </div>
 
           <section className="space-y-2">
-            <h3 className="font-medium">Pipeline</h3>
-            <p className="text-muted-foreground leading-relaxed">
-              {imageModelLabel} → {videoLabel} · Sound: {soundLabel}
-            </p>
+            <h3 className="font-medium">Cost</h3>
             {estimate && (
               <div className="rounded-lg border border-border/60 bg-secondary/30 p-4 space-y-1.5">
-                <div className="flex justify-between"><span>Image</span><span className="tabular-nums">{formatUsd(estimate.imageUsd)}</span></div>
-                <div className="flex justify-between"><span>Video</span><span className="tabular-nums">{formatUsd(estimate.videoUsd)}</span></div>
-                <div className="flex justify-between"><span>Audio</span><span className="tabular-nums">{formatUsd(estimate.audioUsd)}</span></div>
-                <div className="flex justify-between font-medium pt-1 border-t border-border/50">
-                  <span>Est. total</span>
+                <div className="flex justify-between font-medium">
+                  <span>Est. total (Seedance 2.0)</span>
                   <span className="tabular-nums">{formatUsd(estimate.totalUsd)}</span>
                 </div>
                 <p className="text-xs text-muted-foreground pt-1">{estimate.note}</p>
@@ -178,125 +131,138 @@ export function JobDetailSheet({
             )}
           </section>
 
-          {item.technique_reasoning && (
+          {item.reference_image_url && (
             <section className="space-y-2">
-              <h3 className="font-medium">Technique notes</h3>
-              <p className="text-muted-foreground leading-relaxed">{item.technique_reasoning}</p>
+              <h3 className="font-medium">Reference photo</h3>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={item.reference_image_url}
+                alt=""
+                className="w-24 aspect-square object-cover rounded-lg border border-border/60"
+              />
             </section>
           )}
 
-          {caption && (
+          {spec?.people?.length ? (
             <section className="space-y-2">
-              <h3 className="font-medium">On-screen caption</h3>
-              <p className="text-muted-foreground leading-relaxed">“{caption}”</p>
-              {spec?.on_screen_text_style && (
-                <p className="text-xs text-muted-foreground">{spec.on_screen_text_style}</p>
-              )}
-            </section>
-          )}
-
-          {transcript && (
-            <section className="space-y-2">
-              <h3 className="font-medium">Speech</h3>
-              {speechKind && speechKind !== 'unknown' && (
-                <p className="text-xs text-muted-foreground capitalize">{speechKind}</p>
-              )}
-              <p className="text-muted-foreground leading-relaxed">“{transcript}”</p>
-            </section>
-          )}
-
-          {beats.length > 0 && (
-            <section className="space-y-2">
-              <h3 className="font-medium">Action timeline</h3>
+              <h3 className="font-medium">People</h3>
               <div className="rounded-lg border border-border/60 divide-y divide-border/50 overflow-hidden">
-                {beats.map((b, i) => (
+                {spec.people.map((p, i) => (
                   <div key={i} className="px-3 py-2.5 space-y-0.5">
-                    <p className="text-xs text-muted-foreground tabular-nums">
-                      {typeof b.t === 'number' && Number.isFinite(b.t) ? `${b.t.toFixed(1)}s` : `Beat ${i + 1}`}
+                    <p className="text-xs text-muted-foreground">
+                      {p.id || `Person ${i + 1}`}{i === 0 ? ' (reference-locked)' : ''}
+                      {p.role ? ` — ${p.role}` : ''}
                     </p>
-                    <p className="text-muted-foreground leading-relaxed">{b.subject}</p>
-                    {b.background?.trim() && (
+                    <p className="text-muted-foreground leading-relaxed">{p.appearance}</p>
+                    {p.wardrobe && (
                       <p className="text-xs text-muted-foreground/80 leading-relaxed">
-                        BG: {b.background}
+                        Wardrobe: {p.wardrobe}
                       </p>
                     )}
                   </div>
                 ))}
               </div>
             </section>
-          )}
+          ) : null}
 
-          {events.length > 0 && (
+          {spec && (
             <section className="space-y-2">
-              <h3 className="font-medium">Must-include events</h3>
-              <ul className="list-disc pl-5 space-y-1 text-muted-foreground">
-                {events.map((e, i) => (
-                  <li key={i} className="leading-relaxed">{e}</li>
-                ))}
+              <h3 className="font-medium">Scene</h3>
+              <ul className="space-y-1.5 text-muted-foreground leading-relaxed">
+                {spec.environment && <li><span className="text-foreground/80">Environment:</span> {spec.environment}</li>}
+                {spec.lighting && <li><span className="text-foreground/80">Lighting:</span> {spec.lighting}</li>}
+                {spec.color_grading && <li><span className="text-foreground/80">Color grading:</span> {spec.color_grading}</li>}
+                {spec.atmosphere && <li><span className="text-foreground/80">Atmosphere:</span> {spec.atmosphere}</li>}
+                {spec.audio && <li><span className="text-foreground/80">Audio:</span> {spec.audio}</li>}
+                {spec.pacing && <li><span className="text-foreground/80">Pacing:</span> {spec.pacing}</li>}
+                {spec.background_activity && <li><span className="text-foreground/80">Background:</span> {spec.background_activity}</li>}
               </ul>
             </section>
           )}
 
-          {cast.length > 0 && (
+          {spec?.scene_events?.length ? (
             <section className="space-y-2">
-              <h3 className="font-medium">Other people</h3>
+              <h3 className="font-medium">Timeline</h3>
+              <div className="rounded-lg border border-border/60 divide-y divide-border/50 overflow-hidden">
+                {spec.scene_events.map((e, i) => (
+                  <div key={i} className="px-3 py-2.5 space-y-0.5">
+                    <p className="text-xs text-muted-foreground tabular-nums">{e.timestamp || `Beat ${i + 1}`}</p>
+                    {e.line && (
+                      <p className="text-muted-foreground leading-relaxed">
+                        {e.speaker && e.speaker !== 'none' ? `${e.speaker}: ` : ''}“{e.line}”
+                        {e.delivery ? ` (${e.delivery})` : ''}
+                      </p>
+                    )}
+                    {e.action && <p className="text-xs text-muted-foreground/80 leading-relaxed">{e.action}</p>}
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {spec?.shots?.length ? (
+            <section className="space-y-2">
+              <h3 className="font-medium">Shots</h3>
               <ul className="space-y-2 text-muted-foreground">
-                {cast.map((p, i) => (
+                {spec.shots.map((s, i) => (
                   <li key={i} className="leading-relaxed">
-                    <span className="text-foreground/90">{p.who || 'Person'}</span>
-                    {p.position ? ` (${p.position})` : ''}
-                    {p.action ? ` — ${p.action}` : ''}
+                    <span className="text-foreground/90 tabular-nums">{s.time}</span>
+                    {s.action ? ` — ${s.action}` : ''}
+                    {s.camera_behavior ? ` (${s.camera_behavior})` : ''}
                   </li>
                 ))}
               </ul>
             </section>
+          ) : null}
+
+          {(spec?.style || spec?.camera_logic) && (
+            <section className="space-y-2">
+              <h3 className="font-medium">Style</h3>
+              <p className="text-muted-foreground leading-relaxed">
+                {[spec.style, spec.camera_logic].filter(Boolean).join(' · ')}
+              </p>
+            </section>
+          )}
+
+          {spec?.imperfections?.length ? (
+            <section className="space-y-2">
+              <h3 className="font-medium">Imperfections</h3>
+              <ul className="list-disc pl-5 space-y-1 text-muted-foreground">
+                {spec.imperfections.map((e, i) => (
+                  <li key={i} className="leading-relaxed">{e}</li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
+          {spec?.end_behavior && (
+            <section className="space-y-2">
+              <h3 className="font-medium">Ends</h3>
+              <p className="text-muted-foreground leading-relaxed">{spec.end_behavior}</p>
+            </section>
           )}
 
           <section className="space-y-2">
             <div className="flex items-center justify-between gap-2">
-              <h3 className="font-medium">Scene prompt</h3>
+              <h3 className="font-medium">Rendered prompt</h3>
               {canEdit && (
-                <span className="text-xs text-muted-foreground">Editable before Replicate</span>
+                <span className="text-xs text-muted-foreground">Sent to Seedance as-is</span>
               )}
             </div>
             {canEdit ? (
               <Textarea
-                value={scenePrompt}
-                onChange={e => setScenePrompt(e.target.value)}
-                rows={8}
+                value={renderedPrompt}
+                onChange={e => setRenderedPrompt(e.target.value)}
+                rows={12}
                 className="text-xs leading-relaxed font-mono"
-                placeholder="Scene / keyframe prompt…"
+                placeholder="Prompt sent to Seedance…"
               />
-            ) : item.scene_prompt ? (
+            ) : item.rendered_prompt ? (
               <pre className="whitespace-pre-wrap rounded-lg border border-border/60 bg-secondary/20 p-4 text-xs leading-relaxed text-muted-foreground max-h-64 overflow-y-auto">
-                {item.scene_prompt}
+                {item.rendered_prompt}
               </pre>
             ) : (
-              <p className="text-muted-foreground text-xs">No scene prompt yet — run Classify first.</p>
-            )}
-          </section>
-
-          <section className="space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <h3 className="font-medium">Motion prompt</h3>
-              {canEdit && (
-                <span className="text-xs text-muted-foreground">Used by Seedance / I2V</span>
-              )}
-            </div>
-            {canEdit ? (
-              <Textarea
-                value={motionPrompt}
-                onChange={e => setMotionPrompt(e.target.value)}
-                rows={6}
-                className="text-xs leading-relaxed font-mono"
-                placeholder="Motion timeline prompt (filled on Replicate if empty)…"
-              />
-            ) : item.motion_prompt ? (
-              <pre className="whitespace-pre-wrap rounded-lg border border-border/60 bg-secondary/20 p-4 text-xs leading-relaxed text-muted-foreground max-h-48 overflow-y-auto">
-                {item.motion_prompt}
-              </pre>
-            ) : (
-              <p className="text-muted-foreground text-xs">No motion prompt yet — generated on Replicate if empty.</p>
+              <p className="text-muted-foreground text-xs">No prompt yet — run Classify first.</p>
             )}
           </section>
 
@@ -304,9 +270,9 @@ export function JobDetailSheet({
             <Button
               type="button"
               disabled={!dirty || saving}
-              onClick={() => void savePrompts()}
+              onClick={() => void savePrompt()}
             >
-              {saving ? 'Saving…' : 'Save prompts'}
+              {saving ? 'Saving…' : 'Save prompt'}
             </Button>
           )}
 
@@ -323,16 +289,6 @@ export function JobDetailSheet({
               <a className="text-primary hover:underline" href={item.content_url} target="_blank" rel="noopener noreferrer">
                 Source post
               </a>
-              {item.generated_image_url && (
-                <a className="text-primary hover:underline" href={item.generated_image_url} target="_blank" rel="noopener noreferrer">
-                  Generated image
-                </a>
-              )}
-              {item.generated_end_image_url && (
-                <a className="text-primary hover:underline" href={item.generated_end_image_url} target="_blank" rel="noopener noreferrer">
-                  End frame
-                </a>
-              )}
               {item.kling_video_url && (
                 <a className="text-primary hover:underline" href={item.kling_video_url} target="_blank" rel="noopener noreferrer">
                   Generated video

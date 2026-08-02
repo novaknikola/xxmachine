@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -12,107 +12,35 @@ interface PasteUrlsPanelProps {
   onEnqueued: () => void
 }
 
-const MAX_REFS = 9
-
 export function PasteUrlsPanel({ onEnqueued }: PasteUrlsPanelProps) {
   const fileRef = useRef<HTMLInputElement>(null)
   const [text, setText] = useState('')
   const [submitting, setSubmitting] = useState(false)
-
-  const [characterId, setCharacterId] = useState<string | null>(null)
-  const [characterName, setCharacterName] = useState<string | null>(null)
-  const [refUrls, setRefUrls] = useState<string[]>([])
   const [uploading, setUploading] = useState(false)
+  const [referenceImageUrl, setReferenceImageUrl] = useState<string | null>(null)
 
   const lineCount = useMemo(
     () => text.split(/[\n\r]+/).map(l => l.trim()).filter(Boolean).length,
     [text],
   )
 
-  const loadDefaultCharacter = useCallback(async () => {
-    const res = await fetch('/api/runpod/profiles')
-    const data = await res.json()
-    const list = (data.profiles ?? []) as Array<{
-      character_id: string | null
-      platform: string
-      status: string
-    }>
-    const ids = list
-      .filter(p => p.platform === 'Instagram' && p.status === 'ACTIVE' && p.character_id)
-      .map(p => p.character_id!)
-
-    let best: { id: string; name: string; faceRefUrls: string[] } | null = null
-    for (const id of [...new Set(ids)]) {
-      const fr = await fetch(`/api/characters/face-refs?characterId=${encodeURIComponent(id)}`)
-      const frData = await fr.json()
-      if (!fr.ok) continue
-      const char = frData.character as { id: string; name: string; faceRefUrls: string[] }
-      if (!best) best = char
-      if (char.name.toLowerCase() === 'diana') {
-        best = char
-        break
-      }
-    }
-
-    if (!best) {
-      setCharacterId(null)
-      setCharacterName(null)
-      setRefUrls([])
-      return
-    }
-    setCharacterId(best.id)
-    setCharacterName(best.name)
-    setRefUrls(best.faceRefUrls ?? [])
-  }, [])
-
-  useEffect(() => { loadDefaultCharacter() }, [loadDefaultCharacter])
-
-  async function persistRefs(next: string[]) {
-    if (!characterId) return
-    const res = await fetch('/api/characters/face-refs', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ characterId, faceRefUrls: next }),
-    })
-    const data = await res.json()
-    if (!res.ok) throw new Error(data.error ?? 'Failed to save reference photos')
-    setRefUrls(data.faceRefUrls ?? next)
-  }
-
-  async function onPickFiles(files: FileList | null) {
-    if (!files?.length || !characterId) {
-      if (!characterId) toast.error('Bind a character in Discovery first')
-      return
-    }
-    const room = MAX_REFS - refUrls.length
-    if (room <= 0) {
-      toast.message(`Max ${MAX_REFS} reference photos`)
-      return
-    }
-    const batch = Array.from(files).slice(0, room)
+  async function onPickFile(files: FileList | null) {
+    const file = files?.[0]
+    if (!file) return
     setUploading(true)
     try {
-      const uploaded: string[] = []
-      for (const file of batch) {
-        const res = await fetch('/api/queue/upload-input', {
-          method: 'POST',
-          headers: {
-            'content-type': file.type || 'image/jpeg',
-            'x-file-name': encodeURIComponent(file.name),
-          },
-          body: file,
-        })
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error ?? 'Upload failed')
-        uploaded.push(data.url as string)
-      }
-      const next = [...refUrls, ...uploaded].slice(0, MAX_REFS)
-      await persistRefs(next)
-      toast.success(
-        uploaded.length === 1
-          ? 'Reference photo added'
-          : `${uploaded.length} reference photos added`,
-      )
+      const res = await fetch('/api/queue/upload-input', {
+        method: 'POST',
+        headers: {
+          'content-type': file.type || 'image/jpeg',
+          'x-file-name': encodeURIComponent(file.name),
+        },
+        body: file,
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Upload failed')
+      setReferenceImageUrl(data.url as string)
+      toast.success('Reference photo added')
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Upload failed')
     } finally {
@@ -121,17 +49,13 @@ export function PasteUrlsPanel({ onEnqueued }: PasteUrlsPanelProps) {
     }
   }
 
-  async function removeRef(url: string) {
-    try {
-      await persistRefs(refUrls.filter(u => u !== url))
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Remove failed')
-    }
-  }
-
   async function submit() {
     if (!text.trim()) {
       toast.error('Paste an Instagram reel URL')
+      return
+    }
+    if (!referenceImageUrl) {
+      toast.error('Upload a reference photo for this batch first')
       return
     }
     setSubmitting(true)
@@ -139,15 +63,15 @@ export function PasteUrlsPanel({ onEnqueued }: PasteUrlsPanelProps) {
       const res = await fetch('/api/monitor/enqueue-urls', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, referenceImageUrl }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Failed to add reel')
 
       toast.success(
         data.total === 1
-          ? 'Queued — classifying…'
-          : `Queued ${data.total} — classifying…`,
+          ? 'Queued — analyzing…'
+          : `Queued ${data.total} — analyzing…`,
       )
       setText('')
       onEnqueued()
@@ -164,62 +88,45 @@ export function PasteUrlsPanel({ onEnqueued }: PasteUrlsPanelProps) {
     <Card>
       <CardContent className="pt-5 space-y-5">
         <div className="space-y-3">
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <div>
-              <p className="text-sm font-medium">Reference photos</p>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                {characterName
-                  ? `Used for ${characterName} on Seedream Replicate`
-                  : 'Used on Seedream Replicate'}
-              </p>
-            </div>
-            {uploading && (
-              <span className="text-xs text-muted-foreground flex items-center gap-1.5">
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                Uploading…
-              </span>
-            )}
+          <div>
+            <p className="text-sm font-medium">Reference photo</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              One photo for this whole batch — becomes Seedance&apos;s identity source.
+            </p>
           </div>
 
           <input
             ref={fileRef}
             type="file"
             accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
-            multiple
             className="hidden"
-            onChange={e => onPickFiles(e.target.files)}
+            onChange={e => onPickFile(e.target.files)}
           />
-          <button
-            type="button"
-            disabled={!characterId || uploading}
-            onClick={() => fileRef.current?.click()}
-            className="w-full border-2 border-dashed border-border rounded-xl p-5 flex flex-col items-center gap-2 hover:border-primary/50 hover:bg-primary/5 transition-colors text-muted-foreground hover:text-foreground disabled:opacity-50"
-          >
-            <Upload className="w-5 h-5" />
-            <span className="text-sm">Upload reference photos</span>
-            <span className="text-xs opacity-60">JPEG, PNG or WebP — up to {MAX_REFS}</span>
-          </button>
 
-          {refUrls.length > 0 && (
-            <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
-              {refUrls.map(url => (
-                <div
-                  key={url}
-                  className="relative group aspect-square rounded-lg overflow-hidden border border-border bg-secondary/30"
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={url} alt="" className="w-full h-full object-cover" />
-                  <button
-                    type="button"
-                    onClick={() => removeRef(url)}
-                    className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
-                    title="Remove"
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
-                </div>
-              ))}
+          {referenceImageUrl ? (
+            <div className="relative group w-28 aspect-square rounded-lg overflow-hidden border border-border bg-secondary/30">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={referenceImageUrl} alt="" className="w-full h-full object-cover" />
+              <button
+                type="button"
+                onClick={() => setReferenceImageUrl(null)}
+                className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+                title="Remove"
+              >
+                <X className="w-3 h-3" />
+              </button>
             </div>
+          ) : (
+            <button
+              type="button"
+              disabled={uploading}
+              onClick={() => fileRef.current?.click()}
+              className="w-full border-2 border-dashed border-border rounded-xl p-5 flex flex-col items-center gap-2 hover:border-primary/50 hover:bg-primary/5 transition-colors text-muted-foreground hover:text-foreground disabled:opacity-50"
+            >
+              {uploading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Upload className="w-5 h-5" />}
+              <span className="text-sm">{uploading ? 'Uploading…' : 'Upload reference photo'}</span>
+              <span className="text-xs opacity-60">JPEG, PNG or WebP — one per batch</span>
+            </button>
           )}
         </div>
 
@@ -229,7 +136,7 @@ export function PasteUrlsPanel({ onEnqueued }: PasteUrlsPanelProps) {
             <div>
               <p className="text-sm font-medium">Reel URL</p>
               <p className="text-xs text-muted-foreground mt-0.5">
-                Paste a link — we fetch, classify, then you hit Replicate.
+                Paste one or more links — we fetch, analyze, then you hit Replicate.
               </p>
             </div>
           </div>
@@ -246,7 +153,7 @@ export function PasteUrlsPanel({ onEnqueued }: PasteUrlsPanelProps) {
           <Button
             className="w-full sm:w-auto"
             onClick={submit}
-            disabled={submitting || !text.trim()}
+            disabled={submitting || !text.trim() || !referenceImageUrl}
           >
             {submitting
               ? <Loader2 className="w-4 h-4 animate-spin" />
@@ -255,9 +162,9 @@ export function PasteUrlsPanel({ onEnqueued }: PasteUrlsPanelProps) {
           </Button>
         </div>
 
-        {!characterId && (
+        {!referenceImageUrl && (
           <FieldHint>
-            Bind a character to a tracked Instagram profile in Discovery before Replicate.
+            Upload a reference photo before adding reels — every reel in this batch shares it.
           </FieldHint>
         )}
       </CardContent>

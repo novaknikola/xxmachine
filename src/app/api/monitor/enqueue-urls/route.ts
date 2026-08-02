@@ -11,32 +11,21 @@ import { isPlayableVideoUrl } from '@/lib/monitor/video-url'
 const MAX_URLS = 30
 const LIST_LIMIT = 50
 
-/** Prefer a tracked Instagram profile that already has a character bound. */
-async function resolveDefaultProfile(userId: string): Promise<{
-  username: string
-  characterId: string
-} | null> {
-  const row = await one<{ username: string; character_id: string }>(
-    `SELECT tp.username, tp.character_id
-       FROM tracked_profiles tp
-       JOIN characters c ON c.id = tp.character_id
-      WHERE tp.user_id = $1
-        AND tp.platform = 'Instagram'
-        AND tp.status = 'ACTIVE'
-        AND tp.character_id IS NOT NULL
-      ORDER BY
-        CASE WHEN lower(c.name) = 'diana' THEN 0 ELSE 1 END,
-        tp.created_at DESC
+/** Most recently tracked active Instagram profile — just a grouping label now, no character required. */
+async function resolveDefaultProfile(userId: string): Promise<string | null> {
+  const row = await one<{ username: string }>(
+    `SELECT username FROM tracked_profiles
+      WHERE user_id = $1 AND platform = 'Instagram' AND status = 'ACTIVE'
+      ORDER BY created_at DESC
       LIMIT 1`,
     [userId],
   )
-  if (!row?.character_id) return null
-  return { username: row.username, characterId: row.character_id }
+  return row?.username ?? null
 }
 
 /**
  * Paste reel URLs → resolve (cache → download → profile list) → enqueue → auto-classify.
- * Character/profile binding is chosen server-side; clients only send reel links.
+ * No character/profile binding is required — Copy-Paste v2 uses a per-batch reference photo.
  */
 export async function POST(req: NextRequest) {
   const user = await requireUser(req)
@@ -47,6 +36,7 @@ export async function POST(req: NextRequest) {
     sourceUsername?: string
     urls?: string | string[]
     text?: string
+    referenceImageUrl?: string
   }
 
   const rawText = Array.isArray(body.urls)
@@ -67,23 +57,16 @@ export async function POST(req: NextRequest) {
   }
 
   const explicitUsername = String(body.username ?? '').trim().replace(/^@/, '')
-  const defaultProfile = await resolveDefaultProfile(user.id)
-  const username = explicitUsername || defaultProfile?.username || ''
-  if (!username) {
-    return NextResponse.json(
-      {
-        error: 'Bind a character to a tracked Instagram profile in Discovery first',
-      },
-      { status: 400 },
-    )
-  }
-
   const fromUrls = parsed.map(p => p.ownerUsername).find(Boolean) ?? null
+  const defaultProfile = await resolveDefaultProfile(user.id)
+  const username = explicitUsername || fromUrls || defaultProfile || 'copy-paste'
+
   const sourceUsername = (
     String(body.sourceUsername ?? '').trim().replace(/^@/, '')
     || fromUrls
     || username
   )
+  const referenceImageUrl = String(body.referenceImageUrl ?? '').trim() || null
 
   const resolved = new Map<string, EnqueueReelInput>()
   const resolveErrors: Array<{ permalink: string; error: string }> = []
@@ -251,7 +234,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const result = await enqueueDiscoveryReels(user.id, username, reels)
+    const result = await enqueueDiscoveryReels(user.id, username, reels, { referenceImageUrl })
     scheduleAutoClassify(user.id, result.ids)
     return NextResponse.json({
       ok: true,

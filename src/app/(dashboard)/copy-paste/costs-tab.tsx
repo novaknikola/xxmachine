@@ -3,7 +3,7 @@
 import { useMemo } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { clearSpend } from '@/lib/monitor/recipes'
+import { clearSpend } from '@/lib/monitor/cost-estimate'
 import { useStudioSettings } from './studio-settings'
 import { DollarSign, Trash2 } from 'lucide-react'
 
@@ -12,18 +12,14 @@ export function CostsTab() {
 
   const totals = useMemo(() => {
     const all = studio.spendLog
-    const byModel = new Map<string, number>()
     let week = 0
     const weekStart = Date.now() - 7 * 24 * 60 * 60 * 1000
     for (const e of all) {
-      const key = `${e.imageModel} → ${e.videoBackend}`
-      byModel.set(key, (byModel.get(key) ?? 0) + e.totalUsd)
       if (new Date(e.at).getTime() >= weekStart) week += e.totalUsd
     }
     return {
       all: all.reduce((s, e) => s + e.totalUsd, 0),
       week,
-      byModel: [...byModel.entries()].sort((a, b) => b[1] - a[1]),
     }
   }, [studio.spendLog])
 
@@ -56,9 +52,9 @@ export function CostsTab() {
       <Card>
         <CardHeader className="flex flex-row items-start justify-between gap-4">
           <div>
-            <CardTitle>By model path</CardTitle>
+            <CardTitle>Recent runs</CardTitle>
             <CardDescription>
-              Estimates recorded when you finish a Replicate from this browser. Not Wavespeed invoices.
+              Seedance 2.0 estimate recorded when you finish a Replicate from this browser. Not a WaveSpeed invoice.
             </CardDescription>
           </div>
           <Button
@@ -72,31 +68,9 @@ export function CostsTab() {
             Clear log
           </Button>
         </CardHeader>
-        <CardContent className="space-y-3">
-          {totals.byModel.length === 0 ? (
-            <p className="text-muted-foreground py-6 text-center">No spend logged yet. Run a replicate first.</p>
-          ) : (
-            totals.byModel.map(([path, usd]) => (
-              <div
-                key={path}
-                className="flex justify-between gap-4 py-2.5 border-b border-border/40 last:border-0"
-              >
-                <span className="text-sm">{path}</span>
-                <span className="tabular-nums font-medium">{studio.formatUsd(usd)}</span>
-              </div>
-            ))
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Recent runs</CardTitle>
-          <CardDescription>Per-video breakdown (image + video + audio estimate).</CardDescription>
-        </CardHeader>
         <CardContent>
           {studio.spendLog.length === 0 ? (
-            <p className="text-muted-foreground py-6 text-center">Empty.</p>
+            <p className="text-muted-foreground py-6 text-center">Empty. Run a replicate first.</p>
           ) : (
             <div className="overflow-x-auto -mx-1">
               <table className="w-full text-sm">
@@ -104,11 +78,7 @@ export function CostsTab() {
                   <tr className="text-left text-muted-foreground border-b border-border/50">
                     <th className="py-3 pr-4 font-medium">When</th>
                     <th className="py-3 pr-4 font-medium">Profile</th>
-                    <th className="py-3 pr-4 font-medium">Path</th>
-                    <th className="py-3 pr-4 font-medium text-right">Img</th>
-                    <th className="py-3 pr-4 font-medium text-right">Vid</th>
-                    <th className="py-3 pr-4 font-medium text-right">Aud</th>
-                    <th className="py-3 font-medium text-right">Total</th>
+                    <th className="py-3 font-medium text-right">Video (Seedance)</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -118,12 +88,6 @@ export function CostsTab() {
                         {new Date(e.at).toLocaleString()}
                       </td>
                       <td className="py-3 pr-4">@{e.profile || '—'}</td>
-                      <td className="py-3 pr-4 max-w-[220px] truncate">
-                        {e.imageModel} → {e.videoBackend}
-                      </td>
-                      <td className="py-3 pr-4 text-right tabular-nums">{studio.formatUsd(e.imageUsd)}</td>
-                      <td className="py-3 pr-4 text-right tabular-nums">{studio.formatUsd(e.videoUsd)}</td>
-                      <td className="py-3 pr-4 text-right tabular-nums">{studio.formatUsd(e.audioUsd)}</td>
                       <td className="py-3 text-right tabular-nums font-medium">{studio.formatUsd(e.totalUsd)}</td>
                     </tr>
                   ))}

@@ -1,9 +1,9 @@
 /**
- * Validates the measured half of technique detection against synthesised clips whose
- * properties are known up front, so cut counting and duration can be checked exactly.
- * Serves the clips over loopback because probeSourceVideo takes a URL.
+ * Validates probeSourceVideo's ffmpeg-based cut/duration/frame detection against
+ * synthesised clips whose properties are known up front. Serves the clips over
+ * loopback because probeSourceVideo takes a URL.
  *
- * Usage: npx tsx scripts/test-probe-signals.ts [--grok]
+ * Usage: npx tsx scripts/test-probe-signals.ts
  */
 
 import { execFile } from 'node:child_process'
@@ -18,8 +18,6 @@ import { config as loadEnv } from 'dotenv'
 const execFileAsync = promisify(execFile)
 const __dirname = dirname(fileURLToPath(import.meta.url))
 loadEnv({ path: resolve(__dirname, '..', '.env.local') })
-
-const withGrok = process.argv.includes('--grok')
 
 interface Fixture {
   name: string
@@ -121,8 +119,6 @@ async function main() {
   const port = (server.address() as { port: number }).port
 
   const { probeSourceVideo } = await import('../src/lib/monitor/analyze')
-  const { analyzeVideoContent } = await import('../src/lib/monitor/classify')
-  const { getTechnique } = await import('../src/lib/monitor/techniques')
 
   let failures = 0
   console.log(`\nProbing via http://127.0.0.1:${port}\n`)
@@ -147,18 +143,6 @@ async function main() {
     console.log(`   duration ${probe.duration?.toFixed(2)}s (expected ~${f.expectedDuration}) ${durationOk ? 'ok' : 'MISMATCH'}`)
     console.log(`   cuts     ${probe.cutCount} (expected ${f.expectedCuts}) ${cutsOk ? 'ok' : 'MISMATCH'}`)
     console.log(`   frames   ${probe.frames.length}/5 ${framesOk ? 'ok' : 'MISMATCH'}`)
-
-    if (withGrok) {
-      try {
-        const analysis = await analyzeVideoContent(probe)
-        const spec = getTechnique(analysis.video_technique)
-        console.log(`   grok     ${analysis.video_technique} @ ${Math.round(analysis.technique_confidence * 100)}%`
-          + (analysis.overrodeModel ? ' (measured signal overrode model)' : ''))
-        console.log(`   routes   ${spec.model ?? `parked — ${spec.reviewReason}`}`)
-      } catch (err) {
-        console.log(`   grok     FAILED: ${err instanceof Error ? err.message : err}`)
-      }
-    }
     console.log()
   }
 

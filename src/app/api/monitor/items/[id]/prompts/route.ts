@@ -3,8 +3,8 @@ import { requireUser } from '@/lib/session'
 import { one, query } from '@/lib/db'
 
 /**
- * PATCH scene_prompt / motion_prompt for a discovery item before Replicate.
- * Empty string clears the field (next Replicate will regenerate).
+ * PATCH rendered_prompt for a discovery item before Replicate.
+ * Empty string clears the field (next Replicate will re-render from copy_paste_spec).
  */
 export async function PATCH(
   req: NextRequest,
@@ -15,8 +15,11 @@ export async function PATCH(
 
   const { id } = await params
   const body = await req.json().catch(() => ({})) as {
-    scene_prompt?: string | null
-    motion_prompt?: string | null
+    rendered_prompt?: string | null
+  }
+
+  if (!('rendered_prompt' in body)) {
+    return NextResponse.json({ error: 'No prompt fields to update' }, { status: 400 })
   }
 
   const existing = await one<{ id: string }>(
@@ -27,36 +30,14 @@ export async function PATCH(
     return NextResponse.json({ error: 'Item not found' }, { status: 404 })
   }
 
-  const sets: string[] = []
-  const values: unknown[] = [id, auth.id]
-  let i = 3
-
-  if ('scene_prompt' in body) {
-    const v = typeof body.scene_prompt === 'string' ? body.scene_prompt.trim() : null
-    sets.push(`scene_prompt = $${i++}`)
-    values.push(v || null)
-  }
-  if ('motion_prompt' in body) {
-    const v = typeof body.motion_prompt === 'string' ? body.motion_prompt.trim() : null
-    sets.push(`motion_prompt = $${i++}`)
-    values.push(v || null)
-  }
-
-  if (!sets.length) {
-    return NextResponse.json({ error: 'No prompt fields to update' }, { status: 400 })
-  }
-
+  const v = typeof body.rendered_prompt === 'string' ? body.rendered_prompt.trim() : null
   await query(
-    `UPDATE discovery_items SET ${sets.join(', ')} WHERE id = $1 AND user_id = $2`,
-    values,
+    `UPDATE discovery_items SET rendered_prompt = $3 WHERE id = $1 AND user_id = $2`,
+    [id, auth.id, v || null],
   )
 
-  const row = await one<{
-    id: string
-    scene_prompt: string | null
-    motion_prompt: string | null
-  }>(
-    `SELECT id, scene_prompt, motion_prompt FROM discovery_items WHERE id = $1`,
+  const row = await one<{ id: string; rendered_prompt: string | null }>(
+    `SELECT id, rendered_prompt FROM discovery_items WHERE id = $1`,
     [id],
   )
 

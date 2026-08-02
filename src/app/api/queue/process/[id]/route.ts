@@ -22,7 +22,7 @@ import { randomUUID } from 'crypto'
 import type {
   BulkImageJobItem, VideoRepurposeJobInput, VideoCaptionJobInput, VideoCaptionItem,
   VideoTranscribeJobInput, VideoOcrJobInput, CaptionShuffleJobInput, CaptionGenerateJobInput, ComfyUIPodBulkJobInput,
-  BulkCarouselJobInput, MyPodI2vJobInput, MyPodAnimateJobInput, MyPodTalkJobInput,
+  BulkCarouselJobInput, MyPodI2vJobInput, MyPodAnimateJobInput, MyPodTalkJobInput, CopyPasteJobInput,
 } from '../../submit/route'
 import { getPodSessionSecrets } from '@/lib/my-pod/session'
 import { ensureRemoteWorkDir, cleanupRemoteJobDir } from '@/lib/my-pod/ssh'
@@ -31,11 +31,7 @@ import {
 } from '@/lib/my-pod/comfy'
 import { runI2vItem, runAnimateItem, runTalkItem } from '@/lib/my-pod/runners'
 import { fishTts } from '@/lib/my-pod/fish-tts'
-import {
-  processMultiShotJob,
-  type MonitorMultiShotJobInput,
-  type MonitorMultiShotJobOutput,
-} from '@/lib/monitor/multi-shot'
+import { replicateCopyPasteItem } from '@/lib/monitor/process-item'
 
 interface ComfyUIRow {
   prompt: string
@@ -62,12 +58,20 @@ interface CarouselRow {
   error?: string
 }
 
+interface CopyPasteRow {
+  itemId: string
+  status: 'done' | 'error'
+  videoUrl?: string
+  error?: string
+}
+
 const execFileAsync = promisify(execFile)
 const CRON_SECRET = process.env.CRON_SECRET
 const VIDEO_BATCH_SIZE = 3
 const GENERATE_BATCH_SIZE = 20
 const EXAMPLE_SAMPLE_SIZE = 25
 const CAROUSEL_BATCH_SIZE = 2
+const COPY_PASTE_BATCH_SIZE = 2
 
 /** Lease heartbeat so cron can requeue zombie My Pod workers after deploy/crash. */
 function packMyPodOutput(rows: MyPodRow[], stage: string) {
@@ -131,7 +135,8 @@ interface JobRow {
     stage?: string
     texts?: string[]
     carouselRows?: CarouselRow[]
-  } & MonitorMultiShotJobOutput | null
+    copyPasteRows?: CopyPasteRow[]
+  } | null
   attempts: number
   max_attempts: number
   done_items: number
@@ -1212,20 +1217,46 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ ok: true, done: doneCount })
     }
 
-    // ── monitor_multi_shot ────────────────────────────────────────────────────
-    if (job.job_type === 'monitor_multi_shot') {
-      const input = job.input as unknown as MonitorMultiShotJobInput
-      if (!input?.discoveryItemId || !input.imageUrl || !input.sourceVideoUrl) {
-        throw new Error('Invalid monitor_multi_shot input')
+    // ── copy_paste_v2 ─────────────────────────────────────────────────────────
+    if (job.job_type === 'copy_paste_v2') {
+      const { itemIds } = job.input as unknown as CopyPasteJobInput
+      if (!itemIds?.length) throw new Error('No items in job input')
+
+      const copyPasteRows: CopyPasteRow[] = job.output?.copyPasteRows ? [...job.output.copyPasteRows] : []
+      let doneCount = job.done_items
+
+      for (let batchStart = doneCount; batchStart < itemIds.length; batchStart += COPY_PASTE_BATCH_SIZE) {
+        const batchEnd = Math.min(batchStart + COPY_PASTE_BATCH_SIZE, itemIds.length)
+        const batchIds = itemIds.slice(batchStart, batchEnd)
+
+        const results = await Promise.all(batchIds.map(async (itemId): Promise<CopyPasteRow> => {
+          try {
+            const result = await replicateCopyPasteItem(itemId, job.user_id)
+            return { itemId, status: 'done', videoUrl: result.videoUrl }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : 'failed'
+            console.error(`[queue/process] copy_paste_v2 ${id} item ${itemId} failed:`, msg)
+            return { itemId, status: 'error', error: msg }
+          }
+        }))
+
+        copyPasteRows.push(...results)
+        doneCount = batchEnd
+        const progress = Math.round((doneCount / itemIds.length) * 100)
+        await query(
+          `UPDATE generation_queue
+              SET done_items=$1, progress=$2, output=jsonb_build_object('copyPasteRows', $3::jsonb)
+            WHERE id=$4`,
+          [doneCount, progress, JSON.stringify(copyPasteRows), id],
+        )
       }
-      const result = await processMultiShotJob({
-        jobId: id,
-        userId: job.user_id,
-        input,
-        doneItems: job.done_items,
-        existingOutput: job.output,
-      })
-      return NextResponse.json({ ok: true, done: result.done, finalUrl: result.finalUrl })
+
+      await query(
+        `UPDATE generation_queue SET status='done', finished_at=now(), progress=100 WHERE id=$1`,
+        [id],
+      )
+
+      return NextResponse.json({ ok: true, done: doneCount })
     }
 
     // Unknown job type

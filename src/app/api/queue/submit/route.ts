@@ -17,6 +17,10 @@ export interface BulkImageJobItem {
   characterName?: string
 }
 
+export interface CopyPasteJobInput {
+  itemIds: string[]
+}
+
 export interface BulkCarouselJobInput {
   items: BulkImageJobItem[]
   variantsExtra: 1 | 2 | 3 | 4
@@ -198,6 +202,7 @@ export type QueueSubmitBody =
       }
     }
   | { job_type: 'bulk_carousel'; input: BulkCarouselJobInput }
+  | { job_type: 'copy_paste_v2'; input: CopyPasteJobInput }
 
 export async function POST(req: NextRequest) {
   const user = await requireUser(req)
@@ -671,6 +676,25 @@ export async function POST(req: NextRequest) {
        VALUES ($1, $2, $3, $4)
        RETURNING id`,
       [user.id, body.job_type, JSON.stringify(input), items.length],
+    )
+    return NextResponse.json({ id: row!.id })
+  }
+
+  if (body.job_type === 'copy_paste_v2') {
+    const { itemIds } = body.input ?? {}
+    if (!Array.isArray(itemIds) || itemIds.length === 0) {
+      return NextResponse.json({ error: 'itemIds required' }, { status: 400 })
+    }
+    if (itemIds.length > 100) {
+      return NextResponse.json({ error: 'Max 100 items per submission' }, { status: 400 })
+    }
+
+    const input: CopyPasteJobInput = { itemIds }
+    const row = await one<{ id: string }>(
+      `INSERT INTO generation_queue (user_id, job_type, input, total_items)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [user.id, body.job_type, JSON.stringify(input), itemIds.length],
     )
     return NextResponse.json({ id: row!.id })
   }
