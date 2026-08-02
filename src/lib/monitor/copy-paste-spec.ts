@@ -63,7 +63,7 @@ export const NEGATIVE_PROMPT_TEMPLATE =
 /** Forced value for whichever person (always people[0]) gets the reference photo. */
 function referenceLockAppearance(genderHint: string): string {
   const isMan = /\b(male|man|guy|boyfriend|husband|coach|him|his)\b/i.test(genderHint)
-  return `do not describe — reference image will be provided. Mature ${isMan ? 'man' : 'woman'}, realistic facial features, highly detailed.`
+  return `reference character is from image. Mature ${isMan ? 'man' : 'woman'}, realistic facial features, highly detailed.`
 }
 
 const NORMALIZATION_RULES = `
@@ -116,7 +116,7 @@ Exactly ONE person in "people" is the main on-camera subject whose face will be
 replaced by a user-supplied reference photo. This is ALWAYS people[0] — decide
 who that is (usually whoever has the most camera focus / delivers the hook /
 is foregrounded) and put them first. For THAT PERSON ONLY, set "appearance" to
-literally: "do not describe — reference image will be provided. Mature <woman
+literally: "reference character is from image. Mature <woman
 or man>, realistic facial features, highly detailed." — choose woman/man based
 on apparent sex, and write NOTHING else in appearance for this person (no hair
 color, skin tone, ethnicity, or age words — those belong in the fixed template
