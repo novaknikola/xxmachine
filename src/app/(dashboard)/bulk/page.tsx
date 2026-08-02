@@ -69,6 +69,8 @@ interface BulkJob {
   id: string; characterId: string; characterName: string; prompt: string
   dimension: string; status: JobStatus; outputUrls: string[]
   sentPrompt?: string; sentLoraUrl?: string
+  /** Scene reference this job alone uses, on top of the shared character refs. */
+  sceneRefUrl?: string
   error?: string; startedAt?: string; finishedAt?: string
 }
 
@@ -142,6 +144,22 @@ function cleanPromptLines(raw: string): string[] {
     .split('\n')
     .map(l => l.trim())
     .filter(l => l.length > 0 && !/^```/.test(l) && !/^[-=*_~]{3,}$/.test(l))
+}
+
+/**
+ * One scene-reference image URL per line (Pinterest pin, CDN link, ...). These
+ * are handed to Seedream as-is — it fetches them itself, so nothing is
+ * downloaded or re-hosted here. Duplicates are dropped so a pin pasted twice
+ * does not silently double the generation bill.
+ */
+function cleanSceneRefUrls(raw: string): string[] {
+  const seen = new Set<string>()
+  for (const line of raw.split('\n')) {
+    const url = line.trim()
+    if (!/^https?:\/\//i.test(url)) continue
+    seen.add(url)
+  }
+  return [...seen]
 }
 
 // ─── Main Page ────────────────────────────────────────────────
@@ -222,8 +240,10 @@ function BulkPageInner() {
   const [carouselPresetId, setCarouselPresetId] = useState(DEFAULT_CAROUSEL_PRESET_ID)
   const [carouselGrokSmart, setCarouselGrokSmart] = useState(false)
   const [carouselRefImages, setCarouselRefImages] = useState<RefImageItem[]>([])
+  const [sceneRefUrlsRaw, setSceneRefUrlsRaw] = useState('')
   const [seedreamResolution, setSeedreamResolution] = useState<SeedreamResolution>('1k')
   const carouselRefUrlsRef = useRef<string[]>([])
+  const sceneRefUrls = cleanSceneRefUrls(sceneRefUrlsRaw)
 
   const loadLoras = useCallback(async () => {
     const res = await fetch('/api/loras').catch(() => null)
@@ -519,7 +539,7 @@ function BulkPageInner() {
   }
 
   function isSeedreamRefOnlyMode(): boolean {
-    return carouselRefImages.length > 0
+    return (carouselRefImages.length > 0 || sceneRefUrls.length > 0)
       && !bulkLoraUrl
       && selectedCharIds.length === 0
   }
@@ -537,7 +557,20 @@ function BulkPageInner() {
       return
     }
 
+    // Every scene reference becomes its own job, so N pasted URLs × M prompts
+    // = N×M jobs. With no scene refs this is a single undefined slot and the
+    // job list comes out exactly as it did before.
+    const refSlots: (string | undefined)[] = sceneRefUrls.length ? sceneRefUrls : [undefined]
+
     const newJobs: BulkJob[] = []
+    const pushJobs = (characterId: string, characterName: string) => {
+      for (const prompt of lines) {
+        for (const sceneRefUrl of refSlots) {
+          newJobs.push({ id: crypto.randomUUID(), characterId, characterName, prompt, dimension, status: 'pending', outputUrls: [], sceneRefUrl })
+        }
+      }
+    }
+
     if (selectedCharIds.length > 0) {
       for (const charId of selectedCharIds) {
         const char = characters.find(c => c.id === charId)
@@ -546,20 +579,12 @@ function BulkPageInner() {
           selectedCharIds.length === 1 && driveLabel.trim()
             ? driveLabel.trim()
             : char.name
-        for (const prompt of lines) {
-          newJobs.push({ id: crypto.randomUUID(), characterId: charId, characterName: folderName, prompt, dimension, status: 'pending', outputUrls: [] })
-        }
+        pushJobs(charId, folderName)
       }
     } else if (refOnly) {
-      const folderName = driveLabel.trim() || 'seedream_refs'
-      for (const prompt of lines) {
-        newJobs.push({ id: crypto.randomUUID(), characterId: '', characterName: folderName, prompt, dimension, status: 'pending', outputUrls: [] })
-      }
+      pushJobs('', driveLabel.trim() || 'seedream_refs')
     } else {
-      const folderName = driveLabel.trim() || 'custom_lora'
-      for (const prompt of lines) {
-        newJobs.push({ id: crypto.randomUUID(), characterId: '', characterName: folderName, prompt, dimension, status: 'pending', outputUrls: [] })
-      }
+      pushJobs('', driveLabel.trim() || 'custom_lora')
     }
     setJobs(newJobs)
     toast.success(`${newJobs.length} tasks created`)
@@ -580,7 +605,7 @@ function BulkPageInner() {
       : basePrompt
 
     const refOnly = isSeedreamRefOnlyMode()
-    if (refOnly && carouselRefImages.length === 0) {
+    if (refOnly && carouselRefImages.length === 0 && !job.sceneRefUrl) {
       toast.error('Upload reference images for Seedream-only mode')
       return
     }
@@ -599,7 +624,12 @@ function BulkPageInner() {
     try {
       let baseUrls: string[]
       if (refOnly) {
-        const refUrls = await ensureCarouselRefUrls()
+        // Character refs first so identity keeps Seedream's primary slot; this
+        // job's scene reference (a pin URL) rides along as an extra image.
+        const refUrls = [
+          ...(await ensureCarouselRefUrls()),
+          ...(job.sceneRefUrl ? [job.sceneRefUrl] : []),
+        ].slice(0, SEEDREAM_MAX_IMAGES)
         baseUrls = await callSeedreamEdit(generationPrompt, job.dimension, refUrls, {
           characterId: job.characterId || undefined,
           characterName: job.characterName,
@@ -661,9 +691,10 @@ function BulkPageInner() {
         }
 
         // The base slide occupies one of Seedream's image slots, so refs are capped one below the max.
-        const refUrls = carouselRefImages.length
-          ? (await ensureCarouselRefUrls()).slice(0, SEEDREAM_MAX_IMAGES - 1)
-          : []
+        const refUrls = [
+          ...(carouselRefImages.length ? await ensureCarouselRefUrls() : []),
+          ...(job.sceneRefUrl ? [job.sceneRefUrl] : []),
+        ].slice(0, SEEDREAM_MAX_IMAGES - 1)
 
         const results = await Promise.allSettled(variantPrompts.map(async (variantPrompt, vi) => {
           const editUrls = await callSeedreamEdit(
@@ -733,7 +764,9 @@ function BulkPageInner() {
       if (carouselMode && carouselRefImages.length) {
         referenceImageUrls = await uploadCarouselRefImages()
       }
-      if (refOnly && !referenceImageUrls?.length) {
+      // A per-job scene reference is a valid Seedream base by itself, so
+      // uploaded character refs are only required when some job lacks one.
+      if (refOnly && !referenceImageUrls?.length && !jobs.every(j => j.sceneRefUrl)) {
         toast.error('Upload reference images for Seedream-only mode')
         return
       }
@@ -745,7 +778,13 @@ function BulkPageInner() {
         const loraScale = bulkLoraScale ?? char?.loraScale ?? 0.8
         const styledPrompt = buildStyledScenePrompt(char, job.prompt)
         const prompt = withTriggerWord(styledPrompt, selectedLora?.trigger_word || char?.triggerWord)
-        return { prompt, dimension: job.dimension, loraUrl, loraScale, characterId: job.characterId, characterName: job.characterName }
+        return {
+          prompt, dimension: job.dimension, loraUrl, loraScale,
+          characterId: job.characterId, characterName: job.characterName,
+          // Sent as a bare URL — the worker hands it to Seedream, which fetches
+          // it itself, so pins are never downloaded or re-hosted by us.
+          referenceImageUrls: job.sceneRefUrl ? [job.sceneRefUrl] : undefined,
+        }
       })
 
       const body = carouselMode
@@ -1371,6 +1410,34 @@ function BulkPageInner() {
                             </Select>
                           </div>
                         )}
+                        <div className="space-y-1">
+                          <Label className="text-xs text-muted-foreground">Scene reference URLs</Label>
+                          <Textarea
+                            value={sceneRefUrlsRaw}
+                            onChange={e => setSceneRefUrlsRaw(e.target.value)}
+                            placeholder={'One URL per line — Pinterest pin, CDN...\nhttps://i.pinimg.com/originals/...'}
+                            className="text-xs font-mono min-h-[72px]"
+                          />
+                          <p className="text-[10px] text-muted-foreground/60 leading-relaxed">
+                            {sceneRefUrls.length > 0
+                              ? `${sceneRefUrls.length} scene ref${sceneRefUrls.length === 1 ? '' : 's'} — each one becomes its own carousel (× ${cleanPromptLines(promptsRaw).length || 0} prompt${cleanPromptLines(promptsRaw).length === 1 ? '' : 's'}). Not downloaded — Seedream fetches the URL.`
+                              : 'Optional. Each URL becomes its own carousel, on top of the uploaded character references.'}
+                          </p>
+                          {sceneRefUrls.length > 0 && (
+                            <div className="grid grid-cols-6 gap-1 pt-1">
+                              {sceneRefUrls.slice(0, 12).map(url => (
+                                /* eslint-disable-next-line @next/next/no-img-element */
+                                <img
+                                  key={url}
+                                  src={`/api/proxy-image?url=${encodeURIComponent(url)}`}
+                                  alt=""
+                                  className="aspect-square w-full rounded object-cover border border-border"
+                                  onError={e => { (e.target as HTMLImageElement).style.visibility = 'hidden' }}
+                                />
+                              ))}
+                            </div>
+                          )}
+                        </div>
                         <div className="flex items-center gap-2">
                           <Label className="text-xs text-muted-foreground shrink-0">Seedream:</Label>
                           <Select value={seedreamResolution} onValueChange={v => { if (v) setSeedreamResolution(v as SeedreamResolution) }}>
