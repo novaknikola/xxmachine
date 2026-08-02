@@ -107,10 +107,15 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
 
   async function submit() {
     if (!items.length) return
-    if (!character) { toast.error('Pick a character'); return }
-    if (mode === 'turbo-lora' && !character.loraUrl) {
-      toast.error('This character has no trained LoRA — pick Seedream Edit instead')
-      return
+    // The two modes are independent: LoRA + Turbo generates from a trained
+    // character, Seedream Edit generates from reference images. Neither should
+    // demand what the other needs.
+    if (mode === 'turbo-lora') {
+      if (!character) { toast.error('Pick a character — LoRA + Turbo generates from its trained LoRA'); return }
+      if (!character.loraUrl) {
+        toast.error('This character has no trained LoRA — pick Seedream Edit instead')
+        return
+      }
     }
     // Any of the three sources is a valid Seedream reference, so a character
     // without stored face refs is no longer a dead end here.
@@ -126,14 +131,17 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
 
     setSubmitting(true)
     try {
-      const referenceImageUrls = mode === 'seedream-edit'
+      const isSeedream = mode === 'seedream-edit'
+      const referenceImageUrls = isSeedream
         ? [...faceRefUrls, ...(await uploadRefFiles()), ...sceneRefUrls].slice(0, SEEDREAM_MAX_IMAGES)
         : undefined
 
-      const composedItems = items.map(it => ({
-        promptId: it.id,
-        prompt: withTriggerWord(buildStyledScenePrompt(character, it.prompt), triggerWord),
-      }))
+      const composedItems = items.map(it => {
+        const styled = buildStyledScenePrompt(character, it.prompt)
+        // A trigger word only means anything to a LoRA — injecting it into a
+        // Seedream prompt just adds a stray token like "sofia_lora".
+        return { promptId: it.id, prompt: isSeedream ? styled : withTriggerWord(styled, triggerWord) }
+      })
 
       const res = await fetch('/api/queue/submit', {
         method: 'POST',
@@ -143,13 +151,13 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
           input: {
             items: composedItems,
             mode,
-            loraUrl: character.loraUrl,
-            loraScale: character.loraScale,
+            loraUrl: isSeedream ? null : character?.loraUrl ?? null,
+            loraScale: isSeedream ? undefined : character?.loraScale,
             referenceImageUrls,
             dimension,
             folderName: folderName.trim(),
-            characterId: character.id,
-            characterName: character.name,
+            characterId: character?.id ?? null,
+            characterName: character?.name ?? null,
             carousel: carouselEnabled
               ? { enabled: true, count: carouselCount, presetId: carouselPreset, grokSmart }
               : undefined,
@@ -189,13 +197,35 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
 
         <div className="flex-1 overflow-y-auto px-4 space-y-4">
           <div className="space-y-1.5">
-            <p className="text-xs font-medium text-muted-foreground">Character</p>
+            <p className="text-xs font-medium text-muted-foreground">
+              Character{mode === 'seedream-edit' && <span className="opacity-60"> (optional)</span>}
+            </p>
             <Select value={characterId} onValueChange={v => setCharacterId(v ?? '')}>
-              <SelectTrigger className="w-full"><SelectValue placeholder="Pick a character" /></SelectTrigger>
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder={mode === 'seedream-edit' ? 'None — identity comes from the references' : 'Pick a character'} />
+              </SelectTrigger>
               <SelectContent>
                 {characters.map(c => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
               </SelectContent>
             </Select>
+            {mode === 'seedream-edit' && (
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[10px] text-muted-foreground/60">
+                  Only used for its style prefix and stored face refs — Seedream Edit needs no LoRA.
+                </p>
+                {/* Without this a character picked for LoRA mode could not be
+                    dropped again, and its style prefix would ride along into
+                    every Seedream prompt. */}
+                {characterId && (
+                  <button
+                    onClick={() => setCharacterId('')}
+                    className="text-[10px] text-muted-foreground hover:text-foreground shrink-0 underline"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="space-y-1.5">
@@ -366,12 +396,15 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
             <Input value={folderName} onChange={e => setFolderName(e.target.value)} placeholder="e.g. sofia_copy_prompts" />
           </div>
 
-          <div className="space-y-1.5">
-            <p className="text-xs font-medium text-muted-foreground">
-              Trigger word <span className="opacity-60">(applied to every prompt in this batch)</span>
-            </p>
-            <Input value={triggerWord} onChange={e => setTriggerWord(e.target.value)} placeholder="e.g. sofia_lora" />
-          </div>
+          {/* LoRA-only: Seedream Edit has no trigger word to fire. */}
+          {mode === 'turbo-lora' && (
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-muted-foreground">
+                Trigger word <span className="opacity-60">(applied to every prompt in this batch)</span>
+              </p>
+              <Input value={triggerWord} onChange={e => setTriggerWord(e.target.value)} placeholder="e.g. sofia_lora" />
+            </div>
+          )}
         </div>
 
         <SheetFooter>
