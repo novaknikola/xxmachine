@@ -14,6 +14,7 @@ import {
 } from '@/components/ui/select'
 import { CAROUSEL_PRESETS, DEFAULT_CAROUSEL_PRESET_ID } from '@/lib/carousel-presets'
 import { cleanSceneRefUrls, DEFAULT_SCENE_EDIT_PROMPT } from '@/lib/scene-refs'
+import { maxItemsForJob } from '@/lib/queue-limits'
 import { SEEDREAM_MAX_IMAGES } from '@/lib/wavespeed'
 import { withTriggerWord, buildStyledScenePrompt } from '@/lib/character-prompt'
 import { DIMENSIONS, type Character } from '@/lib/types'
@@ -82,6 +83,15 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
   // of these — see DEFAULT_SCENE_EDIT_PROMPT.
   const totalRefCount = faceRefUrls.length + uploadedRefs.length + sceneRefUrls.length
   const overCap = totalRefCount > SEEDREAM_MAX_IMAGES
+
+  // Mirrors the queue route's budget so the limit shows here rather than coming
+  // back as an error after the panel is filled in.
+  const slidesPerItem = carouselEnabled ? 1 + carouselCount : 1
+  const maxItems = maxItemsForJob({
+    usesSeedream: effMode === 'seedream-edit' || carouselEnabled,
+    carouselCount: carouselEnabled ? carouselCount : null,
+  })
+  const overItemCap = items.length > maxItems
 
   function addRefFiles(files: FileList | null) {
     if (!files?.length) return
@@ -467,8 +477,15 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
           )}
         </div>
 
-        <SheetFooter>
-          <Button onClick={submit} disabled={submitting || !items.length} className="w-full">
+        <SheetFooter className="flex-col gap-2">
+          <p className={`text-[10px] w-full ${overItemCap ? 'text-destructive' : 'text-muted-foreground/60'}`}>
+            {items.length} × {slidesPerItem} slide{slidesPerItem === 1 ? '' : 's'} ={' '}
+            <strong>{items.length * slidesPerItem} images</strong>
+            {overItemCap
+              ? ` — over the limit. Max ${maxItems} item${maxItems === 1 ? '' : 's'} at this carousel size; deselect ${items.length - maxItems} or lower the carousel count.`
+              : ` · up to ${maxItems} items allowed here`}
+          </p>
+          <Button onClick={submit} disabled={submitting || !items.length || overItemCap} className="w-full">
             {submitting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Wand2 className="w-4 h-4 mr-2" />}
             Generate {items.length} item{items.length === 1 ? '' : 's'}
           </Button>

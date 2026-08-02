@@ -90,16 +90,17 @@ export async function GET(req: NextRequest) {
         AND started_at < now() - interval '30 minutes'
         AND attempts < max_attempts
         AND job_type NOT IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk',
-                             'copy_paste_v2')`,
+                             'copy_paste_v2', 'copy_prompts_generate')`,
   ).catch(err => console.error('[cron/tick] reset stuck queue jobs:', err))
 
-  // copy_paste_v2 writes progressAt after every batch. No progress for 25 minutes
-  // means the worker died (deploy/crash), not that it is still grinding.
+  // copy_paste_v2 and copy_prompts_generate write progressAt after every batch.
+  // No progress for 25 minutes means the worker died (deploy/crash), not that
+  // it is still grinding — a large Seedream batch legitimately runs for hours.
   await query(
     `UPDATE generation_queue
         SET status = 'pending', started_at = NULL, error = NULL
       WHERE status = 'processing'
-        AND job_type = 'copy_paste_v2'
+        AND job_type IN ('copy_paste_v2', 'copy_prompts_generate')
         AND attempts < max_attempts
         AND COALESCE(
               NULLIF(output->>'progressAt', '')::timestamptz,
@@ -110,16 +111,16 @@ export async function GET(req: NextRequest) {
   await query(
     `UPDATE generation_queue
         SET status = 'failed',
-            error = COALESCE(error, 'Copy-Paste job stalled — no progress after max attempts'),
+            error = COALESCE(error, 'Job stalled — no progress after max attempts'),
             finished_at = now()
       WHERE status = 'processing'
-        AND job_type = 'copy_paste_v2'
+        AND job_type IN ('copy_paste_v2', 'copy_prompts_generate')
         AND attempts >= max_attempts
         AND COALESCE(
               NULLIF(output->>'progressAt', '')::timestamptz,
               started_at
             ) < now() - interval '25 minutes'`,
-  ).catch(err => console.error('[cron/tick] fail exhausted copy_paste_v2 jobs:', err))
+  ).catch(err => console.error('[cron/tick] fail exhausted heartbeat jobs:', err))
 
   // My Pod resume lease: worker heartbeats progressAt ~every 60s during Comfy/Python work.
   // If heartbeat stops (deploy/crash), requeue to pending and continue from done_items.

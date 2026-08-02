@@ -1480,11 +1480,16 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         copyPromptsRows.push(...results)
         doneCount = batchEnd
         const progress = Math.round((doneCount / items.length) * 100)
+        // progressAt is the liveness heartbeat cron uses to tell a slow batch
+        // from a dead worker. Without it a long run trips the blunt 30-minute
+        // reset, burns its three attempts, and then sits in 'processing' with
+        // nothing left to requeue it.
         await query(
           `UPDATE generation_queue
-              SET done_items=$1, progress=$2, output=jsonb_build_object('copyPromptsRows', $3::jsonb)
+              SET done_items=$1, progress=$2,
+                  output=jsonb_build_object('copyPromptsRows', $3::jsonb, 'progressAt', $5::text)
             WHERE id=$4`,
-          [doneCount, progress, JSON.stringify(copyPromptsRows), id],
+          [doneCount, progress, JSON.stringify(copyPromptsRows), id, new Date().toISOString()],
         )
       }
 

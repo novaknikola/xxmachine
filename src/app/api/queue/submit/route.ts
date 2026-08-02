@@ -7,6 +7,7 @@ import type { VideoEffectOpts } from '@/lib/video-ffmpeg'
 import type { CaptionStyle, CaptionCustomStyle } from '@/lib/captions'
 import { dedupeCaptions } from '@/lib/caption-shuffle'
 import { SEEDREAM_MAX_IMAGES } from '@/lib/wavespeed'
+import { maxItemsForJob, MAX_SEEDREAM_SLIDES_PER_JOB } from '@/lib/queue-limits'
 
 export interface BulkImageJobItem {
   prompt: string
@@ -854,10 +855,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'carousel.count must be 1, 2, 3, or 4' }, { status: 400 })
     }
 
-    const usesSeedream = mode === 'seedream-edit' || carousel?.enabled
-    const maxItems = usesSeedream ? 25 : 50
+    // Budgeted by images produced, not by items: with carousel on, one item is
+    // 1 + variants Seedream calls, so a flat item cap means wildly different
+    // amounts of work. Same helper the panel uses, so the two never disagree.
+    const usesSeedream = mode === 'seedream-edit' || Boolean(carousel?.enabled)
+    const slidesPerItem = carousel?.enabled ? 1 + carousel.count : 1
+    const maxItems = maxItemsForJob({
+      usesSeedream,
+      carouselCount: carousel?.enabled ? carousel.count : null,
+    })
     if (items.length > maxItems) {
-      return NextResponse.json({ error: `Max ${maxItems} items per submission` }, { status: 400 })
+      return NextResponse.json(
+        {
+          error: carousel?.enabled
+            ? `Max ${maxItems} items with a ${slidesPerItem}-slide carousel (${MAX_SEEDREAM_SLIDES_PER_JOB} images per batch) — split the selection or lower the carousel count`
+            : `Max ${maxItems} items per submission`,
+        },
+        { status: 400 },
+      )
     }
 
     const input: CopyPromptsJobInput = {
