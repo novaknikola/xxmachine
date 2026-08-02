@@ -40,9 +40,10 @@ export interface CopyPromptsJobItem {
    */
   promptId: string
   /**
-   * This item's own Seedream reference — the pin it was built from. Merged
-   * after the job-level referenceImageUrls (the character), so identity keeps
-   * the primary slot and prompt-library batches are unaffected.
+   * This item's own Seedream reference — the pin it was built from. Sent
+   * *before* the job-level referenceImageUrls (the character), because a scene
+   * edit prompt names the images by position: image 1 is the scene, image 2 is
+   * the identity. Items without one are unaffected.
    */
   referenceImageUrls?: string[]
   /** Fully composed final prompt text (style prefix + trigger word already applied client-side). */

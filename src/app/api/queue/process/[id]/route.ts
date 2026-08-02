@@ -1152,10 +1152,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             const carouselPreset = presetId ?? DEFAULT_CAROUSEL_PRESET_ID
             const baseGenerationPrompt = buildCarouselBasePrompt(item.prompt, carouselPreset)
             const seedreamRes = seedreamResolution === '2k' ? '2k' : '1k'
-            // Shared job refs (the character) first, then this item's own scene
-            // reference, so identity keeps the primary slot and items without
-            // per-item refs produce exactly the array this used to send.
-            const itemRefUrls = [...(referenceImageUrls ?? []), ...(item.referenceImageUrls ?? [])]
+            // Scene reference first, character references after it — a scene
+            // edit prompt names the images by position ("image 1 is the scene,
+            // image 2 is the identity"), so this order is load-bearing. Items
+            // with no scene reference send exactly what they always did.
+            const itemRefUrls = item.referenceImageUrls?.length
+              ? [...item.referenceImageUrls, ...(referenceImageUrls ?? [])]
+              : [...(referenceImageUrls ?? [])]
 
             let baseStoredUrl: string
             if (seedreamOnly) {
@@ -1359,9 +1362,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           const item = items[i]
           try {
             const seedreamRes = seedreamResolution === '2k' ? '2k' : '1k'
-            // Shared job refs (the character) first, then this item's own scene
-            // reference. Items without one send exactly what this used to send.
-            const itemRefUrls = [...(referenceImageUrls ?? []), ...(item.referenceImageUrls ?? [])]
+            // Scene reference first, character references after it — a scene
+            // edit prompt names the images by position ("image 1 is the scene,
+            // image 2 is the identity"), so this order is load-bearing.
+            // Items with no scene reference send exactly what they always did.
+            const itemRefUrls = item.referenceImageUrls?.length
+              ? [...item.referenceImageUrls, ...(referenceImageUrls ?? [])]
+              : [...(referenceImageUrls ?? [])]
 
             let baseStoredUrl: string
             if (mode === 'seedream-edit') {

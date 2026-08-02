@@ -13,7 +13,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import { CAROUSEL_PRESETS, DEFAULT_CAROUSEL_PRESET_ID } from '@/lib/carousel-presets'
-import { cleanSceneRefUrls } from '@/lib/scene-refs'
+import { cleanSceneRefUrls, DEFAULT_SCENE_EDIT_PROMPT } from '@/lib/scene-refs'
 import { SEEDREAM_MAX_IMAGES } from '@/lib/wavespeed'
 import { withTriggerWord, buildStyledScenePrompt } from '@/lib/character-prompt'
 import { DIMENSIONS, type Character } from '@/lib/types'
@@ -48,7 +48,7 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
   const [grokSmart, setGrokSmart] = useState(false)
   const [uploadedRefs, setUploadedRefs] = useState<UploadedRef[]>([])
   const [sceneRefUrlsRaw, setSceneRefUrlsRaw] = useState('')
-  const [pinPrompt, setPinPrompt] = useState('')
+  const [pinPrompt, setPinPrompt] = useState(DEFAULT_SCENE_EDIT_PROMPT)
   const [submitting, setSubmitting] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -77,8 +77,9 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
   const faceRefUrls = character?.faceRefUrls ?? []
   const hasFaceRefs = faceRefUrls.length > 0
   const sceneRefUrls = cleanSceneRefUrls(sceneRefUrlsRaw)
-  // Character identity first so it keeps Seedream's primary image slot, then
-  // one-off uploads, then pasted scene links.
+  // These are the job-level (identity) references. For a pin batch each item
+  // additionally carries its own scene reference, which the worker sends ahead
+  // of these — see DEFAULT_SCENE_EDIT_PROMPT.
   const totalRefCount = faceRefUrls.length + uploadedRefs.length + sceneRefUrls.length
   const overCap = totalRefCount > SEEDREAM_MAX_IMAGES
 
@@ -151,14 +152,21 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
         : undefined
 
       const composedItems = items.map(it => {
-        const styled = buildStyledScenePrompt(character, pinBatch ? pinPrompt.trim() : it.prompt)
+        // A scene-edit prompt addresses the reference images by position and
+        // states the identity itself, so it is sent verbatim. Prepending the
+        // character's style prefix would push "Image 1 is..." off the front and
+        // argue with the hair and wardrobe the prompt already pins down.
+        const styled = pinBatch
+          ? pinPrompt.trim()
+          : buildStyledScenePrompt(character, it.prompt)
         // A trigger word only means anything to a LoRA — injecting it into a
         // Seedream prompt just adds a stray token like "sofia_lora".
         return {
           promptId: it.id,
           prompt: isSeedream ? styled : withTriggerWord(styled, triggerWord),
           // Each pin generates against its own scene, so refs go per item
-          // rather than being merged into one shared set.
+          // rather than being merged into one shared set. The worker sends
+          // these before the job-level character refs — see DEFAULT_SCENE_EDIT_PROMPT.
           referenceImageUrls: it.sceneRefUrl ? [it.sceneRefUrl] : undefined,
         }
       })
@@ -259,11 +267,22 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
                 placeholder="Recreate this scene with my character — same pose, composition and lighting"
                 className="text-xs min-h-[72px]"
               />
-              <p className="text-[10px] text-muted-foreground/60">
-                {items.length} pin{items.length === 1 ? '' : 's'} → {items.length} job
-                {items.length === 1 ? '' : 's'}, each generated against its own scene. Seedream Edit,
-                since LoRA + Turbo cannot read reference images.
-              </p>
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-[10px] text-muted-foreground/60 leading-relaxed">
+                  {items.length} pin{items.length === 1 ? '' : 's'} → {items.length} job
+                  {items.length === 1 ? '' : 's'}, each against its own scene. Sent verbatim, with no
+                  character style prefix. <strong className="text-muted-foreground">image 1 = the pin,
+                  image 2+ = your reference photos</strong> — keep that order in mind if you rewrite it.
+                </p>
+                {pinPrompt !== DEFAULT_SCENE_EDIT_PROMPT && (
+                  <button
+                    onClick={() => setPinPrompt(DEFAULT_SCENE_EDIT_PROMPT)}
+                    className="text-[10px] text-muted-foreground hover:text-foreground shrink-0 underline"
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
             </div>
           )}
 

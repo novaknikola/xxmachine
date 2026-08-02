@@ -610,11 +610,12 @@ function BulkPageInner() {
     try {
       let baseUrls: string[]
       if (refOnly) {
-        // Character refs first so identity keeps Seedream's primary slot; this
-        // job's scene reference (a pin URL) rides along as an extra image.
+        // Scene reference first, character refs after — a scene edit prompt
+        // names the images by position, so this order is load-bearing. Matches
+        // the queue worker; see DEFAULT_SCENE_EDIT_PROMPT.
         const refUrls = [
-          ...(await ensureCarouselRefUrls()),
           ...(job.sceneRefUrl ? [job.sceneRefUrl] : []),
+          ...(await ensureCarouselRefUrls()),
         ].slice(0, SEEDREAM_MAX_IMAGES)
         baseUrls = await callSeedreamEdit(generationPrompt, job.dimension, refUrls, {
           characterId: job.characterId || undefined,
@@ -678,8 +679,8 @@ function BulkPageInner() {
 
         // The base slide occupies one of Seedream's image slots, so refs are capped one below the max.
         const refUrls = [
-          ...(carouselRefImages.length ? await ensureCarouselRefUrls() : []),
           ...(job.sceneRefUrl ? [job.sceneRefUrl] : []),
+          ...(carouselRefImages.length ? await ensureCarouselRefUrls() : []),
         ].slice(0, SEEDREAM_MAX_IMAGES - 1)
 
         const results = await Promise.allSettled(variantPrompts.map(async (variantPrompt, vi) => {
