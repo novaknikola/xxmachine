@@ -11,17 +11,14 @@ import { isPlayableVideoUrl } from '@/lib/monitor/video-url'
 const MAX_URLS = 30
 const LIST_LIMIT = 50
 
-/** Most recently tracked active Instagram profile — just a grouping label now, no character required. */
-async function resolveDefaultProfile(userId: string): Promise<string | null> {
-  const row = await one<{ username: string }>(
-    `SELECT username FROM tracked_profiles
-      WHERE user_id = $1 AND platform = 'Instagram' AND status = 'ACTIVE'
-      ORDER BY created_at DESC
-      LIMIT 1`,
-    [userId],
-  )
-  return row?.username ?? null
-}
+/**
+ * Label for reels whose owner the pasted URL does not reveal (a bare
+ * instagram.com/reel/<code> link). It names the card and the Drive folder, so it
+ * must never be guessed from tracked_profiles: identity now comes from the
+ * uploaded reference photo, and borrowing an unrelated persona filed output
+ * under the wrong character.
+ */
+const UNKNOWN_SOURCE_LABEL = 'copy-paste'
 
 /**
  * Paste reel URLs → resolve (cache → download → profile list) → enqueue → auto-classify.
@@ -58,14 +55,12 @@ export async function POST(req: NextRequest) {
 
   const explicitUsername = String(body.username ?? '').trim().replace(/^@/, '')
   const fromUrls = parsed.map(p => p.ownerUsername).find(Boolean) ?? null
-  const defaultProfile = await resolveDefaultProfile(user.id)
-  const username = explicitUsername || fromUrls || defaultProfile || 'copy-paste'
+  const username = explicitUsername || fromUrls || UNKNOWN_SOURCE_LABEL
 
-  const sourceUsername = (
-    String(body.sourceUsername ?? '').trim().replace(/^@/, '')
-    || fromUrls
-    || username
-  )
+  // Null when nobody told us the real owner. Only a real handle can be listed on
+  // Instagram, so the fallback label must not leak into a scrape call.
+  const sourceUsername =
+    String(body.sourceUsername ?? '').trim().replace(/^@/, '') || fromUrls || null
   const referenceImageUrl = String(body.referenceImageUrl ?? '').trim() || null
 
   const resolved = new Map<string, EnqueueReelInput>()
@@ -149,9 +144,9 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // 3) Profile listing fallback (Discovery Scan path)
+  // 3) Profile listing fallback (Discovery Scan path) — needs a real owner handle
   missing = parsed.filter(p => !resolved.has(p.shortCode.toLowerCase()))
-  if (missing.length && (process.env.APIFY_API_KEY || rapidApiKey)) {
+  if (missing.length && sourceUsername && (process.env.APIFY_API_KEY || rapidApiKey)) {
     try {
       const { reels } = await listProfileReels(sourceUsername, LIST_LIMIT, rapidApiKey)
       const listedByCode = new Map(
@@ -217,7 +212,7 @@ export async function POST(req: NextRequest) {
            scraped_at = now()`,
         [
           user.id,
-          sourceUsername,
+          sourceUsername ?? username,   // column is NOT NULL — fall back to the label
           reel.id,
           reel.permalink,
           reel.videoUrl ?? null,
