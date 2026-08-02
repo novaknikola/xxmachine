@@ -136,6 +136,7 @@ interface JobRow {
     texts?: string[]
     carouselRows?: CarouselRow[]
     copyPasteRows?: CopyPasteRow[]
+    progressAt?: string
   } | null
   attempts: number
   max_attempts: number
@@ -1226,6 +1227,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       let doneCount = job.done_items
 
       for (let batchStart = doneCount; batchStart < itemIds.length; batchStart += COPY_PASTE_BATCH_SIZE) {
+        // Each item is minutes of paid model time — stop promptly if cancelled.
+        if (!(await myPodJobStillRunning(id))) {
+          console.log(`[queue/process] copy_paste_v2 ${id} cancelled at ${doneCount}/${itemIds.length}`)
+          return NextResponse.json({ ok: true, cancelled: true, done: doneCount })
+        }
+
         const batchEnd = Math.min(batchStart + COPY_PASTE_BATCH_SIZE, itemIds.length)
         const batchIds = itemIds.slice(batchStart, batchEnd)
 
@@ -1243,11 +1250,14 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         copyPasteRows.push(...results)
         doneCount = batchEnd
         const progress = Math.round((doneCount / itemIds.length) * 100)
+        // progressAt is the liveness heartbeat cron uses to tell a slow job from a
+        // dead one — a long bulk run must not be requeued while it is still working.
         await query(
           `UPDATE generation_queue
-              SET done_items=$1, progress=$2, output=jsonb_build_object('copyPasteRows', $3::jsonb)
+              SET done_items=$1, progress=$2,
+                  output=jsonb_build_object('copyPasteRows', $3::jsonb, 'progressAt', $5::text)
             WHERE id=$4`,
-          [doneCount, progress, JSON.stringify(copyPasteRows), id],
+          [doneCount, progress, JSON.stringify(copyPasteRows), id, new Date().toISOString()],
         )
       }
 

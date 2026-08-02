@@ -79,6 +79,16 @@ function stepIndex(status: string): number {
   return i >= 0 ? i : 0
 }
 
+/** Server is mid-work on these — the list auto-refreshes while any item is here. */
+const ACTIVE_STATUSES = new Set([
+  'pending_classify',
+  'analyzing',
+  'image_generating',
+  'image_done',
+  'video_generating',
+])
+const POLL_MS = 6_000
+
 const FILTERS = ['active', 'pending', 'review', 'done', 'failed'] as const
 type Filter = typeof FILTERS[number]
 
@@ -90,18 +100,47 @@ export function RunTab() {
   const [working, setWorking] = useState<string | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [detailId, setDetailId] = useState<string | null>(null)
+  /** Submitted to the queue but the worker has not flipped their status yet. */
+  const [queuedIds, setQueuedIds] = useState<Set<string>>(new Set())
 
   const load = useCallback(async () => {
     try {
       const res = await fetch(`/api/monitor/items?status=${filter}`)
       const data = await res.json()
-      setItems(data.items ?? [])
+      const next: ReplicateItem[] = data.items ?? []
+      setItems(next)
+      // Once the worker picks an item up (or finishes it), its own status is the
+      // truth — drop the optimistic "Queued" marker.
+      setQueuedIds(prev => {
+        if (!prev.size) return prev
+        const still = new Set(
+          [...prev].filter(id => {
+            const it = next.find(i => i.id === id)
+            return it != null
+              && !ACTIVE_STATUSES.has(it.replicate_status)
+              && it.replicate_status !== 'done'
+              && it.replicate_status !== 'failed'
+          }),
+        )
+        return still.size === prev.size ? prev : still
+      })
     } finally {
       setLoading(false)
     }
   }, [filter])
 
   useEffect(() => { load() }, [load])
+
+  const hasActive = items.some(i => ACTIVE_STATUSES.has(i.replicate_status)) || queuedIds.size > 0
+
+  // Generation runs server-side now, so the list has to pull its own updates.
+  useEffect(() => {
+    if (!hasActive) return
+    const t = setInterval(() => {
+      if (document.visibilityState === 'visible') load()
+    }, POLL_MS)
+    return () => clearInterval(t)
+  }, [hasActive, load])
 
   function reload() {
     setLoading(true)
@@ -115,46 +154,32 @@ export function RunTab() {
     return studio.estimateFor(avgDur)
   }, [items, studio])
 
-  async function runAction(id: string, action: 'classify' | 'replicate') {
-    if (action === 'replicate' && filter === 'pending') {
-      setFilter('active')
-    }
+  async function runClassify(id: string) {
     setWorking(id)
-    studio.setQueueBusy(1)
     try {
-      const res = await fetch(`/api/monitor/${action}/${id}`, { method: 'POST' })
+      const res = await fetch(`/api/monitor/classify/${id}`, { method: 'POST' })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
-      if (action === 'classify') {
-        toast.success('Analyzed')
-      } else {
-        toast.success('Replication complete')
-        const item = items.find(i => i.id === id)
-        studio.logEstimatedSpend({
-          itemId: id,
-          profile: item?.profile,
-          durationSec: item?.source_duration,
-        })
-      }
+      toast.success('Analyzed')
       load()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed')
     } finally {
       setWorking(null)
-      studio.setQueueBusy(0)
     }
   }
 
-  async function runBatch() {
-    const targets = items.filter(i =>
-      selected.has(i.id)
-      && i.replicate_status !== 'done'
-      && i.replicate_status !== 'skipped',
-    )
+  /**
+   * One item and a whole selection take the same path: a server-side queue job.
+   * A keyframe plus a Seedance render runs for minutes, which is far longer than
+   * a browser request (or nginx) will hold open.
+   */
+  async function submitReplicate(targets: ReplicateItem[]) {
     if (!targets.length) {
-      toast.message('Select items to batch replicate')
+      toast.message('Select items to replicate')
       return
     }
+    if (filter === 'pending') setFilter('active')
     try {
       const res = await fetch('/api/queue/submit', {
         method: 'POST',
@@ -166,18 +191,35 @@ export function RunTab() {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
+
+      setQueuedIds(prev => new Set([...prev, ...targets.map(i => i.id)]))
+      for (const item of targets) {
+        studio.logEstimatedSpend({
+          itemId: item.id,
+          profile: item.profile,
+          durationSec: item.source_duration,
+        })
+      }
       toast.success(
-        `${targets.length} sent to queue`,
+        targets.length === 1 ? 'Queued — generating…' : `${targets.length} queued — generating…`,
         {
-          description: 'Processing continues in the background — you can leave the page',
+          description: 'Runs in the background — you can leave the page',
           action: { label: 'Open Queue', onClick: () => { window.location.href = '/captions?tab=queue' } },
         },
       )
       setSelected(new Set())
-      reload()
+      load()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Queue submit failed')
     }
+  }
+
+  function runBatch() {
+    return submitReplicate(items.filter(i =>
+      selected.has(i.id)
+      && i.replicate_status !== 'done'
+      && i.replicate_status !== 'skipped',
+    ))
   }
 
   function toggleSelect(id: string) {
@@ -281,8 +323,8 @@ export function RunTab() {
             const est = studio.estimateFor(item.source_duration)
             const step = stepIndex(item.replicate_status)
             const summary = specSummary(item.copy_paste_spec)
-            const hasSpec = Boolean(item.copy_paste_spec)
-            const stillClassifying = item.replicate_status === 'pending_classify' && !hasSpec
+            const isActive = ACTIVE_STATUSES.has(item.replicate_status)
+            const isQueued = queuedIds.has(item.id)
             return (
               <Card key={item.id} className="bg-card/80">
                 <CardContent className="pt-1">
@@ -396,45 +438,38 @@ export function RunTab() {
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2 pt-1">
-                        {(item.replicate_status === 'failed' || stillClassifying) && (
+                        {item.replicate_status === 'failed' && (
                           <Button
                             variant="outline"
                             disabled={working === item.id}
-                            onClick={() => runAction(item.id, 'classify')}
+                            onClick={() => runClassify(item.id)}
                           >
                             {working === item.id
                               ? <Loader2 className="w-4 h-4 animate-spin" />
                               : <Sparkles className="w-4 h-4" />}
-                            Retry analyze
+                            Re-analyze
                           </Button>
                         )}
-                        {item.replicate_status !== 'done'
-                          && item.replicate_status !== 'skipped'
-                          && item.replicate_status !== 'analyzing'
-                          && item.replicate_status !== 'image_generating'
-                          && item.replicate_status !== 'video_generating'
-                          && !stillClassifying && (
-                          <Button
-                            disabled={working === item.id || !item.reference_image_url}
-                            onClick={() => runAction(item.id, 'replicate')}
-                          >
-                            {working === item.id
-                              ? <Loader2 className="w-4 h-4 animate-spin" />
-                              : <Play className="w-4 h-4" />}
-                            {item.replicate_status === 'needs_review' ? 'Replicate anyway' : 'Replicate'}
-                          </Button>
-                        )}
-                        {(item.replicate_status === 'analyzing'
-                          || item.replicate_status === 'image_generating'
-                          || item.replicate_status === 'video_generating'
-                          || stillClassifying) && (
+                        {isActive || isQueued ? (
                           <Button variant="outline" disabled>
                             <Loader2 className="w-4 h-4 animate-spin" />
-                            {item.replicate_status === 'video_generating'
-                              ? 'Generating video…'
-                              : item.replicate_status === 'image_generating'
-                                ? 'Generating keyframe…'
-                                : 'Analyzing…'}
+                            {isQueued && !isActive
+                              ? 'Queued…'
+                              : item.replicate_status === 'video_generating'
+                                ? 'Generating video…'
+                                : item.replicate_status === 'image_generating'
+                                  ? 'Generating keyframe…'
+                                  : item.replicate_status === 'image_done'
+                                    ? 'Keyframe ready…'
+                                    : 'Analyzing…'}
+                          </Button>
+                        ) : item.replicate_status !== 'done' && item.replicate_status !== 'skipped' && (
+                          <Button
+                            disabled={!item.reference_image_url}
+                            onClick={() => submitReplicate([item])}
+                          >
+                            <Play className="w-4 h-4" />
+                            {item.replicate_status === 'needs_review' ? 'Replicate anyway' : 'Replicate'}
                           </Button>
                         )}
                         <Button variant="ghost" onClick={() => setDetailId(item.id)}>

@@ -93,6 +93,15 @@ export async function replicateCopyPasteItem(itemId: string, userId: string) {
   if (!item.reference_image_url) throw new Error('No reference photo uploaded for this batch')
   if (!item.video_url) throw new Error('Item has no source video')
 
+  // Idempotent: a requeued/retried job must not pay for a second Seedance render.
+  if (item.kling_video_url) {
+    await query(
+      `UPDATE discovery_items SET replicate_status = 'done', replicate_error = NULL WHERE id = $1`,
+      [itemId],
+    )
+    return { ok: true, videoUrl: item.kling_video_url, model: item.video_model ?? 'cached' }
+  }
+
   try {
     let spec: CopyPasteSpec | null = item.copy_paste_spec
       ? normalizeCopyPasteSpec(item.copy_paste_spec)

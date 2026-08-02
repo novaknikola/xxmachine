@@ -79,15 +79,47 @@ export async function GET(req: NextRequest) {
   }
 
   // ── Generation queue processing ───────────────────────────────
-  // Reset stuck shared-pool jobs that have been processing for > 30 minutes
+  // Reset stuck shared-pool jobs that have been processing for > 30 minutes.
+  // copy_paste_v2 is excluded: one item is a Seedream keyframe plus a Seedance
+  // render, so a legitimate bulk run easily exceeds 30 minutes of wall clock.
+  // It is requeued on heartbeat staleness instead (see below).
   await query(
     `UPDATE generation_queue
         SET status = 'pending'
       WHERE status = 'processing'
         AND started_at < now() - interval '30 minutes'
         AND attempts < max_attempts
-        AND job_type NOT IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk')`,
+        AND job_type NOT IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk',
+                             'copy_paste_v2')`,
   ).catch(err => console.error('[cron/tick] reset stuck queue jobs:', err))
+
+  // copy_paste_v2 writes progressAt after every batch. No progress for 25 minutes
+  // means the worker died (deploy/crash), not that it is still grinding.
+  await query(
+    `UPDATE generation_queue
+        SET status = 'pending', started_at = NULL, error = NULL
+      WHERE status = 'processing'
+        AND job_type = 'copy_paste_v2'
+        AND attempts < max_attempts
+        AND COALESCE(
+              NULLIF(output->>'progressAt', '')::timestamptz,
+              started_at
+            ) < now() - interval '25 minutes'`,
+  ).catch(err => console.error('[cron/tick] requeue stale copy_paste_v2 jobs:', err))
+
+  await query(
+    `UPDATE generation_queue
+        SET status = 'failed',
+            error = COALESCE(error, 'Copy-Paste job stalled — no progress after max attempts'),
+            finished_at = now()
+      WHERE status = 'processing'
+        AND job_type = 'copy_paste_v2'
+        AND attempts >= max_attempts
+        AND COALESCE(
+              NULLIF(output->>'progressAt', '')::timestamptz,
+              started_at
+            ) < now() - interval '25 minutes'`,
+  ).catch(err => console.error('[cron/tick] fail exhausted copy_paste_v2 jobs:', err))
 
   // My Pod resume lease: worker heartbeats progressAt ~every 60s during Comfy/Python work.
   // If heartbeat stops (deploy/crash), requeue to pending and continue from done_items.

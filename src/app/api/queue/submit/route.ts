@@ -696,6 +696,26 @@ export async function POST(req: NextRequest) {
        RETURNING id`,
       [user.id, body.job_type, JSON.stringify(input), itemIds.length],
     )
+    // Start now instead of waiting up to a minute for cron. The worker is called
+    // on the loopback port on purpose: going through the public URL would put
+    // nginx's proxy_read_timeout between us and a job that runs for minutes.
+    const secret = process.env.CRON_SECRET
+    if (row && secret) {
+      const claimed = await one<{ id: string }>(
+        `UPDATE generation_queue
+            SET status = 'processing', started_at = now(), attempts = attempts + 1
+          WHERE id = $1 AND status = 'pending'
+          RETURNING id`,
+        [row.id],
+      ).catch(() => null)
+      if (claimed) {
+        const internalBase = `http://127.0.0.1:${process.env.PORT ?? 3000}`
+        fetch(`${internalBase}/api/queue/process/${row.id}`, {
+          method: 'POST',
+          headers: { 'x-cron-secret': secret },
+        }).catch(err => console.error('[queue/submit] fire copy_paste_v2 worker:', err))
+      }
+    }
     return NextResponse.json({ id: row!.id })
   }
 
