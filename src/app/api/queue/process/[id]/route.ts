@@ -68,7 +68,12 @@ interface CopyPasteRow {
 
 interface CopyPromptsRow {
   promptId: string
+  /** Prompt sent for the base slide — the Seedream edit itself. */
   prompt: string
+  /** Prompt behind each extra carousel slide, index-aligned with images[1..]. */
+  variantPrompts?: string[]
+  /** Reference images this item was generated from, in the order sent. */
+  referenceImageUrls?: string[]
   images: string[]
   status: 'done' | 'error'
   error?: string
@@ -1339,6 +1344,14 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       let doneCount = job.done_items
 
       for (let batchStart = doneCount; batchStart < items.length; batchStart += COPY_PROMPTS_BATCH_SIZE) {
+        // Every item is paid Seedream time, so Stop has to take effect between
+        // batches rather than only flipping the row's status while the worker
+        // keeps spending. Work already finished stays in output.
+        if (!(await myPodJobStillRunning(id))) {
+          console.log(`[queue/process] copy_prompts_generate ${id} cancelled at ${doneCount}/${items.length}`)
+          return NextResponse.json({ ok: true, cancelled: true, done: doneCount })
+        }
+
         const batchEnd = Math.min(batchStart + COPY_PROMPTS_BATCH_SIZE, items.length)
         const batchIndices = Array.from({ length: batchEnd - batchStart }, (_, i) => batchStart + i)
 
@@ -1377,6 +1390,11 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             }
 
             const images: string[] = [baseStoredUrl]
+            // Recorded alongside the images so the batch view can show which
+            // prompt produced which slide. Carousel variants come from a preset
+            // or from Grok, so without this the only prompt anyone could see
+            // was the base one — and the variants are what actually differ.
+            const usedVariantPrompts: string[] = []
             if (carousel?.enabled) {
               const variantPrompts = await resolveCarouselVariantPrompts({
                 presetId: carousel.presetId,
@@ -1403,9 +1421,15 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                   return uploadImageFromUrl(editUrls[0], `queue/${id}/${i + 1}_v${vi + 1}.jpg`)
                 }),
               )
-              for (const r of variantResults) {
-                if (r.status === 'fulfilled') images.push(r.value)
-              }
+              // Kept index-aligned with the images actually produced: a failed
+              // variant contributes neither an image nor a prompt, so slide N
+              // in the grid always maps to prompt N here.
+              variantResults.forEach((r, vi) => {
+                if (r.status === 'fulfilled') {
+                  images.push(r.value)
+                  usedVariantPrompts.push(variantPrompts[vi])
+                }
+              })
             }
 
             try {
@@ -1431,7 +1455,14 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               console.error(`[queue/process] copy_prompts_generate ${id} item ${i} drive archive failed:`, err)
             }
 
-            return { promptId: item.promptId, prompt: item.prompt, images, status: 'done' }
+            return {
+              promptId: item.promptId,
+              prompt: item.prompt,
+              variantPrompts: usedVariantPrompts,
+              referenceImageUrls: itemRefUrls,
+              images,
+              status: 'done',
+            }
           } catch (err) {
             const msg = err instanceof Error ? err.message : 'failed'
             console.error(`[queue/process] copy_prompts_generate ${id} item ${i} failed:`, msg)
