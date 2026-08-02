@@ -352,6 +352,10 @@ function GenerateMode({ textStyle, fontSizePx, defaultPosition }: {
             batch: 1,
             loraUrl: character.loraUrl || null,
             loraScale: character.loraScale || 0.8,
+            // Without these the Drive archive has no character to file under
+            // and everything lands in _unsorted/.
+            characterId,
+            characterName: character.name,
           }),
         })
         const data = await res.json()
