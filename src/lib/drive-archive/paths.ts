@@ -92,8 +92,13 @@ export function buildArchiveFilename(opts: {
       : opts.sourceType === 'discovery_item' ? 'disc'
         : 'job'
   const inSeries = !!opts.seriesId && (opts.seriesTotal ?? 0) > 1
+  // Hash the whole seriesId rather than slicing its first 8 chars: callers
+  // like bulk_carousel build seriesId as `${jobId}:${itemIndex}`, so a plain
+  // slice would grab only the (shared, job-wide) prefix and every item in
+  // the same job would collide onto one idShort -- their slides would then
+  // interleave by position instead of grouping per carousel.
   const idShort = inSeries
-    ? sanitizeDriveKey(opts.seriesId).replace(/^_/, '').slice(0, 8)
+    ? hashUrl(opts.seriesId!).slice(0, 8)
     : opts.sourceId.replace(/-/g, '').slice(0, 8)
   const hash8 = hashUrl(opts.url).slice(0, 8)
   const ext = extFromUrl(opts.url, opts.mimeType)
