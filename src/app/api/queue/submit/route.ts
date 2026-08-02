@@ -19,6 +19,8 @@ export interface BulkImageJobItem {
 
 export interface CopyPasteJobInput {
   itemIds: string[]
+  /** Pin the clip's end with a matching second keyframe. Default 'auto'. */
+  endFrame?: 'auto' | 'always' | 'off'
 }
 
 export interface BulkCarouselJobInput {
@@ -681,7 +683,7 @@ export async function POST(req: NextRequest) {
   }
 
   if (body.job_type === 'copy_paste_v2') {
-    const { itemIds } = body.input ?? {}
+    const { itemIds, endFrame } = body.input ?? {}
     if (!Array.isArray(itemIds) || itemIds.length === 0) {
       return NextResponse.json({ error: 'itemIds required' }, { status: 400 })
     }
@@ -689,7 +691,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Max 100 items per submission' }, { status: 400 })
     }
 
-    const input: CopyPasteJobInput = { itemIds }
+    const input: CopyPasteJobInput = {
+      itemIds,
+      endFrame: endFrame === 'always' || endFrame === 'off' ? endFrame : 'auto',
+    }
     const row = await one<{ id: string }>(
       `INSERT INTO generation_queue (user_id, job_type, input, total_items)
        VALUES ($1, $2, $3, $4)

@@ -10,18 +10,10 @@ import { DollarSign, Trash2 } from 'lucide-react'
 export function CostsTab() {
   const studio = useStudioSettings()
 
-  const totals = useMemo(() => {
-    const all = studio.spendLog
-    let week = 0
-    const weekStart = Date.now() - 7 * 24 * 60 * 60 * 1000
-    for (const e of all) {
-      if (new Date(e.at).getTime() >= weekStart) week += e.totalUsd
-    }
-    return {
-      all: all.reduce((s, e) => s + e.totalUsd, 0),
-      week,
-    }
-  }, [studio.spendLog])
+  const allTimeUsd = useMemo(
+    () => studio.spendLog.reduce((s, e) => s + e.totalUsd, 0),
+    [studio.spendLog],
+  )
 
   return (
     <div className="space-y-6 max-w-5xl">
@@ -38,13 +30,13 @@ export function CostsTab() {
         <Card>
           <CardHeader className="pb-2">
             <CardDescription>Last 7 days</CardDescription>
-            <CardTitle className="text-2xl tabular-nums">{studio.formatUsd(totals.week)}</CardTitle>
+            <CardTitle className="text-2xl tabular-nums">{studio.formatUsd(studio.weekSpendUsd)}</CardTitle>
           </CardHeader>
         </Card>
         <Card>
           <CardHeader className="pb-2">
             <CardDescription>All logged runs</CardDescription>
-            <CardTitle className="text-2xl tabular-nums">{studio.formatUsd(totals.all)}</CardTitle>
+            <CardTitle className="text-2xl tabular-nums">{studio.formatUsd(allTimeUsd)}</CardTitle>
           </CardHeader>
         </Card>
       </div>

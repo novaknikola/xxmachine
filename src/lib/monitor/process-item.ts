@@ -3,6 +3,7 @@ import {
   extractCopyPasteSpec,
   normalizeCopyPasteSpec,
   renderCopyPastePrompt,
+  renderEndKeyframeEditPrompt,
   renderKeyframeEditPrompt,
   type CopyPasteSpec,
 } from './copy-paste-spec'
@@ -10,7 +11,7 @@ import { probeSourceVideo, type SourceAspectRatio } from './analyze'
 import { generateCopyPasteKeyframe, generateSeedanceVideo } from './replicate'
 import { notifyReplicationDone, notifyReplicationFailed } from './notify'
 import { archiveDiscoveryItem } from '@/lib/drive-archive/from-discovery-item'
-import type { DiscoveryItemRow, TrackedProfileRow } from './types'
+import type { DiscoveryItemRow, EndFrameMode, TrackedProfileRow } from './types'
 
 /** Frames sampled per clip — denser sampling catches background gag beats. */
 const PROBE_FRAME_COUNT = 8
@@ -83,7 +84,12 @@ export async function classifyDiscoveryItem(itemId: string, userId: string) {
  * Seedream v5 Pro Edit keyframe, then that keyframe + rendered prompt into
  * Seedance 2.0 i2v. Runs analysis first if it hasn't happened yet.
  */
-export async function replicateCopyPasteItem(itemId: string, userId: string) {
+export async function replicateCopyPasteItem(
+  itemId: string,
+  userId: string,
+  opts?: { endFrame?: EndFrameMode },
+) {
+  const endFrameMode: EndFrameMode = opts?.endFrame ?? 'auto'
   const item = await one<DiscoveryItemRow>(
     `SELECT * FROM discovery_items WHERE id = $1 AND user_id = $2`,
     [itemId, userId],
@@ -109,6 +115,8 @@ export async function replicateCopyPasteItem(itemId: string, userId: string) {
     let durationSec = item.source_duration
     let aspectRatio: SourceAspectRatio = item.source_aspect_ratio ?? 'other'
     let firstFrameUrl = item.source_first_frame_url
+    let lastFrameUrl = item.source_last_frame_url
+    let cutCount = item.source_cut_count
     // A user edit to rendered_prompt in Details always wins over a freshly rendered one.
     let renderedPrompt = item.rendered_prompt
 
@@ -122,6 +130,8 @@ export async function replicateCopyPasteItem(itemId: string, userId: string) {
       durationSec = probe.duration
       aspectRatio = probe.aspectRatio
       firstFrameUrl = probe.firstFrameUrl ?? firstFrameUrl
+      lastFrameUrl = probe.lastFrameUrl ?? lastFrameUrl
+      cutCount = probe.cutCount
 
       await query(
         `UPDATE discovery_items
@@ -133,7 +143,8 @@ export async function replicateCopyPasteItem(itemId: string, userId: string) {
                 source_aspect_ratio = $6,
                 source_width = $7,
                 source_height = $8,
-                source_first_frame_url = coalesce($9, source_first_frame_url)
+                source_first_frame_url = coalesce($9, source_first_frame_url),
+                source_last_frame_url = coalesce($10, source_last_frame_url)
           WHERE id = $1`,
         [
           itemId,
@@ -145,6 +156,7 @@ export async function replicateCopyPasteItem(itemId: string, userId: string) {
           probe.width,
           probe.height,
           probe.firstFrameUrl,
+          probe.lastFrameUrl,
         ],
       )
     }
@@ -167,20 +179,48 @@ export async function replicateCopyPasteItem(itemId: string, userId: string) {
       )
     }
 
+    // 'auto' skips sources that cut: their last frame is from another shot, so
+    // pinning it as the end makes Seedance morph between two unrelated framings.
+    const wantEndFrame =
+      endFrameMode === 'always' || (endFrameMode === 'auto' && cutCount === 0)
+    let generatedEndImageUrl = item.generated_end_image_url
+    if (wantEndFrame && !generatedEndImageUrl && lastFrameUrl) {
+      await query(`UPDATE discovery_items SET replicate_status = 'image_generating' WHERE id = $1`, [itemId])
+      const endKeyframe = await generateCopyPasteKeyframe({
+        sourceFrameUrl: lastFrameUrl,
+        referenceImageUrl: item.reference_image_url,
+        prompt: renderEndKeyframeEditPrompt(spec),
+        aspectRatio,
+        itemId,
+        matchImageUrl: generatedImageUrl,
+        slot: 'keyframe-end',
+      })
+      generatedEndImageUrl = endKeyframe.imageUrl
+      await query(
+        `UPDATE discovery_items SET generated_end_image_url = $2, replicate_status = 'image_done' WHERE id = $1`,
+        [itemId, generatedEndImageUrl],
+      )
+    }
+    const lastImageUrl = wantEndFrame ? generatedEndImageUrl : null
+
     await query(`UPDATE discovery_items SET replicate_status = 'video_generating' WHERE id = $1`, [itemId])
     const result = await generateSeedanceVideo({
       imageUrl: generatedImageUrl,
+      lastImageUrl,
       prompt: renderedPrompt,
       durationSec,
       aspectRatio,
     })
+    // Record the variant on the row so the A/B comparison lives in the data,
+    // not in whichever run someone happens to remember.
+    const videoModel = lastImageUrl ? `${result.model}+end_frame` : result.model
 
     await query(
       `UPDATE discovery_items
           SET kling_video_url = $2, video_model = $3,
               replicate_status = 'done', replicate_error = NULL
         WHERE id = $1`,
-      [itemId, result.videoUrl, result.model],
+      [itemId, result.videoUrl, videoModel],
     )
     await archiveDiscoveryItem(itemId, { characterName: item.profile })
       .catch(err => console.error('[monitor/replicate] drive archive failed:', err))
@@ -192,7 +232,7 @@ export async function replicateCopyPasteItem(itemId: string, userId: string) {
       videoUrl: result.videoUrl,
     }).catch(() => {})
 
-    return { ok: true, videoUrl: result.videoUrl, model: result.model }
+    return { ok: true, videoUrl: result.videoUrl, model: videoModel, endFrame: Boolean(lastImageUrl) }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     await query(

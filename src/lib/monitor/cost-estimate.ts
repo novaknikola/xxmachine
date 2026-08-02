@@ -9,7 +9,12 @@
  */
 
 const SEEDANCE_PER_SEC_USD = 0.24
-const SEEDREAM_KEYFRAME_USD = 0.048
+const SEEDREAM_BASE_USD = 0.045
+const SEEDREAM_EXTRA_IMAGE_USD = 0.003
+/** Start keyframe: source frame + reference photo. */
+const SEEDREAM_KEYFRAME_USD = SEEDREAM_BASE_USD + SEEDREAM_EXTRA_IMAGE_USD
+/** End keyframe also carries the start keyframe as a third match reference. */
+const SEEDREAM_END_KEYFRAME_USD = SEEDREAM_BASE_USD + 2 * SEEDREAM_EXTRA_IMAGE_USD
 
 export interface CostBreakdown {
   keyframeUsd: number
@@ -23,16 +28,21 @@ function seedanceSeconds(durationSec?: number | null): number {
   return Math.min(15, Math.max(4, Math.round(durationSec)))
 }
 
-export function estimateCopyPasteCost(durationSec?: number | null): CostBreakdown {
+export function estimateCopyPasteCost(
+  durationSec?: number | null,
+  opts?: { endFrame?: boolean },
+): CostBreakdown {
   const billedSec = seedanceSeconds(durationSec)
-  const keyframeUsd = SEEDREAM_KEYFRAME_USD
+  const keyframeUsd = roundUsd(
+    SEEDREAM_KEYFRAME_USD + (opts?.endFrame ? SEEDREAM_END_KEYFRAME_USD : 0),
+  )
   const videoUsd = roundUsd(SEEDANCE_PER_SEC_USD * billedSec)
 
   return {
     keyframeUsd,
     videoUsd,
     totalUsd: roundUsd(keyframeUsd + videoUsd),
-    note: `Seedream v5 Pro Edit keyframe: $${keyframeUsd.toFixed(3)}. WaveSpeed Seedance 2.0 (720p): ≈$${SEEDANCE_PER_SEC_USD.toFixed(2)}/s × ${billedSec}s billed. Grok / HF Whisper not included.`,
+    note: `Seedream v5 Pro Edit ${opts?.endFrame ? 'start + end keyframes' : 'keyframe'}: $${keyframeUsd.toFixed(3)}. WaveSpeed Seedance 2.0 (720p): ≈$${SEEDANCE_PER_SEC_USD.toFixed(2)}/s × ${billedSec}s billed. Grok / HF Whisper not included.`,
   }
 }
 
@@ -101,5 +111,12 @@ export function spendTodayUsd(): number {
   start.setHours(0, 0, 0, 0)
   return listSpend()
     .filter(e => new Date(e.at) >= start)
+    .reduce((sum, e) => sum + e.totalUsd, 0)
+}
+
+export function spendWeekUsd(): number {
+  const start = Date.now() - 7 * 24 * 60 * 60 * 1000
+  return listSpend()
+    .filter(e => new Date(e.at).getTime() >= start)
     .reduce((sum, e) => sum + e.totalUsd, 0)
 }

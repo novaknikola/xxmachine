@@ -58,14 +58,21 @@ export interface SeedanceVideoResult {
 }
 
 export interface KeyframeInput {
-  /** Frame 0 of the source reel (scene/pose/background reference). */
+  /** Frame of the source reel used as scene/pose/background reference. */
   sourceFrameUrl: string
   /** User's uploaded photo (identity reference). */
   referenceImageUrl: string
-  /** renderKeyframeEditPrompt(spec) output. */
+  /** renderKeyframeEditPrompt / renderEndKeyframeEditPrompt output. */
   prompt: string
   aspectRatio: SourceAspectRatio
   itemId: string
+  /**
+   * Start keyframe, passed as a third reference when rendering the end frame so
+   * both ends agree on wardrobe/hair/skin. Omitted for the start frame itself.
+   */
+  matchImageUrl?: string | null
+  /** Storage basename — keeps the two keyframes from overwriting each other. */
+  slot?: 'keyframe' | 'keyframe-end'
 }
 
 export interface KeyframeResult {
@@ -74,13 +81,15 @@ export interface KeyframeResult {
   model: string
 }
 
-/** Composites the reference photo's identity onto the source frame via Seedream v5 Pro Edit. */
+/** Composites the reference photo's identity onto a source frame via Seedream v5 Pro Edit. */
 export async function generateCopyPasteKeyframe(input: KeyframeInput): Promise<KeyframeResult> {
   const apiKey = wavespeedKey()
   const size = input.aspectRatio === 'other' ? '9:16' : input.aspectRatio
+  const imageUrls = [input.sourceFrameUrl, input.referenceImageUrl]
+  if (input.matchImageUrl) imageUrls.push(input.matchImageUrl)
 
   const outputs = await editImage({
-    imageUrls: [input.sourceFrameUrl, input.referenceImageUrl],
+    imageUrls,
     prompt: input.prompt,
     size,
     resolution: '1k',
@@ -89,7 +98,10 @@ export async function generateCopyPasteKeyframe(input: KeyframeInput): Promise<K
   })
   if (!outputs.length) throw new Error('Seedream Edit: no keyframe output')
 
-  const imageUrl = await uploadImageFromUrl(outputs[0], `monitor/${input.itemId}/keyframe.jpg`)
+  const imageUrl = await uploadImageFromUrl(
+    outputs[0],
+    `monitor/${input.itemId}/${input.slot ?? 'keyframe'}.jpg`,
+  )
   return { imageUrl, model: SEEDREAM_KEYFRAME_MODEL }
 }
 

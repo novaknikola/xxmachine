@@ -389,3 +389,24 @@ export function renderKeyframeEditPrompt(spec: CopyPasteSpec): string {
   ].filter(Boolean)
   return bits.join(' ')
 }
+
+/**
+ * End keyframe for Seedance's `last_image`. Deliberately chained: image 3 is the
+ * already-rendered start keyframe, and appearance is pinned to it. Two
+ * independent edits would drift on wardrobe/hair/skin detail, and Seedance would
+ * then have to morph between two slightly different people across the clip —
+ * worse than sending no end frame at all.
+ */
+export function renderEndKeyframeEditPrompt(spec: CopyPasteSpec): string {
+  const locked = spec.people[0]
+  const bits = [
+    'Image 1 is the scene reference, image 2 is the identity reference, image 3 is the matching start frame of the same shot.',
+    'Keep the exact pose, camera framing, and background from image 1 unchanged.',
+    "Replace the main subject's face and body identity with the person from image 2.",
+    'The person must look IDENTICAL to the person in image 3 — same face, same hair colour and styling, same wardrobe, same skin tone and lighting. Only the pose and framing differ.',
+    locked?.wardrobe && `Wardrobe: ${locked.wardrobe}.`,
+    'Photorealistic, natural skin texture, no beauty filter, no AI skin smoothing.',
+    'Do not add any other people. Do not change the composition, angle, or background.',
+  ].filter(Boolean)
+  return bits.join(' ')
+}

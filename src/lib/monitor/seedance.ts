@@ -6,6 +6,12 @@ export const SEEDANCE_MODEL = 'bytedance/seedance-2.0/image-to-video'
 export interface SeedanceCallInput {
   /** The Seedream Edit keyframe (identity composited onto the source frame) — becomes Seedance's `image` (start frame). */
   imageUrl: string
+  /**
+   * Optional matching end keyframe → Seedance's `last_image`. Must itself be a
+   * Seedream Edit output; a raw source frame here would pull the original
+   * person's face back into the clip.
+   */
+  lastImageUrl?: string | null
   /** renderCopyPastePrompt(spec) output. */
   prompt: string
   durationSec: number | null
@@ -18,7 +24,7 @@ function seedanceDuration(durationSec: number | null): number {
 }
 
 export function buildSeedancePayload(input: SeedanceCallInput): Record<string, unknown> {
-  return {
+  const payload: Record<string, unknown> = {
     image: input.imageUrl,
     prompt: input.prompt,
     aspect_ratio: input.aspectRatio === 'other' ? '9:16' : input.aspectRatio,
@@ -27,4 +33,6 @@ export function buildSeedancePayload(input: SeedanceCallInput): Record<string, u
     generate_audio: true,
     enable_web_search: false,
   }
+  if (input.lastImageUrl) payload.last_image = input.lastImageUrl
+  return payload
 }

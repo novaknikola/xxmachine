@@ -32,7 +32,9 @@ interface ReplicateItem {
   replicate_error: string | null
   reference_image_url: string | null
   source_first_frame_url: string | null
+  source_last_frame_url: string | null
   generated_image_url: string | null
+  generated_end_image_url: string | null
   copy_paste_spec: CopyPasteSpec | null
   rendered_prompt: string | null
   kling_video_url: string | null
@@ -148,10 +150,12 @@ export function RunTab() {
   }
 
   const avgEstimate = useMemo(() => {
-    if (!items.length) return studio.estimateFor(7)
+    if (!items.length) return studio.estimateFor(7, 0)
     const avgDur =
       items.reduce((s, i) => s + (i.source_duration ?? 7), 0) / items.length
-    return studio.estimateFor(avgDur)
+    // Quote the common case rather than a blend: most sources here are single-shot.
+    const anyCut = items.some(i => (i.source_cut_count ?? 0) > 0)
+    return studio.estimateFor(avgDur, anyCut ? 1 : 0)
   }, [items, studio])
 
   async function runClassify(id: string) {
@@ -186,7 +190,7 @@ export function RunTab() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           job_type: 'copy_paste_v2',
-          input: { itemIds: targets.map(i => i.id) },
+          input: { itemIds: targets.map(i => i.id), endFrame: studio.endFrame },
         }),
       })
       const data = await res.json()
@@ -198,6 +202,7 @@ export function RunTab() {
           itemId: item.id,
           profile: item.profile,
           durationSec: item.source_duration,
+          cutCount: item.source_cut_count,
         })
       }
       toast.success(
@@ -266,6 +271,25 @@ export function RunTab() {
             </Select>
           </Field>
 
+          <Field className="w-[210px]">
+            <FieldLabel>End frame</FieldLabel>
+            <Select
+              value={studio.endFrame}
+              onValueChange={v => {
+                if (v === 'auto' || v === 'always' || v === 'off') studio.setEndFrame(v)
+              }}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">Auto (single-shot only)</SelectItem>
+                <SelectItem value="always">Always</SelectItem>
+                <SelectItem value="off">Off</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+
           <div className="ml-auto flex flex-col items-end gap-1 pb-0.5">
             <span className="text-xs text-muted-foreground">Est. / video (keyframe + Seedance)</span>
             <span className="text-lg font-semibold tabular-nums">
@@ -320,7 +344,7 @@ export function RunTab() {
       ) : (
         <div className="grid gap-4">
           {items.map(item => {
-            const est = studio.estimateFor(item.source_duration)
+            const est = studio.estimateFor(item.source_duration, item.source_cut_count)
             const step = stepIndex(item.replicate_status)
             const summary = specSummary(item.copy_paste_spec)
             const isActive = ACTIVE_STATUSES.has(item.replicate_status)
@@ -506,7 +530,7 @@ export function RunTab() {
         item={detailItem}
         open={!!detailItem}
         onOpenChange={open => { if (!open) setDetailId(null) }}
-        estimate={detailItem ? studio.estimateFor(detailItem.source_duration) : null}
+        estimate={detailItem ? studio.estimateFor(detailItem.source_duration, detailItem.source_cut_count) : null}
         formatUsd={studio.formatUsd}
         onPromptSaved={update => {
           setItems(prev => prev.map(i => (

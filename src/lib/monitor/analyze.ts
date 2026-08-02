@@ -46,6 +46,8 @@ export interface SourceProbe {
   aspectRatio: SourceAspectRatio
   /** Frame 0 (always ≤0.4s in) re-hosted publicly — the Seedream Edit keyframe input. Best-effort. */
   firstFrameUrl: string | null
+  /** Last sampled frame (~0.25s before the end) — input for the optional end keyframe. Best-effort. */
+  lastFrameUrl: string | null
 }
 
 async function downloadVideo(videoUrl: string, path: string): Promise<void> {
@@ -201,16 +203,20 @@ export async function probeSourceVideo(
       return null
     }
 
-    let firstFrameUrl: string | null = null
-    try {
-      firstFrameUrl = await uploadBuffer(
-        Buffer.from(frames[0], 'base64'),
-        `monitor/${id}/first-frame.jpg`,
-        'image/jpeg',
-      )
-    } catch (err) {
-      console.warn('[monitor/probe] first-frame upload failed:', err instanceof Error ? err.message : err)
+    // Both endpoints are re-hosted so Seedream can fetch them. Best-effort: a
+    // failed upload only costs the corresponding keyframe, not the whole probe.
+    const uploadFrame = async (b64: string, name: string): Promise<string | null> => {
+      try {
+        return await uploadBuffer(Buffer.from(b64, 'base64'), `monitor/${id}/${name}.jpg`, 'image/jpeg')
+      } catch (err) {
+        console.warn(`[monitor/probe] ${name} upload failed:`, err instanceof Error ? err.message : err)
+        return null
+      }
     }
+    const firstFrameUrl = await uploadFrame(frames[0], 'first-frame')
+    const lastFrameUrl = frames.length > 1
+      ? await uploadFrame(frames[frames.length - 1], 'last-frame')
+      : null
 
     return {
       frames,
@@ -222,6 +228,7 @@ export async function probeSourceVideo(
       height,
       aspectRatio: bucketAspectRatio(width, height),
       firstFrameUrl,
+      lastFrameUrl,
     }
   } catch (err) {
     console.warn('[monitor/probe] failed:', err instanceof Error ? err.message : err)

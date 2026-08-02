@@ -1220,7 +1220,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
     // ── copy_paste_v2 ─────────────────────────────────────────────────────────
     if (job.job_type === 'copy_paste_v2') {
-      const { itemIds } = job.input as unknown as CopyPasteJobInput
+      const { itemIds, endFrame } = job.input as unknown as CopyPasteJobInput
       if (!itemIds?.length) throw new Error('No items in job input')
 
       const copyPasteRows: CopyPasteRow[] = job.output?.copyPasteRows ? [...job.output.copyPasteRows] : []
@@ -1238,7 +1238,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
         const results = await Promise.all(batchIds.map(async (itemId): Promise<CopyPasteRow> => {
           try {
-            const result = await replicateCopyPasteItem(itemId, job.user_id)
+            const result = await replicateCopyPasteItem(itemId, job.user_id, { endFrame })
             return { itemId, status: 'done', videoUrl: result.videoUrl }
           } catch (err) {
             const msg = err instanceof Error ? err.message : 'failed'

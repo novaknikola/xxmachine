@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { toast } from 'sonner'
 import {
   Sheet,
@@ -26,7 +26,10 @@ interface ItemLike {
   source_aspect_ratio: string | null
   reference_image_url: string | null
   source_first_frame_url: string | null
+  source_last_frame_url: string | null
   generated_image_url: string | null
+  generated_end_image_url: string | null
+  video_model: string | null
   copy_paste_spec: CopyPasteSpec | null
   rendered_prompt: string | null
   kling_video_url: string | null
@@ -58,12 +61,16 @@ export function JobDetailSheet({
   onPromptSaved?: (update: { id: string; rendered_prompt: string | null }) => void
 }) {
   const [renderedPrompt, setRenderedPrompt] = useState('')
+  const [loadedItemId, setLoadedItemId] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
-  useEffect(() => {
-    if (!item) return
+  // Reload the textarea only when a different item is opened. Syncing on every
+  // rendered_prompt change would wipe what the user is typing, because the list
+  // behind this sheet re-fetches every few seconds while a job is running.
+  if (item && item.id !== loadedItemId) {
+    setLoadedItemId(item.id)
     setRenderedPrompt(item.rendered_prompt ?? '')
-  }, [item?.id, item?.rendered_prompt])
+  }
 
   if (!item) return null
 
@@ -119,13 +126,16 @@ export function JobDetailSheet({
                   : `${item.source_cut_count} cut${item.source_cut_count === 1 ? '' : 's'}`}
               </Badge>
             )}
+            {item.video_model?.includes('end_frame') && (
+              <Badge variant="outline" className="border-primary/50 text-primary">end frame</Badge>
+            )}
           </div>
 
           <section className="space-y-2">
             <h3 className="font-medium">Cost</h3>
             {estimate && (
               <div className="rounded-lg border border-border/60 bg-secondary/30 p-4 space-y-1.5">
-                <div className="flex justify-between"><span>Keyframe (Seedream Edit)</span><span className="tabular-nums">{formatUsd(estimate.keyframeUsd)}</span></div>
+                <div className="flex justify-between"><span>Keyframe(s) (Seedream Edit)</span><span className="tabular-nums">{formatUsd(estimate.keyframeUsd)}</span></div>
                 <div className="flex justify-between"><span>Video (Seedance 2.0)</span><span className="tabular-nums">{formatUsd(estimate.videoUsd)}</span></div>
                 <div className="flex justify-between font-medium pt-1 border-t border-border/50">
                   <span>Est. total</span>
@@ -170,10 +180,27 @@ export function JobDetailSheet({
                       alt=""
                       className="w-20 aspect-[9/16] object-cover rounded-lg border border-primary/50"
                     />
-                    <p className="text-xs text-primary text-center">Keyframe (result)</p>
+                    <p className="text-xs text-primary text-center">Start keyframe</p>
+                  </div>
+                )}
+                {item.generated_end_image_url && (
+                  <div className="space-y-1">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={item.generated_end_image_url}
+                      alt=""
+                      className="w-20 aspect-[9/16] object-cover rounded-lg border border-primary/50"
+                    />
+                    <p className="text-xs text-primary text-center">End keyframe</p>
                   </div>
                 )}
               </div>
+              {item.generated_end_image_url && (
+                <p className="text-xs text-muted-foreground">
+                  Both ends pinned — Seedance interpolates between them. Compare the two
+                  keyframes: if wardrobe or hair differ, the clip will drift.
+                </p>
+              )}
             </section>
           )}
 
