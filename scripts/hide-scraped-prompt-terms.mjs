@@ -27,9 +27,13 @@ import pg from 'pg'
 import { readFileSync, writeFileSync } from 'node:fs'
 
 const TERMS = [
+  // first sweep
   'futuristic', 'paint', 'art', 'cyber', 'exposure', 'painterly', 'men', 'man',
   'cosmic', 'mural', 'alphabet', 'fragments', 'monochrome', 'product', 'cluster',
   '3D', 'handwritten', 'text overlay', 'Commercial',
+  // second sweep — multi-word entries also match their hyphenated spelling
+  'multi panel', 'movie style', 'india', 'indian', 'post apocalyptic',
+  'golden hour', 'mother of dragons', 'occult', 'brutalist', 'property',
 ]
 
 const env = readFileSync('.env.local', 'utf8')
@@ -41,8 +45,20 @@ for (const line of env.split('\n')) {
   process.env[t.slice(0, i).trim()] ??= t.slice(i + 1).trim().replace(/^["']|["']$/g, '')
 }
 
-/** Postgres ARE: word-boundary match, and for man/men not preceded by a hyphen. */
-const pattern = t => (t === 'man' || t === 'men' ? '(?<!-)\\y' + t + '\\y' : '\\y' + t + '\\y')
+/**
+ * Postgres ARE word-boundary match.
+ *
+ * - Spaces in a term match a space or a hyphen, so "multi panel" also catches
+ *   "multi-panel" and "post apocalyptic" catches "post-apocalyptic" — these are
+ *   spelled both ways across the corpus and nobody should have to list each.
+ * - man/men additionally exclude a preceding hyphen, or "Spider-Man" reads as
+ *   a man.
+ */
+const pattern = t => {
+  const body = t.trim().split(/\s+/).join('[- ]')
+  if (t === 'man' || t === 'men') return '(?<!-)\\y' + body + '\\y'
+  return '\\y' + body + '\\y'
+}
 
 const apply = process.argv.includes('--apply')
 const restoreIdx = process.argv.indexOf('--restore')
