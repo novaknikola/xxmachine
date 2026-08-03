@@ -9,6 +9,7 @@ import {
 } from '@/components/ui/select'
 import { Card, CardContent } from '@/components/ui/card'
 import { Field, FieldLabel } from '@/components/ui/field'
+import { Pagination } from '@/components/ui/pagination'
 import {
   Loader2, Play, RefreshCw, CheckCircle2, XCircle, ExternalLink,
   ImageIcon, Video, Sparkles, Eye, SquareStack, Copy,
@@ -51,6 +52,9 @@ function specSummary(spec: CopyPasteSpec | null): string | null {
   ].filter(Boolean)
   return bits.length ? bits.join(' · ') : null
 }
+
+/** Rows per page in the run list — enough to scan, few enough to render fast. */
+const ITEMS_PER_PAGE = 12
 
 const STATUS_LABEL: Record<string, string> = {
   pending_classify: 'Classifying…',
@@ -104,6 +108,7 @@ export function RunTab() {
   const [detailId, setDetailId] = useState<string | null>(null)
   /** Submitted to the queue but the worker has not flipped their status yet. */
   const [queuedIds, setQueuedIds] = useState<Set<string>>(new Set())
+  const [page, setPage] = useState(1)
 
   const load = useCallback(async () => {
     try {
@@ -132,6 +137,14 @@ export function RunTab() {
   }, [filter])
 
   useEffect(() => { load() }, [load])
+
+  // Back to page 1 when the tab changes, and whenever the current page no
+  // longer exists — items finishing move them between tabs, so a list can
+  // shrink under you while the poller is running.
+  const pageCount = Math.max(1, Math.ceil(items.length / ITEMS_PER_PAGE))
+  const currentPage = Math.min(page, pageCount)
+  useEffect(() => { setPage(1) }, [filter])
+  const pageItems = items.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE)
 
   const hasActive = items.some(i => ACTIVE_STATUSES.has(i.replicate_status)) || queuedIds.size > 0
 
@@ -406,7 +419,7 @@ export function RunTab() {
         </Card>
       ) : (
         <div className="grid gap-4">
-          {items.map(item => {
+          {pageItems.map(item => {
             const est = studio.estimateFor(item.source_duration, item.source_cut_count)
             const step = stepIndex(item.replicate_status)
             const summary = specSummary(item.copy_paste_spec)
@@ -600,6 +613,13 @@ export function RunTab() {
               </Card>
             )
           })}
+          <Pagination
+            page={currentPage}
+            pageSize={ITEMS_PER_PAGE}
+            total={items.length}
+            onPageChange={setPage}
+            className="pt-1"
+          />
         </div>
       )}
 
