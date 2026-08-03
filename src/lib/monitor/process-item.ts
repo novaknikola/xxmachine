@@ -248,10 +248,14 @@ export async function replicateCopyPasteItem(
     if (!generatedImageUrl) {
       if (!firstFrameUrl) throw new Error('No source frame captured — re-run Classify')
       await query(`UPDATE discovery_items SET replicate_status = 'image_generating' WHERE id = $1`, [itemId])
+      const keyframePrompt = renderKeyframeEditPrompt(spec)
+      // Written before the call, not after: if the render fails or returns
+      // something wrong, the prompt that caused it is the thing worth having.
+      await query(`UPDATE discovery_items SET keyframe_prompt = $2 WHERE id = $1`, [itemId, keyframePrompt])
       const keyframe = await generateCopyPasteKeyframe({
         sourceFrameUrl: firstFrameUrl,
         referenceImageUrl,
-        prompt: renderKeyframeEditPrompt(spec),
+        prompt: keyframePrompt,
         aspectRatio,
         itemId,
       })
@@ -269,10 +273,12 @@ export async function replicateCopyPasteItem(
     let generatedEndImageUrl = item.generated_end_image_url
     if (wantEndFrame && !generatedEndImageUrl && lastFrameUrl) {
       await query(`UPDATE discovery_items SET replicate_status = 'image_generating' WHERE id = $1`, [itemId])
+      const endKeyframePrompt = renderEndKeyframeEditPrompt(spec)
+      await query(`UPDATE discovery_items SET end_keyframe_prompt = $2 WHERE id = $1`, [itemId, endKeyframePrompt])
       const endKeyframe = await generateCopyPasteKeyframe({
         sourceFrameUrl: lastFrameUrl,
         referenceImageUrl,
-        prompt: renderEndKeyframeEditPrompt(spec),
+        prompt: endKeyframePrompt,
         aspectRatio,
         itemId,
         matchImageUrl: generatedImageUrl,

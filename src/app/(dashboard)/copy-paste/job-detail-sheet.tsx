@@ -32,6 +32,9 @@ interface ItemLike {
   video_model: string | null
   copy_paste_spec: CopyPasteSpec | null
   rendered_prompt: string | null
+  /** What Seedream Edit was actually sent — recorded per render, read-only. */
+  keyframe_prompt: string | null
+  end_keyframe_prompt: string | null
   kling_video_url: string | null
   thumbnail_url: string | null
 }
@@ -335,6 +338,35 @@ export function JobDetailSheet({
             >
               {saving ? 'Saving…' : 'Save prompt'}
             </Button>
+          )}
+
+          {/* The prompt that decides how the person looks. It used to be built
+              at render time and discarded, so a keyframe with the wrong hair or
+              borrowed tattoos left nothing to inspect but the image. */}
+          {(item.keyframe_prompt || item.end_keyframe_prompt) && (
+            <section className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="font-medium">Keyframe prompt</h3>
+                <span className="text-xs text-muted-foreground">Sent to Seedream Edit</span>
+              </div>
+              {item.keyframe_prompt && (
+                <pre className="whitespace-pre-wrap rounded-lg border border-border/60 bg-secondary/20 p-4 text-xs leading-relaxed text-muted-foreground max-h-64 overflow-y-auto">
+                  {item.keyframe_prompt}
+                </pre>
+              )}
+              {item.end_keyframe_prompt && (
+                <>
+                  <p className="text-xs text-muted-foreground">End keyframe</p>
+                  <pre className="whitespace-pre-wrap rounded-lg border border-border/60 bg-secondary/20 p-4 text-xs leading-relaxed text-muted-foreground max-h-64 overflow-y-auto">
+                    {item.end_keyframe_prompt}
+                  </pre>
+                </>
+              )}
+              <p className="text-[10px] text-muted-foreground/60">
+                Read-only: rebuilt from the spec on every render. To change it, edit the
+                spec fields it draws from — wardrobe, environment, lighting.
+              </p>
+            </section>
           )}
 
           {item.replicate_error && (

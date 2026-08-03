@@ -85,7 +85,7 @@ function referenceLockAppearance(genderHint: string): string {
 }
 
 const NORMALIZATION_RULES = `
-- Hair color: if the source subject's hair reads as pink (or any dyed pink/fantasy tone), describe it as wavy hair instead. Never write "pink hair","red hair", "ginger hair", "blonde hair" for anyone.
+- Hair color: if the source subject's hair reads as pink (or any dyed pink/fantasy tone), describe it as hair only. Never write "pink hair","red hair", "ginger hair", "blonde hair" for anyone.
 - Outfit color: if a garment reads as pink, describe it as white instead. Never write "pink" as a wardrobe color for anyone.
 - Ethnicity: never write "Asian" (or any specific Asian ethnicity/descent) for anyone — describe the person as European instead.
 - Skin tone: never write "black skin" / "dark skin" as a descriptor for anyone — describe skin tone as white/fair instead.

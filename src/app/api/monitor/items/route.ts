@@ -33,7 +33,7 @@ export async function GET(req: NextRequest) {
             video_model, thumbnail_url, video_url,
             reference_image_url, source_first_frame_url, source_last_frame_url,
             generated_image_url, generated_end_image_url,
-            copy_paste_spec, rendered_prompt,
+            copy_paste_spec, rendered_prompt, keyframe_prompt, end_keyframe_prompt,
             kling_video_url, replicate_status, replicate_error,
             admin_status, posted_at, discovered_at
        FROM discovery_items
