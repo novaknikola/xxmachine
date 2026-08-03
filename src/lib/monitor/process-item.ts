@@ -13,7 +13,11 @@ import { notifyReplicationDone, notifyReplicationFailed } from './notify'
 import { archiveDiscoveryItem } from '@/lib/drive-archive/from-discovery-item'
 import type { DiscoveryItemRow, EndFrameMode, TrackedProfileRow } from './types'
 
-/** Frames sampled per clip — denser sampling catches background gag beats. */
+/**
+ * Floor for frames sampled per clip — denser sampling catches background gag
+ * beats. probeSourceVideo raises this on longer clips to hold the gap between
+ * frames roughly constant, so this only binds for short reels.
+ */
 const PROBE_FRAME_COUNT = 8
 
 /**

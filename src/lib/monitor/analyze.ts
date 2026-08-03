@@ -168,9 +168,23 @@ async function extractFrameAt(path: string, seconds: number, outPath: string): P
  * evenly spaced frames plus measured duration, dimensions/aspect ratio,
  * cut count and audio presence.
  */
+/**
+ * Frame sampling is adaptive, because a fixed count means the gap between
+ * frames grows with the clip: eight frames covered a 10s reel every ~1.3s but
+ * a 20s one only every ~2.8s, and anything happening between two samples is
+ * invisible to the analyser. Aiming at a constant gap keeps long reels as
+ * legible as short ones.
+ *
+ * The floor keeps short clips exactly where they were; the ceiling caps what a
+ * single vision call has to carry.
+ */
+const TARGET_FRAME_GAP_SEC = 1.2
+const MAX_PROBE_FRAMES = 20
+
+/** @param minFrames floor — duration may push the real count above it. */
 export async function probeSourceVideo(
   videoUrl: string,
-  frameCount = 5,
+  minFrames = 5,
 ): Promise<SourceProbe | null> {
   const id = randomUUID()
   const videoPath = join(tmpdir(), `mon_probe_${id}.mp4`)
@@ -192,9 +206,16 @@ export async function probeSourceVideo(
     const cutTimes = await detectSceneCuts(videoPath)
 
     const span = duration ?? 3
+    const frameCount = Math.min(
+      MAX_PROBE_FRAMES,
+      Math.max(minFrames, Math.ceil(span / TARGET_FRAME_GAP_SEC)),
+    )
     const first = Math.min(0.4, span * 0.05)
     const last = Math.max(first, span - 0.25)
     const step = frameCount > 1 ? (last - first) / (frameCount - 1) : 0
+    console.log(
+      `[monitor/probe] ${span.toFixed(1)}s clip → ${frameCount} frames, ~${step.toFixed(2)}s apart`,
+    )
 
     const frames: string[] = []
     const frameTimes: number[] = []
