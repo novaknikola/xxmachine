@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Pagination } from '@/components/ui/pagination'
-import { CheckSquare, Loader2, RefreshCw, Search, Trash2, Wand2 } from 'lucide-react'
+import { BookImage, CheckSquare, Loader2, RefreshCw, Search, Trash2, Wand2 } from 'lucide-react'
 import { GenerationPanel } from './generation-panel'
 import type { ScrapedPromptItem } from './browse-tab'
 
@@ -50,6 +50,8 @@ export function PinterestTab() {
   const [importing, setImporting] = useState(false)
   const [selected, setSelected] = useState<Map<string, Pin>>(new Map())
   const [panelOpen, setPanelOpen] = useState(false)
+  const [storyFolder, setStoryFolder] = useState('')
+  const [savingStories, setSavingStories] = useState(false)
 
   const loadBoards = useCallback(async () => {
     const res = await fetch('/api/pinterest/boards')
@@ -130,6 +132,57 @@ export function PinterestTab() {
     toast.success(`Removed ${board.title ?? board.board_key}`)
     await loadBoards()
     await loadPins()
+  }
+
+  /** Hidden, not deleted — a later re-sync of the board must not bring them back. */
+  async function removePins(ids: string[]) {
+    const res = await fetch('/api/pinterest/pins', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    })
+    if (!res.ok) { toast.error('Could not remove'); return }
+    const data = await res.json() as { removed: number }
+    setSelected(prev => {
+      const next = new Map(prev)
+      for (const id of ids) next.delete(id)
+      return next
+    })
+    toast.success(`Removed ${data.removed} pin${data.removed === 1 ? '' : 's'}`)
+    await loadBoards()
+    await loadPins()
+  }
+
+  /**
+   * Straight to publishable stories: no generation, just the same light
+   * repurpose every other published asset gets, then filed in Drive.
+   */
+  async function saveToStories() {
+    const folder = storyFolder.trim()
+    if (!folder) { toast.error('Enter a Drive folder name for the stories'); return }
+    setSavingStories(true)
+    try {
+      const res = await fetch('/api/pinterest/stories', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: [...selected.keys()], folderName: folder }),
+      })
+      const data = await res.json() as {
+        saved?: number; skipped?: number; archiveSkippedReason?: string | null; error?: string
+      }
+      if (!res.ok) throw new Error(data.error ?? 'Save failed')
+
+      if (data.archiveSkippedReason) {
+        toast.warning(`Repurposed ${data.saved}, but Drive did not take them (${data.archiveSkippedReason})`)
+      } else {
+        toast.success(`${data.saved} saved to stories${data.skipped ? ` · ${data.skipped} skipped` : ''}`)
+      }
+      setSelected(new Map())
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Save failed')
+    } finally {
+      setSavingStories(false)
+    }
   }
 
   function toggle(pin: Pin) {
@@ -266,7 +319,7 @@ export function PinterestTab() {
                 <Card
                   key={pin.id}
                   size="sm"
-                  className={`cursor-pointer overflow-hidden py-0 transition-colors ${isSelected ? 'ring-2 ring-primary' : 'hover:ring-1 hover:ring-border'}`}
+                  className={`group cursor-pointer overflow-hidden py-0 transition-colors ${isSelected ? 'ring-2 ring-primary' : 'hover:ring-1 hover:ring-border'}`}
                   onClick={() => toggle(pin)}
                 >
                   {/* Same fixed-window treatment as the browse grid: the image is
@@ -290,6 +343,13 @@ export function PinterestTab() {
                         {pin.board_title ?? pin.board_key}
                       </Badge>
                     )}
+                    <button
+                      title="Remove this pin from the library"
+                      onClick={e => { e.stopPropagation(); void removePins([pin.id]) }}
+                      className="absolute top-1.5 left-1.5 w-5 h-5 rounded-md bg-black/60 text-white/80 hover:bg-destructive hover:text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
                   </div>
                   <CardContent className="p-2.5">
                     <p className="text-[10px] text-muted-foreground line-clamp-2 h-[26px]">
@@ -306,13 +366,44 @@ export function PinterestTab() {
       </div>
 
       {selected.size > 0 && (
-        <div className="shrink-0 border-t border-border bg-background px-5 py-3 flex items-center gap-3">
+        <div className="shrink-0 border-t border-border bg-background px-5 py-3 flex items-center gap-2 flex-wrap">
           <p className="text-sm font-medium">{selected.size} selected</p>
           <Button variant="ghost" size="sm" onClick={() => setSelected(new Map())}>Clear</Button>
-          <Button size="sm" className="ml-auto" onClick={() => setPanelOpen(true)}>
-            <Wand2 className="w-4 h-4 mr-1.5" />
-            Generate
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-muted-foreground hover:text-destructive"
+            onClick={() => void removePins([...selected.keys()])}
+          >
+            <Trash2 className="w-3.5 h-3.5 mr-1.5" />
+            Remove
           </Button>
+
+          <div className="ml-auto flex items-center gap-2">
+            {/* Saved as-is, so the folder is the only thing that needs naming. */}
+            <Input
+              value={storyFolder}
+              onChange={e => setStoryFolder(e.target.value)}
+              placeholder="Drive folder for stories"
+              className="h-8 w-52 text-xs"
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void saveToStories()}
+              disabled={savingStories}
+              title="Light repurpose, then straight into the story folder — no generation"
+            >
+              {savingStories
+                ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+                : <BookImage className="w-4 h-4 mr-1.5" />}
+              Save to stories
+            </Button>
+            <Button size="sm" onClick={() => setPanelOpen(true)}>
+              <Wand2 className="w-4 h-4 mr-1.5" />
+              Generate
+            </Button>
+          </div>
         </div>
       )}
 

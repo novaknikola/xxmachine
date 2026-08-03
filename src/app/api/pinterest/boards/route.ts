@@ -71,8 +71,10 @@ export async function POST(req: NextRequest) {
          VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (board_id, pin_key) DO UPDATE
            SET title = COALESCE(EXCLUDED.title, pinterest_pins.title),
-               pin_url = COALESCE(EXCLUDED.pin_url, pinterest_pins.pin_url),
-               is_active = true`,
+               pin_url = COALESCE(EXCLUDED.pin_url, pinterest_pins.pin_url)`,
+        // is_active is deliberately not touched: a pin you deleted must stay
+        // deleted when the board is re-synced, and the pin is still on
+        // Pinterest so every sync would otherwise resurrect it.
         [boardId, pin.pinKey, pin.pinUrl, pin.title, pin.imageUrl, pin.imageUrlHd],
       )
     }

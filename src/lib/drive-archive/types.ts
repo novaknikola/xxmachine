@@ -4,7 +4,12 @@ export type {
   DriveArchiveStage,
 } from './content-format'
 
-export type DriveArchiveSourceType = 'generation' | 'discovery_item' | 'queue_job'
+export type DriveArchiveSourceType =
+  | 'generation'
+  | 'discovery_item'
+  | 'queue_job'
+  /** Pins saved straight to stories from an imported board — no generation involved. */
+  | 'pinterest_pin'
 
 export interface EnqueueDriveArchiveInput {
   userId: string

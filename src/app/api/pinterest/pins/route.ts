@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { rows } from '@/lib/db'
+import { rows, query } from '@/lib/db'
 import { requireUser } from '@/lib/session'
 
 interface PinRow {
@@ -70,4 +70,39 @@ export async function GET(req: NextRequest) {
     page,
     pageSize,
   })
+}
+
+/**
+ * Drop pins from the library. Flagged inactive rather than deleted so a later
+ * re-sync of the same board does not bring them back — the pin is still on
+ * Pinterest, and the import deliberately leaves is_active alone on conflict.
+ */
+export async function DELETE(req: NextRequest) {
+  const auth = await requireUser(req)
+  if (auth instanceof NextResponse) return auth
+
+  const body = await req.json().catch(() => ({})) as { ids?: string[] }
+  const ids = Array.isArray(body.ids) ? body.ids.filter(id => typeof id === 'string' && id) : []
+  if (!ids.length) return NextResponse.json({ error: 'ids required' }, { status: 400 })
+
+  // Joined through the board so one user cannot hide another user's pins.
+  const res = await query(
+    `UPDATE pinterest_pins p
+        SET is_active = false
+       FROM pinterest_boards b
+      WHERE p.board_id = b.id
+        AND b.user_id = $1
+        AND p.id = ANY($2::uuid[])
+        AND p.is_active`,
+    [auth.id, ids],
+  )
+
+  await query(
+    `UPDATE pinterest_boards b
+        SET pin_count = (SELECT COUNT(*) FROM pinterest_pins p WHERE p.board_id = b.id AND p.is_active)
+      WHERE b.user_id = $1`,
+    [auth.id],
+  )
+
+  return NextResponse.json({ removed: res.rowCount ?? 0 })
 }
