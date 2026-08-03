@@ -13,11 +13,21 @@ const PUBLIC_PAGES = new Set([
 
 // API prefixes that are public (no auth required)
 // Cron and queue/process are secured by CRON_SECRET header, not session cookie
+/**
+ * Reachable without a session cookie. Each one authenticates itself — a shared
+ * secret or a provider signature — so "public" here means "not behind the
+ * dashboard login", not unauthenticated.
+ */
 const PUBLIC_API_PREFIXES = [
   '/api/auth/',
   '/api/payment/webhook',
   '/api/cron/',
   '/api/queue/process/',
+  // Telegram posts here with ?secret=CRON_SECRET, which the route checks. It
+  // was never on this list, so every update Telegram delivered was rejected at
+  // the door with a 401 and the bot has never worked — including the
+  // approve/reject buttons on scheduled posts.
+  '/api/telegram/webhook',
 ]
 
 export function proxy(req: NextRequest) {
