@@ -181,10 +181,17 @@ async function extractFrameAt(path: string, seconds: number, outPath: string): P
 const TARGET_FRAME_GAP_SEC = 1.2
 const MAX_PROBE_FRAMES = 20
 
-/** @param minFrames floor — duration may push the real count above it. */
+/**
+ * @param minFrames floor — duration may push the real count above it.
+ * @param lineTimes extra moments worth a frame, on top of the even grid.
+ *   Speech attribution has to judge whether a mouth is moving *at the moment a
+ *   line was spoken*, and an evenly spaced grid lands wherever it lands. Adding
+ *   the transcript's own timings puts a frame where the question is asked.
+ */
 export async function probeSourceVideo(
   videoUrl: string,
   minFrames = 5,
+  lineTimes: number[] = [],
 ): Promise<SourceProbe | null> {
   const id = randomUUID()
   const videoPath = join(tmpdir(), `mon_probe_${id}.mp4`)
@@ -213,16 +220,32 @@ export async function probeSourceVideo(
     const first = Math.min(0.4, span * 0.05)
     const last = Math.max(first, span - 0.25)
     const step = frameCount > 1 ? (last - first) / (frameCount - 1) : 0
+
+    const grid = Array.from({ length: frameCount }, (_, i) => first + step * i)
+
+    // Merge the transcript's moments into the grid, dropping any that already
+    // have a frame within half the grid spacing — a near-duplicate costs a
+    // vision-call image slot and tells the model nothing new.
+    const tooClose = Math.max(0.25, step / 2)
+    const extra = lineTimes
+      .filter(t => Number.isFinite(t) && t > first && t < last)
+      .filter(t => !grid.some(g => Math.abs(g - t) < tooClose))
+
+    const sampleTimes = [...grid, ...extra]
+      .sort((a, b) => a - b)
+      .slice(0, MAX_PROBE_FRAMES + extra.length)
+
     console.log(
-      `[monitor/probe] ${span.toFixed(1)}s clip → ${frameCount} frames, ~${step.toFixed(2)}s apart`,
+      `[monitor/probe] ${span.toFixed(1)}s clip → ${grid.length} grid frames ~${step.toFixed(2)}s apart` +
+      (extra.length ? ` + ${extra.length} on spoken lines` : ''),
     )
 
     const frames: string[] = []
     const frameTimes: number[] = []
-    for (let i = 0; i < frameCount; i++) {
+    for (let i = 0; i < sampleTimes.length; i++) {
       const outPath = join(tmpdir(), `mon_probe_${id}_${i}.jpg`)
       framePaths.push(outPath)
-      const at = first + step * i
+      const at = sampleTimes[i]
       const frame = await extractFrameAt(videoPath, at, outPath)
       // Kept in lockstep: a dropped frame must not shift every later timestamp.
       if (frame) {

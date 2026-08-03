@@ -53,6 +53,19 @@ export interface CopyPasteSpec {
   negative_prompt: string
 }
 
+/**
+ * Which traits follow the identity reference rather than the scene.
+ *
+ * "Keep everything from image 1" is what makes the pose and background match,
+ * but it also drags the source person's body and skin along with it — tattoos
+ * on the original subject were turning up on the replacement. Stated generally
+ * on purpose: it says where a trait comes from, not what any particular
+ * character looks like.
+ */
+export const KEYFRAME_IDENTITY_LOCK =
+  'body proportions, bust size, build, skin tone and skin markings all follow image 2; ' +
+  'do not copy tattoos, piercings, scars, birthmarks or body shape from image 1'
+
 /** Always overwritten after parsing — never trust the model's own copy of this. */
 export const NEGATIVE_PROMPT_TEMPLATE =
   'no smooth gimbal motion, no cinematic stabilization, no professional lighting, ' +
@@ -61,7 +74,9 @@ export const NEGATIVE_PROMPT_TEMPLATE =
   'no music video energy, no drone footage feel, ' +
   // The on-camera subject kept inheriting the camera operator's dialogue.
   'the on-camera subject does not speak other people\'s lines, ' +
-  'no lip-syncing to off-screen dialogue, no mouthing words spoken by someone behind the camera'
+  'no lip-syncing to off-screen dialogue, no mouthing words spoken by someone behind the camera, ' +
+  // Skin marks belonging to the source subject were surviving the identity swap.
+  'no tattoos, no visible body ink, no piercings not present on the identity reference'
 
 /** Forced value for whichever person (always people[0]) gets the reference photo. */
 function referenceLockAppearance(genderHint: string): string {
@@ -269,22 +284,46 @@ async function downloadForTranscript(videoUrl: string): Promise<string> {
  * visible subject's mouth was moving in the frame nearest that moment.
  * Flattening this to one blob (as it once was) throws that signal away.
  */
-export async function transcribeSourceSpeech(videoUrl: string): Promise<string> {
+export interface SourceTranscript {
+  /** Formatted for the prompt. */
+  text: string
+  /** Mid-point of each spoken line, in seconds — where a frame is worth having. */
+  lineTimes: number[]
+}
+
+/**
+ * Transcript plus the times each line was spoken.
+ *
+ * The times matter as much as the words. RULE D asks the model to check whether
+ * the visible person's mouth is moving at a line's timestamp, but frames were
+ * sampled on an even grid that knows nothing about the transcript — so on a 20s
+ * reel the nearest frame could be most of a second away from the line, and the
+ * model was guessing. Guessing defaults to the person it can see, which is
+ * exactly the failure: one speaker gets everybody's dialogue.
+ */
+export async function transcribeSourceSpeech(videoUrl: string): Promise<SourceTranscript> {
   const token = process.env.HF_TOKEN
-  if (!token) return ''
+  if (!token) return { text: '', lineTimes: [] }
 
   let path: string | null = null
   try {
     path = await downloadForTranscript(videoUrl)
     const segments = await transcribeVideoFile(path, token, 12, 8)
-    return segments
-      .map(s => `[${s.start.toFixed(1)}s-${s.end.toFixed(1)}s] ${s.text.trim()}`)
-      .filter(l => l.length > 12)
-      .join('\n')
-      .trim()
+    const kept = segments.filter(s => s.text.trim().length > 4)
+
+    return {
+      text: kept
+        .map(s => `[${s.start.toFixed(1)}s-${s.end.toFixed(1)}s] ${s.text.trim()}`)
+        .filter(l => l.length > 12)
+        .join('\n')
+        .trim(),
+      // Mid-line rather than the start: a speaker's mouth is reliably moving in
+      // the middle of a phrase, while the first moment can still be a breath.
+      lineTimes: kept.map(s => (s.start + s.end) / 2),
+    }
   } catch (err) {
     console.warn('[monitor/copy-paste-spec] transcript failed:', err instanceof Error ? err.message : err)
-    return ''
+    return { text: '', lineTimes: [] }
   } finally {
     if (path) {
       try { if (existsSync(path)) unlinkSync(path) } catch {}
@@ -299,12 +338,16 @@ export async function transcribeSourceSpeech(videoUrl: string): Promise<string> 
 export async function extractCopyPasteSpec(
   probe: Pick<SourceProbe, 'frames' | 'frameTimes' | 'hasAudio' | 'duration' | 'aspectRatio'>,
   videoUrl?: string | null,
+  preTranscript?: SourceTranscript | null,
 ): Promise<CopyPasteSpec> {
   if (!probe.frames.length) throw new Error('No frames for copy-paste spec')
 
-  let transcript = ''
-  if (probe.hasAudio && videoUrl) {
-    transcript = await transcribeSourceSpeech(videoUrl)
+  // Reuse the transcript the caller already fetched to pick frame times — it
+  // costs a download plus a Whisper pass, and doing it twice would also risk
+  // the two copies disagreeing about when a line was spoken.
+  let transcript = preTranscript?.text ?? ''
+  if (!preTranscript && probe.hasAudio && videoUrl) {
+    transcript = (await transcribeSourceSpeech(videoUrl)).text
   }
 
   const raw = await callGrok({
@@ -432,8 +475,16 @@ export function renderKeyframeEditPrompt(spec: CopyPasteSpec): string {
     locked?.wardrobe && `Wardrobe: ${locked.wardrobe}.`,
     spec.environment && `Environment: ${spec.environment}.`,
     spec.lighting && `Lighting: ${spec.lighting}.`,
+    // The keyframe decides how the subject's body reads, and the scene
+    // reference is the only thing that was describing it. Skin marks in
+    // particular were being carried over from image 1 by "keep everything from
+    // image 1", with nothing here to say otherwise.
+    `Body and skin come from image 2, not image 1: ${KEYFRAME_IDENTITY_LOCK}.`,
     'Photorealistic, natural skin texture, no beauty filter, no AI skin smoothing.',
     'Do not add any other people. Do not change the composition, angle, or background.',
+    // Negatives existed but only ever reached the video prompt, never the image
+    // model that actually draws the person.
+    spec.negative_prompt && `Avoid: ${spec.negative_prompt}.`,
   ].filter(Boolean)
   return bits.join(' ')
 }

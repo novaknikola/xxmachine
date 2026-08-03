@@ -1,6 +1,7 @@
 import { one, query, rows } from '@/lib/db'
 import {
   extractCopyPasteSpec,
+  transcribeSourceSpeech,
   normalizeCopyPasteSpec,
   renderCopyPastePrompt,
   renderEndKeyframeEditPrompt,
@@ -94,10 +95,13 @@ export async function classifyDiscoveryItem(itemId: string, userId: string) {
   )
 
   try {
-    const probe = await probeSourceVideo(item.video_url, PROBE_FRAME_COUNT)
+    // Transcript first: its line times decide where extra frames go, so that
+    // speech attribution has a frame at the moment each line was spoken.
+    const transcript = await transcribeSourceSpeech(item.video_url)
+    const probe = await probeSourceVideo(item.video_url, PROBE_FRAME_COUNT, transcript.lineTimes)
     if (!probe) throw new Error('Could not read source video')
 
-    const spec = await extractCopyPasteSpec(probe, item.video_url)
+    const spec = await extractCopyPasteSpec(probe, item.video_url, transcript)
     const renderedPrompt = renderCopyPastePrompt(spec)
 
     await query(
@@ -200,10 +204,11 @@ export async function replicateCopyPasteItem(
 
     if (!spec || !renderedPrompt) {
       await query(`UPDATE discovery_items SET replicate_status = 'analyzing' WHERE id = $1`, [itemId])
-      const probe = await probeSourceVideo(item.video_url, PROBE_FRAME_COUNT)
+      const transcript = await transcribeSourceSpeech(item.video_url)
+      const probe = await probeSourceVideo(item.video_url, PROBE_FRAME_COUNT, transcript.lineTimes)
       if (!probe) throw new Error('Could not read source video for analysis')
 
-      spec = await extractCopyPasteSpec(probe, item.video_url)
+      spec = await extractCopyPasteSpec(probe, item.video_url, transcript)
       renderedPrompt = renderCopyPastePrompt(spec)
       durationSec = probe.duration
       aspectRatio = probe.aspectRatio

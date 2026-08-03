@@ -223,6 +223,18 @@ export async function POST(req: NextRequest) {
           userId: batch.user_id,
           rawText: batch.urls.join('\n'),
           referenceImageUrl: batch.reference_image_url,
+          // Nobody is going to press Replicate for a chat, and the message
+          // below promises a finished video.
+          autoReplicate: true,
+          onReplicateQueued: async ({ jobId, classified, failed }) => {
+            if (!chatId) return
+            await sendText(
+              chatId,
+              jobId
+                ? `🎬 Replicating ${classified} reel${classified === 1 ? '' : 's'}${failed ? ` · ${failed} could not be analysed` : ''}.`
+                : `⚠️ Analysis finished but nothing could be replicated${failed ? ` — ${failed} failed to analyse` : ''}.`,
+            ).catch(() => { /* the chat may have been closed */ })
+          },
         })
         if (chatId && cbMessage?.message_id) {
           const failed = result.resolveErrors.length

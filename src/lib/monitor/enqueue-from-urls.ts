@@ -10,7 +10,7 @@ import { resolveKey } from '@/lib/user-keys'
 import { listProfileReels, resolveVideoUrlViaRapidApi } from '@/lib/instagram-scrape'
 import { enqueueDiscoveryReels, type EnqueueReelInput } from './enqueue'
 import { parseReelUrlList } from './parse-reel-url'
-import { scheduleAutoClassify } from './auto-classify'
+import { scheduleAutoClassify, scheduleClassifyOnly } from './auto-classify'
 import { isPlayableVideoUrl } from './video-url'
 
 export const MAX_URLS = 30
@@ -62,6 +62,12 @@ export async function enqueueReelUrlsForUser(opts: {
   username?: string | null
   sourceUsername?: string | null
   referenceImageUrl?: string | null
+  /**
+   * Queue the replication once analysis finishes. The dashboard leaves this
+   * to the Replicate button; a caller with no UI has to ask for it.
+   */
+  autoReplicate?: boolean
+  onReplicateQueued?: (r: { jobId: string | null; classified: number; failed: number }) => Promise<void>
 }): Promise<EnqueueUrlsResult> {
   const { userId, rawText } = opts
 
@@ -243,7 +249,14 @@ export async function enqueueReelUrlsForUser(opts: {
   }
 
   const result = await enqueueDiscoveryReels(userId, username, reels, { referenceImageUrl })
-  scheduleAutoClassify(userId, result.ids)
+  if (opts.autoReplicate) {
+    scheduleAutoClassify(userId, result.ids, {
+      thenReplicate: true,
+      onQueued: opts.onReplicateQueued,
+    })
+  } else {
+    scheduleClassifyOnly(userId, result.ids)
+  }
 
   return {
     ids: result.ids,
