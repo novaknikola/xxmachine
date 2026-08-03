@@ -14,7 +14,14 @@ function getPool(): Pool {
     global.__xmDbPool = new Pool({
       connectionString,
       ssl: connectionString.includes('supabase.com') ? { rejectUnauthorized: false } : undefined,
-      max: 5,
+      // The app is not just serving pages: the queue worker, cron tick and a
+      // polling UI all compete for this pool at once, and 5 clients ran out
+      // under a long Copy Prompts batch — routes then failed with "timeout
+      // exceeded when trying to connect" and returned an empty 500 body.
+      // DATABASE_URL points at Supabase's transaction-mode pooler (port 6543),
+      // which multiplexes onto far fewer server-side connections, so a larger
+      // client pool here is cheap.
+      max: 20,
       idleTimeoutMillis: 60_000,
       connectionTimeoutMillis: 20_000,
     })

@@ -34,6 +34,24 @@ interface QueueJob {
 const RESULTS_PAGE_SIZE = 12
 
 /**
+ * A route that dies before writing a body — a database connect timeout, say —
+ * answers 500 with zero bytes, and res.json() then throws "Unexpected end of
+ * JSON input", which says nothing about what went wrong. Report the status
+ * instead.
+ */
+async function readJson<T>(res: Response): Promise<T> {
+  const text = await res.text()
+  if (!text) {
+    throw new Error(res.ok ? 'Server returned an empty response' : `Server error (${res.status})`)
+  }
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    throw new Error(`Unexpected response from server (${res.status})`)
+  }
+}
+
+/**
  * Images grouped by the item that produced them, so each slide sits under the
  * prompt that made it. Slide 1 is the Seedream edit from the references; the
  * rest are carousel variants, whose prompts come from a preset or from Grok and
@@ -141,14 +159,35 @@ function JobResultsGrid({ rows }: { rows: CopyPromptsRow[] }) {
 function JobCard({ job, onRefresh }: { job: QueueJob; onRefresh: () => void }) {
   const [expanded, setExpanded] = useState(false)
   const [stopping, setStopping] = useState(false)
-  const rows = job.output?.copyPromptsRows ?? []
-  const running = job.status === 'pending' || job.status === 'processing'
+  const [live, setLive] = useState<QueueJob | null>(null)
+  const shown = live ?? job
+  const rows = shown.output?.copyPromptsRows ?? []
+  const running = shown.status === 'pending' || shown.status === 'processing'
 
+  // Poll this one job rather than the whole list: /api/queue/list returns 50
+  // jobs with their full output, which is a lot of rows and a lot of database
+  // work to repeat every 4 seconds just to advance one progress bar.
   useEffect(() => {
     if (!running || !expanded) return
-    const t = setInterval(onRefresh, 4000)
-    return () => clearInterval(t)
-  }, [running, expanded, onRefresh])
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/queue/${job.id}`)
+        if (!res.ok) return
+        const data = await readJson<{ job?: QueueJob }>(res)
+        if (!cancelled && data.job) setLive(data.job)
+      } catch {
+        // A dropped poll is not worth surfacing; the next tick retries.
+      }
+    }
+    const t = setInterval(tick, 4000)
+    return () => { cancelled = true; clearInterval(t) }
+  }, [running, expanded, job.id])
+
+  // Once it stops running, fold the final state back into the list.
+  useEffect(() => {
+    if (live && !running) onRefresh()
+  }, [live, running, onRefresh])
 
   /**
    * The worker checks for this between batches, so the items already in flight
@@ -163,7 +202,7 @@ function JobCard({ job, onRefresh }: { job: QueueJob; onRefresh: () => void }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'stop' }),
       })
-      const data = await res.json() as { error?: string }
+      const data = await readJson<{ error?: string }>(res)
       if (!res.ok) throw new Error(data.error ?? 'Could not stop batch')
       toast.success('Stopping — the batch in flight finishes, then it halts')
       onRefresh()
@@ -180,11 +219,11 @@ function JobCard({ job, onRefresh }: { job: QueueJob; onRefresh: () => void }) {
         <div className="flex-1 min-w-0">
           <p className="text-sm font-medium">Copy Prompts batch</p>
           <p className="text-xs text-muted-foreground">
-            {new Date(job.created_at).toLocaleString()} · {job.done_items}/{job.total_items} done
+            {new Date(shown.created_at).toLocaleString()} · {shown.done_items}/{shown.total_items} done
           </p>
         </div>
-        <Badge variant={job.status === 'done' ? 'default' : job.status === 'failed' ? 'destructive' : 'secondary'}>
-          {job.status}
+        <Badge variant={shown.status === 'done' ? 'default' : shown.status === 'failed' ? 'destructive' : 'secondary'}>
+          {shown.status}
         </Badge>
         {running && (
           <Button variant="destructive" size="sm" onClick={() => void stop()} disabled={stopping}>
@@ -198,7 +237,7 @@ function JobCard({ job, onRefresh }: { job: QueueJob; onRefresh: () => void }) {
       </div>
       {running && (
         <div className="w-full bg-secondary rounded-full h-1.5">
-          <div className="bg-primary h-1.5 rounded-full transition-all duration-300" style={{ width: `${job.progress}%` }} />
+          <div className="bg-primary h-1.5 rounded-full transition-all duration-300" style={{ width: `${shown.progress}%` }} />
         </div>
       )}
       {expanded && <JobResultsGrid rows={rows} />}
@@ -216,7 +255,7 @@ export function BatchesTab() {
   const load = useCallback(async () => {
     try {
       const res = await fetch('/api/queue/list')
-      const data = await res.json()
+      const data = await readJson<{ jobs?: QueueJob[]; error?: string }>(res)
       if (!res.ok) throw new Error(data.error ?? 'Failed to load batches')
       const all: QueueJob[] = Array.isArray(data.jobs) ? data.jobs : []
       setJobs(all.filter(j => j.job_type === 'copy_prompts_generate'))
