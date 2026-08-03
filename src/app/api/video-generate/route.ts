@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { internalBaseUrl } from '@/lib/internal-url'
 
 const API_KEY = process.env.WAVESPEED_API_KEY!
 const API_BASE = 'https://api.wavespeed.ai/api/v2'
@@ -63,7 +64,7 @@ export async function POST(req: NextRequest) {
         imageUrl = await uploadToWavespeed(file)
       } else if (urlParam) {
         // Proxy external URL through server to get a Wavespeed-uploadable blob
-        const imgRes = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL}/api/proxy-image?url=${encodeURIComponent(urlParam)}`)
+        const imgRes = await fetch(`${internalBaseUrl()}/api/proxy-image?url=${encodeURIComponent(urlParam)}`)
         if (!imgRes.ok) throw new Error('Could not fetch image URL')
         const blob = await imgRes.blob()
         imageUrl = await uploadToWavespeed(new File([blob], 'image.jpg', { type: blob.type || 'image/jpeg' }))

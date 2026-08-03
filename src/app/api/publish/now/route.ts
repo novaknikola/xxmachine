@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { one, query } from '@/lib/db'
 import { sendPhoto, sendText, editMessageReplyMarkup, editMessageCaption } from '@/lib/telegram'
+import { internalBaseUrl } from '@/lib/internal-url'
 
 const ADMIN_GROUP = process.env.TELEGRAM_ADMIN_GROUP_ID!
 
@@ -44,7 +45,7 @@ const channelId = char?.telegram_channel_id
     try {
       // Fanvue posting requires a valid session token stored in cookies.
       // We call the internal Fanvue post endpoint which handles token refresh.
-      const res = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL ?? 'http://localhost:3000'}/api/fanvue/post`, {
+      const res = await fetch(`${internalBaseUrl()}/api/fanvue/post`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ imageUrl: post.image_url, caption: post.caption }),

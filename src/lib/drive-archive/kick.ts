@@ -1,3 +1,4 @@
+import { internalBaseUrl } from '@/lib/internal-url'
 /**
  * Nudge the Drive uploader so freshly queued files ship before provider URLs
  * expire. Cron remains the backup when this fetch fails or the secret is unset.
@@ -18,7 +19,7 @@ export function kickDriveArchiveWorker(limit = 5): void {
     kickTimer = null
     kickLimit = 5
     if (!secret) return
-    const base = process.env.NEXT_PUBLIC_BASE_URL ?? 'http://localhost:3000'
+    const base = internalBaseUrl()
 
     fetch(`${base}/api/cron/drive-archive`, {
       method: 'POST',

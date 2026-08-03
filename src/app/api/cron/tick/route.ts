@@ -3,6 +3,7 @@ import { rows, one, query } from '@/lib/db'
 import { fetchAllStats } from '@/lib/stats'
 import { runDueProfileScans } from '@/lib/monitor/process-item'
 import { processDriveExports } from '@/lib/drive-archive/process'
+import { internalBaseUrl } from '@/lib/internal-url'
 
 const CRON_SECRET = process.env.CRON_SECRET
 const QUEUE_CONCURRENCY = 2
@@ -17,7 +18,9 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const base = process.env.NEXT_PUBLIC_BASE_URL ?? 'http://localhost:3000'
+  // Loopback: these fire the queue workers, which run far longer than the
+  // 300s nginx allows on the public host. See internalBaseUrl().
+  const base = internalBaseUrl()
 
   // Existing scheduled posts (Telegram/Fanvue)
   const due = await rows<{ id: string }>(

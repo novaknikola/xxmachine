@@ -59,8 +59,25 @@ git pull --ff-only origin "${BRANCH}"
 log "At commit $(git log -1 --oneline)"
 
 # ── Install & build ────────────────────────────────────────────
+# Keep the previous build's static assets so browsers that already have a page
+# open can still fetch their chunks. `next build` writes a new build id and the
+# old chunk files disappear, so an open tab asking for its own JS gets a 404 —
+# which the app surfaces as "This page couldn't load". nginx logged 53 of those.
+PREV_STATIC=""
+if [[ -d .next/static ]]; then
+  PREV_STATIC="$(mktemp -d)"
+  cp -a .next/static/. "${PREV_STATIC}/"
+fi
+
 npm ci
 npm run build
+
+if [[ -n "${PREV_STATIC}" && -d "${PREV_STATIC}" ]]; then
+  # -n: never overwrite an asset the new build just produced.
+  cp -rn "${PREV_STATIC}/." .next/static/ 2>/dev/null || true
+  rm -rf "${PREV_STATIC}"
+  log "Merged previous static assets back in (old tabs keep working)"
+fi
 
 # ── Database migrations (additive only; skips applied) ─────────
 npm run db:migrate
