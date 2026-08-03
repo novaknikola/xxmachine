@@ -42,6 +42,32 @@ export interface SeedanceI2VJobInput {
   generateAudio?: boolean
 }
 
+export interface InfiniteTalkItem {
+  /** Still for this clip. Null when there were more lines than images. */
+  imageUrl: string | null
+  /** Line the voice speaks. Null when there were more images than lines. */
+  text: string | null
+  source?: string | null
+}
+
+export interface InfiniteTalkJobInput {
+  /**
+   * Images and CSV lines zipped by position. Anything left over on either side
+   * is still an item, with the missing half null — the worker records it as a
+   * failure so an uneven batch is visible in the results rather than silently
+   * dropped.
+   */
+  items: InfiniteTalkItem[]
+  /** Fish Audio voice, one per batch. */
+  voiceId: string
+  /** Optional delivery hint prepended to every line before TTS. */
+  style?: string | null
+  resolution: '480p' | '720p'
+  /** Scene direction for the renderer; the audio drives the performance. */
+  prompt: string
+  folderName: string
+}
+
 export interface CopyPasteJobInput {
   itemIds: string[]
   /** Pin the clip's end with a matching second keyframe. Default 'auto'. */
@@ -288,6 +314,7 @@ export type QueueSubmitBody =
   | { job_type: 'copy_paste_v2'; input: CopyPasteJobInput }
   | { job_type: 'copy_prompts_generate'; input: CopyPromptsJobInput }
   | { job_type: 'seedance_i2v'; input: SeedanceI2VJobInput }
+  | { job_type: 'infinite_talk'; input: InfiniteTalkJobInput }
 
 export async function POST(req: NextRequest) {
   const user = await requireUser(req)
@@ -820,6 +847,55 @@ export async function POST(req: NextRequest) {
       resolution,
       folderName: String(folderName).trim(),
       generateAudio: generateAudio === true,
+    }
+
+    const row = await one<{ id: string }>(
+      `INSERT INTO generation_queue (user_id, job_type, input, total_items)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [user.id, body.job_type, JSON.stringify(input), input.items.length],
+    )
+    return NextResponse.json({ id: row!.id })
+  }
+
+  if (body.job_type === 'infinite_talk') {
+    const { items, voiceId, style, resolution, prompt, folderName } = body.input ?? {}
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return NextResponse.json({ error: 'Add images and a CSV first' }, { status: 400 })
+    }
+    if (items.length > MAX_SEEDANCE_ITEMS) {
+      return NextResponse.json(
+        { error: `Max ${MAX_SEEDANCE_ITEMS} clips per batch` },
+        { status: 400 },
+      )
+    }
+    // Every item must carry at least one half; a pair with neither is a bug in
+    // the caller, not an uneven batch.
+    if (items.some((it: InfiniteTalkItem) => !it?.imageUrl && !it?.text)) {
+      return NextResponse.json({ error: 'An item has neither an image nor a line' }, { status: 400 })
+    }
+    if (!String(voiceId ?? '').trim()) {
+      return NextResponse.json({ error: 'Fish Audio voice id required' }, { status: 400 })
+    }
+    if (resolution !== '480p' && resolution !== '720p') {
+      return NextResponse.json({ error: 'resolution must be 480p or 720p' }, { status: 400 })
+    }
+    if (!String(folderName ?? '').trim()) {
+      return NextResponse.json({ error: 'folderName required' }, { status: 400 })
+    }
+
+    const input: InfiniteTalkJobInput = {
+      items: items.map((it: InfiniteTalkItem) => ({
+        imageUrl: it.imageUrl?.trim() || null,
+        text: it.text?.trim() || null,
+        source: it.source ?? null,
+      })),
+      voiceId: String(voiceId).trim(),
+      style: String(style ?? '').trim() || null,
+      resolution,
+      prompt: String(prompt ?? '').trim() || 'a woman speaking to the camera',
+      folderName: String(folderName).trim(),
     }
 
     const row = await one<{ id: string }>(

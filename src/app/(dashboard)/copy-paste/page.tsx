@@ -12,6 +12,7 @@ import { StudioSettingsProvider, useStudioSettings } from './studio-settings'
 import { RunTab } from './run-tab'
 import { CostsTab } from './costs-tab'
 import { ImageToVideoTab } from './image-to-video-tab'
+import { InfiniteTalkTab } from './infinite-talk-tab'
 
 function StudioChrome({ children }: { children: React.ReactNode }) {
   const studio = useStudioSettings()
@@ -87,12 +88,16 @@ function StudioBody() {
           <TabsList variant="line" className="w-full sm:w-auto justify-start h-auto flex-wrap">
             <TabsTrigger value="run">Seedance Viral</TabsTrigger>
             <TabsTrigger value="i2v">Image to Video</TabsTrigger>
+            <TabsTrigger value="talk">Infinite Talk</TabsTrigger>
           </TabsList>
           <TabsContent value="run" className="mt-2">
             <RunTab />
           </TabsContent>
           <TabsContent value="i2v" className="mt-2">
             <ImageToVideoTab />
+          </TabsContent>
+          <TabsContent value="talk" className="mt-2">
+            <InfiniteTalkTab />
           </TabsContent>
         </Tabs>
       </div>

@@ -38,6 +38,7 @@ export type ByokKeyName =
   | 'RUNPOD_ENDPOINT_ANIMATE'
   | 'WAVESPEED_API_KEY'
   | 'GOOGLE_DRIVE_FOLDER_ID'
+  | 'FISH_API_KEY'
 
 export const BYOK_KEY_DEFS: { name: ByokKeyName; label: string; placeholder: string; required: boolean }[] = [
   { name: 'RUNPOD_API_KEY',            label: 'RunPod API Key',               placeholder: 'rpa_...', required: true },
@@ -45,6 +46,7 @@ export const BYOK_KEY_DEFS: { name: ByokKeyName; label: string; placeholder: str
   { name: 'RUNPOD_ENDPOINT_WAN_V2V',   label: 'RunPod Endpoint — WAN V2V',   placeholder: 'endpoint ID', required: true },
   { name: 'RUNPOD_ENDPOINT_I2V',       label: 'RunPod Endpoint — WAN I2V',   placeholder: 'endpoint ID', required: false },
   { name: 'RUNPOD_ENDPOINT_ANIMATE',   label: 'RunPod Endpoint — WAN Animate', placeholder: 'endpoint ID', required: false },
+  { name: 'FISH_API_KEY',              label: 'Fish Audio API Key',           placeholder: 'for InfiniteTalk voice-overs', required: false },
   { name: 'WAVESPEED_API_KEY',         label: 'WaveSpeed API Key (override)', placeholder: 'leave blank to use the platform key', required: false },
   { name: 'GOOGLE_DRIVE_FOLDER_ID',    label: 'Google Drive Folder ID',       placeholder: 'folder ID from the Drive URL', required: false },
 ]

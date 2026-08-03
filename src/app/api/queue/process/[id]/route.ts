@@ -5,6 +5,7 @@ import { resolveCarouselVariantPrompts } from '@/lib/carousel-variants'
 import { buildCarouselBasePrompt, DEFAULT_CAROUSEL_PRESET_ID } from '@/lib/carousel-presets'
 import { uploadImageFromUrl, uploadBuffer } from '@/lib/supabase-storage'
 import { generateSeedanceVideo } from '@/lib/runpod-seedance'
+import { generateTalkingVideo } from '@/lib/runpod-infinitetalk'
 import { promptForImage } from '@/lib/seedance-prompt'
 import { resolveKey } from '@/lib/user-keys'
 import { processVideoVariant, getVideoDuration, getVideoDimensions } from '@/lib/video-ffmpeg'
@@ -26,7 +27,7 @@ import type {
   BulkImageJobItem, VideoRepurposeJobInput, VideoCaptionJobInput, VideoCaptionItem,
   VideoTranscribeJobInput, VideoOcrJobInput, CaptionShuffleJobInput, CaptionGenerateJobInput, ComfyUIPodBulkJobInput,
   BulkCarouselJobInput, MyPodI2vJobInput, MyPodAnimateJobInput, MyPodTalkJobInput, CopyPasteJobInput,
-  CopyPromptsJobInput, SeedanceI2VJobInput,
+  CopyPromptsJobInput, SeedanceI2VJobInput, InfiniteTalkJobInput,
 } from '../../submit/route'
 import { getPodSessionSecrets } from '@/lib/my-pod/session'
 import { ensureRemoteWorkDir, cleanupRemoteJobDir } from '@/lib/my-pod/ssh'
@@ -69,6 +70,16 @@ interface CopyPasteRow {
   error?: string
 }
 
+interface TalkRow {
+  imageUrl: string | null
+  text: string | null
+  audioUrl?: string
+  videoUrl?: string
+  costUsd?: number | null
+  status: 'done' | 'error'
+  error?: string
+}
+
 interface SeedanceRow {
   imageUrl: string
   /** Prompt the analysis produced for this still. */
@@ -104,6 +115,8 @@ const COPY_PASTE_BATCH_SIZE = 2
 const COPY_PROMPTS_BATCH_SIZE = 2
 /** Renders run on RunPod's GPUs, not here, so a few at a time is pacing the provider, not this box. */
 const SEEDANCE_BATCH_SIZE = 3
+/** TTS then a lip-sync render; the render dominates and runs on RunPod. */
+const TALK_BATCH_SIZE = 2
 
 /** Lease heartbeat so cron can requeue zombie My Pod workers after deploy/crash. */
 function packMyPodOutput(rows: MyPodRow[], stage: string) {
@@ -170,6 +183,7 @@ interface JobRow {
     copyPasteRows?: CopyPasteRow[]
     copyPromptsRows?: CopyPromptsRow[]
     seedanceRows?: SeedanceRow[]
+    talkRows?: TalkRow[]
     progressAt?: string
   } | null
   attempts: number
@@ -1340,6 +1354,127 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         [id],
       )
 
+      return NextResponse.json({ ok: true, done: doneCount })
+    }
+
+    // ── infinite_talk — still + Fish voice-over → talking clip ─────────────
+    if (job.job_type === 'infinite_talk') {
+      const { items, voiceId, style, resolution, prompt, folderName } =
+        job.input as unknown as InfiniteTalkJobInput
+      if (!items?.length) throw new Error('No items in job input')
+
+      const runpodKey = await resolveKey(job.user_id, 'RUNPOD_API_KEY')
+      const fishKey = await resolveKey(job.user_id, 'FISH_API_KEY')
+      const missing = !runpodKey ? 'RunPod' : !fishKey ? 'Fish Audio' : null
+      if (missing) {
+        await query(
+          `UPDATE generation_queue SET status='failed', error=$1, finished_at=now() WHERE id=$2`,
+          [`No ${missing} API key — add it in Settings`, id],
+        )
+        return NextResponse.json({ error: `Missing ${missing} key` }, { status: 500 })
+      }
+
+      const rows: TalkRow[] = job.output?.talkRows ? [...job.output.talkRows] : []
+      let doneCount = job.done_items
+
+      for (let start = doneCount; start < items.length; start += TALK_BATCH_SIZE) {
+        if (!(await myPodJobStillRunning(id))) {
+          console.log(`[queue/process] infinite_talk ${id} cancelled at ${doneCount}/${items.length}`)
+          return NextResponse.json({ ok: true, cancelled: true, done: doneCount })
+        }
+
+        const end = Math.min(start + TALK_BATCH_SIZE, items.length)
+        const batch = Array.from({ length: end - start }, (_, k) => start + k)
+
+        const results = await Promise.all(batch.map(async (i): Promise<TalkRow> => {
+          const item = items[i]
+          // An uneven batch reaches here as an item missing one half. It is
+          // recorded as a failure rather than skipped, so the results show
+          // exactly which images or lines had no partner.
+          if (!item.imageUrl || !item.text) {
+            return {
+              imageUrl: item.imageUrl,
+              text: item.text,
+              status: 'error',
+              error: item.imageUrl ? 'No CSV line for this image' : 'No image for this line',
+            }
+          }
+
+          try {
+            const wav = await fishTts({
+              apiKey: fishKey!,
+              voiceId,
+              text: item.text,
+              style: style ?? undefined,
+            })
+            // RunPod fetches the audio by URL, so it has to be hosted first.
+            const audioUrl = await uploadBuffer(wav, `queue/${id}/${i + 1}.wav`, 'audio/wav')
+
+            const video = await generateTalkingVideo({
+              imageUrl: item.imageUrl,
+              audioUrl,
+              prompt,
+              resolution,
+              apiKey: runpodKey!,
+            })
+
+            const stored = await uploadImageFromUrl(video.videoUrl, `queue/${id}/${i + 1}.mp4`)
+
+            try {
+              const { enqueueDriveArchive } = await import('@/lib/drive-archive/enqueue')
+              await enqueueDriveArchive({
+                userId: job.user_id,
+                sourceType: 'queue_job',
+                sourceId: `${id}:${i}`,
+                urls: [stored],
+                characterKey: folderName,
+                kind: 'reels',
+                stage: 'ready',
+                modelKey: 'infinitetalk',
+              })
+            } catch (err) {
+              console.error(`[queue/process] infinite_talk ${id} item ${i} drive archive failed:`, err)
+            }
+
+            return {
+              imageUrl: item.imageUrl,
+              text: item.text,
+              audioUrl,
+              videoUrl: stored,
+              costUsd: video.costUsd,
+              status: 'done',
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : 'failed'
+            console.error(`[queue/process] infinite_talk ${id} item ${i} failed:`, msg)
+            return { imageUrl: item.imageUrl, text: item.text, status: 'error', error: msg }
+          }
+        }))
+
+        rows.push(...results)
+        doneCount = end
+        await query(
+          `UPDATE generation_queue
+              SET done_items=$1, progress=$2,
+                  output=jsonb_build_object('talkRows', $3::jsonb, 'progressAt', $5::text)
+            WHERE id=$4`,
+          [
+            doneCount,
+            Math.round((doneCount / items.length) * 100),
+            JSON.stringify(rows),
+            id,
+            new Date().toISOString(),
+          ],
+        )
+      }
+
+      await query(
+        `UPDATE generation_queue SET status='done', finished_at=now(), progress=100 WHERE id=$1`,
+        [id],
+      )
+      const ok = rows.filter(r => r.status === 'done').length
+      const spent = rows.reduce((s, r) => s + (r.costUsd ?? 0), 0)
+      console.log(`[queue/process] infinite_talk ${id} done — ${ok}/${rows.length} clips, $${spent.toFixed(2)}`)
       return NextResponse.json({ ok: true, done: doneCount })
     }
 
