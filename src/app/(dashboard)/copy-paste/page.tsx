@@ -5,9 +5,13 @@ import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger,
+} from '@/components/ui/dialog'
 import { StudioSettingsProvider, useStudioSettings } from './studio-settings'
 import { RunTab } from './run-tab'
 import { CostsTab } from './costs-tab'
+import { ImageToVideoTab } from './image-to-video-tab'
 
 function StudioChrome({ children }: { children: React.ReactNode }) {
   const studio = useStudioSettings()
@@ -36,10 +40,20 @@ function StudioChrome({ children }: { children: React.ReactNode }) {
                 Stopped
               </Badge>
             )}
-            <div className="rounded-lg border border-border/60 bg-secondary/30 px-3.5 py-2 text-sm">
-              <span className="text-muted-foreground">Today </span>
-              <span className="font-semibold tabular-nums">{studio.formatUsd(studio.todaySpendUsd)}</span>
-            </div>
+            {/* Costs stopped being a tab: it is something you check, not a
+                place you work, so it opens from the number itself. */}
+            <Dialog>
+              <DialogTrigger className="rounded-lg border border-border/60 bg-secondary/30 px-3.5 py-2 text-sm hover:border-border hover:bg-secondary/50 transition-colors">
+                <span className="text-muted-foreground">Today </span>
+                <span className="font-semibold tabular-nums">{studio.formatUsd(studio.todaySpendUsd)}</span>
+              </DialogTrigger>
+              <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+                <DialogHeader>
+                  <DialogTitle>Costs</DialogTitle>
+                </DialogHeader>
+                <CostsTab />
+              </DialogContent>
+            </Dialog>
             {studio.stopRequested ? (
               <Button
                 variant="default"
@@ -71,14 +85,14 @@ function StudioBody() {
       <div className="px-6 sm:px-8 py-6 max-w-6xl w-full">
         <Tabs defaultValue="run" className="gap-6">
           <TabsList variant="line" className="w-full sm:w-auto justify-start h-auto flex-wrap">
-            <TabsTrigger value="run">Run</TabsTrigger>
-            <TabsTrigger value="costs">Costs</TabsTrigger>
+            <TabsTrigger value="run">Seedance Viral</TabsTrigger>
+            <TabsTrigger value="i2v">Image to Video</TabsTrigger>
           </TabsList>
           <TabsContent value="run" className="mt-2">
             <RunTab />
           </TabsContent>
-          <TabsContent value="costs" className="mt-2">
-            <CostsTab />
+          <TabsContent value="i2v" className="mt-2">
+            <ImageToVideoTab />
           </TabsContent>
         </Tabs>
       </div>

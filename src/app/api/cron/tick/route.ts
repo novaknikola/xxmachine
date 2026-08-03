@@ -93,7 +93,7 @@ export async function GET(req: NextRequest) {
         AND started_at < now() - interval '30 minutes'
         AND attempts < max_attempts
         AND job_type NOT IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk',
-                             'copy_paste_v2', 'copy_prompts_generate')`,
+                             'copy_paste_v2', 'copy_prompts_generate', 'seedance_i2v')`,
   ).catch(err => console.error('[cron/tick] reset stuck queue jobs:', err))
 
   // copy_paste_v2 and copy_prompts_generate write progressAt after every batch.
@@ -103,7 +103,7 @@ export async function GET(req: NextRequest) {
     `UPDATE generation_queue
         SET status = 'pending', started_at = NULL, error = NULL
       WHERE status = 'processing'
-        AND job_type IN ('copy_paste_v2', 'copy_prompts_generate')
+        AND job_type IN ('copy_paste_v2', 'copy_prompts_generate', 'seedance_i2v')
         AND attempts < max_attempts
         AND COALESCE(
               NULLIF(output->>'progressAt', '')::timestamptz,
@@ -117,7 +117,7 @@ export async function GET(req: NextRequest) {
             error = COALESCE(error, 'Job stalled — no progress after max attempts'),
             finished_at = now()
       WHERE status = 'processing'
-        AND job_type IN ('copy_paste_v2', 'copy_prompts_generate')
+        AND job_type IN ('copy_paste_v2', 'copy_prompts_generate', 'seedance_i2v')
         AND attempts >= max_attempts
         AND COALESCE(
               NULLIF(output->>'progressAt', '')::timestamptz,

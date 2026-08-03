@@ -4,6 +4,9 @@ import { generateImage, editImage, SEEDREAM_MAX_IMAGES } from '@/lib/wavespeed'
 import { resolveCarouselVariantPrompts } from '@/lib/carousel-variants'
 import { buildCarouselBasePrompt, DEFAULT_CAROUSEL_PRESET_ID } from '@/lib/carousel-presets'
 import { uploadImageFromUrl, uploadBuffer } from '@/lib/supabase-storage'
+import { generateSeedanceVideo } from '@/lib/runpod-seedance'
+import { promptForImage } from '@/lib/seedance-prompt'
+import { resolveKey } from '@/lib/user-keys'
 import { processVideoVariant, getVideoDuration, getVideoDimensions } from '@/lib/video-ffmpeg'
 import { generateAssFile, buildManualSegments, buildStaticSegment, type CaptionSegment } from '@/lib/captions'
 import { transcribeVideoFile } from '@/lib/transcribe'
@@ -23,7 +26,7 @@ import type {
   BulkImageJobItem, VideoRepurposeJobInput, VideoCaptionJobInput, VideoCaptionItem,
   VideoTranscribeJobInput, VideoOcrJobInput, CaptionShuffleJobInput, CaptionGenerateJobInput, ComfyUIPodBulkJobInput,
   BulkCarouselJobInput, MyPodI2vJobInput, MyPodAnimateJobInput, MyPodTalkJobInput, CopyPasteJobInput,
-  CopyPromptsJobInput,
+  CopyPromptsJobInput, SeedanceI2VJobInput,
 } from '../../submit/route'
 import { getPodSessionSecrets } from '@/lib/my-pod/session'
 import { ensureRemoteWorkDir, cleanupRemoteJobDir } from '@/lib/my-pod/ssh'
@@ -66,6 +69,18 @@ interface CopyPasteRow {
   error?: string
 }
 
+interface SeedanceRow {
+  imageUrl: string
+  /** Prompt the analysis produced for this still. */
+  prompt?: string
+  shotType?: string
+  videoUrl?: string
+  /** What the endpoint reported this render cost. */
+  costUsd?: number | null
+  status: 'done' | 'error'
+  error?: string
+}
+
 interface CopyPromptsRow {
   promptId: string
   /** Prompt sent for the base slide — the Seedream edit itself. */
@@ -87,6 +102,8 @@ const EXAMPLE_SAMPLE_SIZE = 25
 const CAROUSEL_BATCH_SIZE = 2
 const COPY_PASTE_BATCH_SIZE = 2
 const COPY_PROMPTS_BATCH_SIZE = 2
+/** Renders run on RunPod's GPUs, not here, so a few at a time is pacing the provider, not this box. */
+const SEEDANCE_BATCH_SIZE = 3
 
 /** Lease heartbeat so cron can requeue zombie My Pod workers after deploy/crash. */
 function packMyPodOutput(rows: MyPodRow[], stage: string) {
@@ -152,6 +169,7 @@ interface JobRow {
     carouselRows?: CarouselRow[]
     copyPasteRows?: CopyPasteRow[]
     copyPromptsRows?: CopyPromptsRow[]
+    seedanceRows?: SeedanceRow[]
     progressAt?: string
   } | null
   attempts: number
@@ -1322,6 +1340,116 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         [id],
       )
 
+      return NextResponse.json({ ok: true, done: doneCount })
+    }
+
+    // ── seedance_i2v — stills to 9:16 clips on RunPod ──────────────────────
+    if (job.job_type === 'seedance_i2v') {
+      const { items, duration, resolution, folderName, generateAudio } =
+        job.input as unknown as SeedanceI2VJobInput
+      if (!items?.length) throw new Error('No items in job input')
+
+      const apiKey = await resolveKey(job.user_id, 'RUNPOD_API_KEY')
+      if (!apiKey) {
+        await query(
+          `UPDATE generation_queue SET status='failed', error=$1, finished_at=now() WHERE id=$2`,
+          ['No RunPod API key — add it in Settings', id],
+        )
+        return NextResponse.json({ error: 'Missing RunPod key' }, { status: 500 })
+      }
+
+      const rows: SeedanceRow[] = job.output?.seedanceRows ? [...job.output.seedanceRows] : []
+      let doneCount = job.done_items
+
+      for (let start = doneCount; start < items.length; start += SEEDANCE_BATCH_SIZE) {
+        // Stop has to bite between batches: a 500-item run is real money, and
+        // the row's status is the only signal the worker gets.
+        if (!(await myPodJobStillRunning(id))) {
+          console.log(`[queue/process] seedance_i2v ${id} cancelled at ${doneCount}/${items.length}`)
+          return NextResponse.json({ ok: true, cancelled: true, done: doneCount })
+        }
+
+        const end = Math.min(start + SEEDANCE_BATCH_SIZE, items.length)
+        const batch = Array.from({ length: end - start }, (_, k) => start + k)
+
+        const results = await Promise.all(batch.map(async (i): Promise<SeedanceRow> => {
+          const item = items[i]
+          try {
+            // One cheap vision call decides the shot type; the motion itself
+            // comes from a table, not from the model — see seedance-prompt.ts.
+            const composed = await promptForImage(item.imageUrl)
+
+            const video = await generateSeedanceVideo({
+              imageUrl: item.imageUrl,
+              prompt: composed.prompt,
+              duration,
+              resolution,
+              cameraFixed: composed.cameraFixed,
+              generateAudio: generateAudio ?? false,
+              apiKey,
+            })
+
+            // RunPod hands back a CDN URL of unknown lifetime, so the file is
+            // pulled into our own storage before anything else points at it.
+            const stored = await uploadImageFromUrl(
+              video.videoUrl,
+              `queue/${id}/${i + 1}.mp4`,
+            )
+
+            try {
+              const { enqueueDriveArchive } = await import('@/lib/drive-archive/enqueue')
+              await enqueueDriveArchive({
+                userId: job.user_id,
+                sourceType: 'queue_job',
+                sourceId: `${id}:${i}`,
+                urls: [stored],
+                characterKey: folderName,
+                kind: 'reels',
+                stage: 'ready',
+                modelKey: 'seedance-i2v',
+              })
+            } catch (err) {
+              console.error(`[queue/process] seedance_i2v ${id} item ${i} drive archive failed:`, err)
+            }
+
+            return {
+              imageUrl: item.imageUrl,
+              prompt: composed.prompt,
+              shotType: composed.shotType,
+              videoUrl: stored,
+              costUsd: video.costUsd,
+              status: 'done',
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : 'failed'
+            console.error(`[queue/process] seedance_i2v ${id} item ${i} failed:`, msg)
+            return { imageUrl: item.imageUrl, status: 'error', error: msg }
+          }
+        }))
+
+        rows.push(...results)
+        doneCount = end
+        await query(
+          `UPDATE generation_queue
+              SET done_items=$1, progress=$2,
+                  output=jsonb_build_object('seedanceRows', $3::jsonb, 'progressAt', $5::text)
+            WHERE id=$4`,
+          [
+            doneCount,
+            Math.round((doneCount / items.length) * 100),
+            JSON.stringify(rows),
+            id,
+            new Date().toISOString(),
+          ],
+        )
+      }
+
+      await query(
+        `UPDATE generation_queue SET status='done', finished_at=now(), progress=100 WHERE id=$1`,
+        [id],
+      )
+      const spent = rows.reduce((s, r) => s + (r.costUsd ?? 0), 0)
+      console.log(`[queue/process] seedance_i2v ${id} done — ${rows.length} clips, $${spent.toFixed(2)}`)
       return NextResponse.json({ ok: true, done: doneCount })
     }
 

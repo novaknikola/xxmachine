@@ -25,6 +25,23 @@ export interface BulkImageJobItem {
   referenceImageUrls?: string[]
 }
 
+export interface SeedanceI2VItem {
+  /** Publicly reachable still — RunPod fetches it directly, nothing is uploaded. */
+  imageUrl: string
+  /** Where it came from (upload / drive / history), carried through for the results view. */
+  source?: string | null
+}
+
+export interface SeedanceI2VJobInput {
+  items: SeedanceI2VItem[]
+  /** Clip length and resolution are per batch, not per image. */
+  duration: number
+  resolution: '480p' | '720p'
+  /** Drive folder these land in. */
+  folderName: string
+  generateAudio?: boolean
+}
+
 export interface CopyPasteJobInput {
   itemIds: string[]
   /** Pin the clip's end with a matching second keyframe. Default 'auto'. */
@@ -196,6 +213,14 @@ const MAX_GENERATE_EXAMPLES = 2000
 const MAX_CAROUSEL_ITEMS = 25
 
 /**
+ * Videos per Image-to-Video batch. High on purpose: the render runs on RunPod's
+ * GPUs, not on this box, so a long batch costs wall clock and money rather than
+ * local resources. The job resumes from done_items and can be stopped, so the
+ * ceiling only exists to bound one mis-click.
+ */
+const MAX_SEEDANCE_ITEMS = 500
+
+/**
  * Uploads need the user's Google OAuth (service account has no My Drive quota).
  * List/download keep using the platform service account (folders shared with SA).
  */
@@ -262,6 +287,7 @@ export type QueueSubmitBody =
   | { job_type: 'bulk_carousel'; input: BulkCarouselJobInput }
   | { job_type: 'copy_paste_v2'; input: CopyPasteJobInput }
   | { job_type: 'copy_prompts_generate'; input: CopyPromptsJobInput }
+  | { job_type: 'seedance_i2v'; input: SeedanceI2VJobInput }
 
 export async function POST(req: NextRequest) {
   const user = await requireUser(req)
@@ -755,6 +781,52 @@ export async function POST(req: NextRequest) {
        VALUES ($1, $2, $3, $4)
        RETURNING id`,
       [user.id, body.job_type, JSON.stringify(input), items.length],
+    )
+    return NextResponse.json({ id: row!.id })
+  }
+
+  if (body.job_type === 'seedance_i2v') {
+    const { items, duration, resolution, folderName, generateAudio } = body.input ?? {}
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return NextResponse.json({ error: 'Pick at least one image' }, { status: 400 })
+    }
+    if (items.length > MAX_SEEDANCE_ITEMS) {
+      return NextResponse.json(
+        { error: `Max ${MAX_SEEDANCE_ITEMS} videos per batch` },
+        { status: 400 },
+      )
+    }
+    if (items.some((it: SeedanceI2VItem) => !it?.imageUrl?.trim())) {
+      return NextResponse.json({ error: 'Every item needs an imageUrl' }, { status: 400 })
+    }
+    if (resolution !== '480p' && resolution !== '720p') {
+      return NextResponse.json({ error: 'resolution must be 480p or 720p' }, { status: 400 })
+    }
+    const dur = Number(duration)
+    if (!Number.isFinite(dur) || dur < 3 || dur > 12) {
+      return NextResponse.json({ error: 'duration must be between 3 and 12 seconds' }, { status: 400 })
+    }
+    if (!String(folderName ?? '').trim()) {
+      return NextResponse.json({ error: 'folderName required' }, { status: 400 })
+    }
+
+    const input: SeedanceI2VJobInput = {
+      items: items.map((it: SeedanceI2VItem) => ({
+        imageUrl: it.imageUrl.trim(),
+        source: it.source ?? null,
+      })),
+      duration: Math.round(dur),
+      resolution,
+      folderName: String(folderName).trim(),
+      generateAudio: generateAudio === true,
+    }
+
+    const row = await one<{ id: string }>(
+      `INSERT INTO generation_queue (user_id, job_type, input, total_items)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [user.id, body.job_type, JSON.stringify(input), input.items.length],
     )
     return NextResponse.json({ id: row!.id })
   }
