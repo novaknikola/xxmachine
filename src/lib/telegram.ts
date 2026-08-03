@@ -92,3 +92,55 @@ export function approvalKeyboard(postId: string) {
     ]],
   }
 }
+
+/**
+ * Download a photo the user sent to the bot.
+ *
+ * Telegram does not hand out the file with the message — it gives a file_id
+ * that has to be exchanged for a path via getFile, and the download link is
+ * only valid for about an hour. So the bytes are fetched now and re-hosted;
+ * storing the Telegram URL would give a reference that expires mid-job.
+ */
+export async function downloadTelegramFile(fileId: string): Promise<{
+  buffer: ArrayBuffer
+  contentType: string
+  extension: string
+}> {
+  const file = await call('getFile', { file_id: fileId }) as { file_path?: string }
+  if (!file?.file_path) throw new Error('Telegram getFile returned no path')
+
+  const res = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`)
+  if (!res.ok) throw new Error(`Telegram file download failed (${res.status})`)
+
+  const extension = file.file_path.split('.').pop()?.toLowerCase() ?? 'jpg'
+  return {
+    buffer: await res.arrayBuffer(),
+    contentType: res.headers.get('content-type') ?? 'image/jpeg',
+    extension: /^(jpe?g|png|webp)$/.test(extension) ? extension : 'jpg',
+  }
+}
+
+/** Approve / cancel buttons for an assembled Copy-Paste batch. */
+export function batchKeyboard(batchId: string) {
+  return {
+    inline_keyboard: [[
+      { text: '▶️ Replicate', callback_data: `cpstart:${batchId}` },
+      { text: '✖️ Cancel', callback_data: `cpcancel:${batchId}` },
+    ]],
+  }
+}
+
+/** Edit a plain text message (sendPhoto captions use editMessageCaption). */
+export async function editMessageText(
+  chatId: string | number,
+  messageId: number,
+  text: string,
+) {
+  return call('editMessageText', {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+  })
+}

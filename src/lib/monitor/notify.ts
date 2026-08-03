@@ -1,5 +1,6 @@
 import { one } from '@/lib/db'
 import { sendPhoto, sendText, sendVideo } from '@/lib/telegram'
+import { sanitizeDriveKey } from '@/lib/drive-archive/paths'
 
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -56,6 +57,27 @@ export async function notifyNewPosts(
   )
 }
 
+/**
+ * Newest Drive folder this run filed something into, as a link.
+ *
+ * The archive uploads asynchronously, so at notification time a folder may not
+ * exist yet — a missing link is normal and simply omitted rather than reported
+ * as a problem.
+ */
+async function driveFolderLink(userId: string, profile: string): Promise<string | null> {
+  // character_key is stored sanitized (lowercased, non-alphanumerics collapsed),
+  // so the raw profile handle has to be put through the same function or the
+  // lookup silently finds nothing.
+  const row = await one<{ folder_id: string }>(
+    `SELECT folder_id FROM drive_folders
+      WHERE user_id = $1 AND character_key = $2
+      ORDER BY date_key DESC
+      LIMIT 1`,
+    [userId, sanitizeDriveKey(profile)],
+  )
+  return row?.folder_id ? `https://drive.google.com/drive/folders/${row.folder_id}` : null
+}
+
 export async function notifyReplicationDone(opts: {
   userId: string
   profile: string
@@ -64,11 +86,14 @@ export async function notifyReplicationDone(opts: {
   imageUrl?: string | null
   videoUrl?: string | null
 }): Promise<void> {
+  const folderUrl = await driveFolderLink(opts.userId, opts.profile).catch(() => null)
+
   const lines = [
     `✅ <b>Replication ready</b>`,
     `Source: @${escapeHtml(opts.profile)}`,
     opts.contentType ? `Type: ${escapeHtml(opts.contentType)}` : '',
     `<a href="${escapeHtml(opts.contentUrl)}">Original post</a>`,
+    folderUrl ? `<a href="${folderUrl}">📁 Drive folder</a>` : '',
   ].filter(Boolean)
 
   await notifyMonitorUser(opts.userId, lines.join('\n'), {
