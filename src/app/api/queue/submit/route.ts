@@ -8,6 +8,7 @@ import type { CaptionStyle, CaptionCustomStyle } from '@/lib/captions'
 import { dedupeCaptions } from '@/lib/caption-shuffle'
 import { SEEDREAM_MAX_IMAGES } from '@/lib/wavespeed'
 import { maxItemsForJob, MAX_SEEDREAM_SLIDES_PER_JOB } from '@/lib/queue-limits'
+import { normalizeContentFormat, type ContentFormat } from '@/lib/drive-archive/content-format'
 
 export interface BulkImageJobItem {
   prompt: string
@@ -104,6 +105,12 @@ export interface CopyPromptsJobInput {
   dimension: string
   /** User-typed Drive folder name — passed through as characterKey, unsanitized. */
   folderName: string
+  /**
+   * Publish destination picked in the form → which folder the Drive archive
+   * files this under. Omitted by older callers, which keep the previous
+   * carousel-or-stories behaviour.
+   */
+  contentFormat?: ContentFormat
   characterId?: string | null
   characterName?: string | null
   carousel?: {
@@ -958,6 +965,7 @@ export async function POST(req: NextRequest) {
     const {
       items, mode, loraUrl, loraScale, referenceImageUrls, dimension,
       folderName, characterId, characterName, carousel, seedreamResolution,
+      contentFormat,
     } = body.input ?? {}
 
     if (!Array.isArray(items) || items.length === 0) {
@@ -1031,6 +1039,8 @@ export async function POST(req: NextRequest) {
       referenceImageUrls,
       dimension: dimension || '9:16',
       folderName: folderName.trim(),
+      // Normalized here so a bad value cannot reach the archive as a folder name.
+      contentFormat: contentFormat ? normalizeContentFormat(contentFormat) : undefined,
       characterId: characterId ?? null,
       characterName: characterName ?? null,
       carousel: carousel?.enabled

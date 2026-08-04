@@ -1592,7 +1592,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     if (job.job_type === 'copy_prompts_generate') {
       const {
         items, mode, loraUrl, loraScale, referenceImageUrls, dimension,
-        folderName, carousel, seedreamResolution,
+        folderName, carousel, seedreamResolution, contentFormat,
       } = job.input as unknown as CopyPromptsJobInput
       if (!items?.length) throw new Error('No items in job input')
 
@@ -1704,7 +1704,9 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
             try {
               const { enqueueDriveArchive } = await import('@/lib/drive-archive/enqueue')
-              const kind = carousel?.enabled ? 'carousels' : 'stories'
+              // The form's publish format wins when it was sent; jobs queued
+              // before that field existed keep the old carousel-or-stories rule.
+              const kind = contentFormat ?? (carousel?.enabled ? 'carousels' : 'stories')
               const seriesId = `${id}:${i}`
               for (let si = 0; si < images.length; si++) {
                 await enqueueDriveArchive({

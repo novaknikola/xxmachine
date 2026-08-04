@@ -47,7 +47,7 @@ const NAV_ITEMS: NavItem[] = [
     module: 'generator',
     children: [
       { href: '/bulk', label: 'Image Generate', icon: Sparkles },
-      { href: '/bulk?tab=dataset', label: 'Dataset', icon: Database },
+      { href: '/bulk?tab=replace', label: 'Replace', icon: Database },
       { href: '/bulk?tab=train', label: 'Train LoRA', icon: Layers },
       { href: '/bulk?tab=bulk', label: 'Bulk Generate', icon: ImageIcon },
       { href: '/bulk?tab=carousel', label: 'Carousel', icon: ImageIcon },

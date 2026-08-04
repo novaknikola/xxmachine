@@ -53,6 +53,7 @@ const InstagramBundleDialog = lazy(() =>
   import('./prompt-library').then(m => ({ default: m.InstagramBundleDialog })),
 )
 import { CarouselTab } from './carousel-tab'
+import { ReplaceTab } from './replace-tab'
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -88,12 +89,14 @@ interface LoraRow {
 }
 
 const CONCURRENCY = 2
-const TAB_LABELS = ['Image Generate', 'Dataset', 'Train LoRA', 'Bulk Generate', 'Carousel'] as const
+const TAB_LABELS = ['Image Generate', 'Replace', 'Train LoRA', 'Bulk Generate', 'Carousel'] as const
 type Tab = typeof TAB_LABELS[number]
 
 const TAB_FROM_QUERY: Record<string, Tab> = {
   generate: 'Image Generate',
-  dataset: 'Dataset',
+  replace: 'Replace',
+  // Kept so links to the old Dataset tab still land somewhere sensible.
+  dataset: 'Replace',
   train: 'Train LoRA',
   bulk: 'Bulk Generate',
   carousel: 'Carousel',
@@ -101,7 +104,7 @@ const TAB_FROM_QUERY: Record<string, Tab> = {
 
 const QUERY_FROM_TAB: Record<Tab, string> = {
   'Image Generate': 'generate',
-  Dataset: 'dataset',
+  Replace: 'replace',
   'Train LoRA': 'train',
   'Bulk Generate': 'bulk',
   Carousel: 'carousel',
@@ -186,17 +189,12 @@ function BulkPageInner() {
   const [showPromptHelp, setShowPromptHelp] = useState(false)
   const [showBundleDialog, setShowBundleDialog] = useState(false)
 
-  // ── Dataset state ────────────────────────────────────────────
-  const [refImages, setRefImages] = useState<Array<{ id: string; file: File; url: string }>>([])
-  const [datasetPrompts, setDatasetPrompts] = useState('')
-  const [datasetSize, setDatasetSize] = useState('1:1')
+  // ── Replace state ────────────────────────────────────────────
+  // The results grid stays here rather than inside the tab: Train LoRA reads
+  // the selection out of it.
   const [datasetImages, setDatasetImages] = useState<DatasetImage[]>([])
-  const [datasetRunning, setDatasetRunning] = useState(false)
-  const [datasetProgress, setDatasetProgress] = useState({ done: 0, total: 0 })
   const [datasetHistory, setDatasetHistory] = useState<GenerationRow[]>([])
-  const fileInputRef = useRef<HTMLInputElement>(null)
   const carouselRefInputRef = useRef<HTMLInputElement>(null)
-  const datasetAbortRef = useRef(false)
 
   // ── Train state ──────────────────────────────────────────────
   const [trainName, setTrainName] = useState('')
@@ -265,86 +263,8 @@ function BulkPageInner() {
   }, [carouselRefImages])
 
   // ─────────────────────────────────────────────────────────────
-  // REPRODUCE TAB
+  // REPLACE TAB — inputs live in <ReplaceTab />; results land here
   // ─────────────────────────────────────────────────────────────
-
-  // ─────────────────────────────────────────────────────────────
-  // DATASET TAB
-  // ─────────────────────────────────────────────────────────────
-
-  function addRefImages(files: FileList | null) {
-    if (!files) return
-    const newImgs = Array.from(files).map(file => ({
-      id: crypto.randomUUID(), file, url: URL.createObjectURL(file),
-    }))
-    setRefImages(prev => [...prev, ...newImgs])
-  }
-
-  async function generateDataset() {
-    const prompts = cleanPromptLines(datasetPrompts)
-    if (prompts.length === 0) { toast.error('Add at least one prompt'); return }
-    if (refImages.length === 0) { toast.error('Upload at least one reference image'); return }
-
-    // Each prompt uses one reference image (cycling through the set)
-    // 3 prompts × 10 refs = 3 dataset images (not 30)
-    const total = prompts.length
-    datasetAbortRef.current = false
-    setDatasetRunning(true)
-    setDatasetProgress({ done: 0, total })
-    setDatasetImages([])
-
-    let done = 0
-    for (let i = 0; i < prompts.length; i++) {
-      if (datasetAbortRef.current) break
-      const prompt = prompts[i]
-      const ref = refImages[i % refImages.length] // cycle through references
-      try {
-        const fd = new FormData()
-        // Ensure MIME is set — empty File.type is rejected by /api/edit-image.
-        const typed = ref.file.type
-          ? ref.file
-          : new File([ref.file], ref.file.name || 'ref.jpg', { type: 'image/jpeg' })
-        fd.append('file', typed)
-        fd.append('prompt', prompt)
-        fd.append('size', datasetSize)
-        fd.append('saveHistory', 'true')
-        fd.append('historyPrompt', prompt)
-        // Matches the job row below; without it the Drive archive files these
-        // under _unsorted/ instead of dataset/.
-        fd.append('characterName', 'Dataset')
-        const res = await fetch('/api/edit-image', { method: 'POST', body: fd })
-        const data = await res.json()
-        if (!res.ok || !data.urls?.length) throw new Error(data.error ?? 'Failed')
-        const rowId = crypto.randomUUID()
-        setDatasetImages(prev => [...prev, {
-          id: rowId, url: data.urls[0], prompt, selected: true,
-        }])
-        generationsStore.add({
-          id: rowId,
-          kind: 'wan_edit',
-          characterId: '',
-          characterName: 'Dataset',
-          prompt,
-          dimension: datasetSize,
-          batch: 1,
-          status: 'done',
-          outputUrls: data.urls,
-          inputImageUrl: data.inputUrl,
-          createdAt: new Date().toISOString(),
-          userId: user?.id ?? '',
-        })
-      } catch (err) {
-        toast.error(`Failed: "${prompt}" — ${err instanceof Error ? err.message : 'error'}`)
-      }
-      done++
-      setDatasetProgress({ done, total })
-    }
-
-    setDatasetRunning(false)
-    loadDatasetHistory()
-    if (!datasetAbortRef.current) toast.success(`Dataset generated: ${done}/${total} images`)
-    else toast.info(`Stopped at ${done}/${total} images`)
-  }
 
   const selectedDatasetImages = datasetImages.filter(i => i.selected)
 
@@ -858,112 +778,15 @@ function BulkPageInner() {
         <div className="flex-1 overflow-y-auto">
           <div className="p-6 max-w-5xl mx-auto space-y-6">
 
-      {/* ── DATASET TAB ───────────────────────────────────────── */}
-      {tab === 'Dataset' && (
+      {/* ── REPLACE TAB ───────────────────────────────────────── */}
+      {tab === 'Replace' && (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Reference images */}
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">1. Reference images</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" multiple className="hidden"
-                  onChange={e => addRefImages(e.target.files)} />
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="w-full border-2 border-dashed border-border rounded-xl p-6 flex flex-col items-center gap-2 hover:border-primary/50 hover:bg-primary/5 transition-colors text-muted-foreground hover:text-foreground">
-                  <Upload className="w-6 h-6" />
-                  <span className="text-sm">Upload reference photos</span>
-                  <span className="text-xs opacity-60">Face + body shots — JPEG, PNG or WebP</span>
-                </button>
-                {refImages.length > 0 && (
-                  <div className="grid grid-cols-4 gap-2">
-                    {refImages.map(img => (
-                      <div key={img.id} className="relative group aspect-square rounded-lg overflow-hidden border border-border">
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={img.url} alt="" className="absolute inset-0 w-full h-full object-cover" />
-                        <button onClick={() => setRefImages(prev => prev.filter(i => i.id !== img.id))}
-                          className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                          <X className="w-2.5 h-2.5" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {refImages.length > 0 && <p className="text-xs text-muted-foreground text-center">{refImages.length} reference image(s) loaded</p>}
-              </CardContent>
-            </Card>
+          <ReplaceTab
+            onRunStart={() => setDatasetImages([])}
+            onGenerated={img => setDatasetImages(prev => [...prev, img])}
+          />
 
-            {/* Prompts */}
-            <Card>
-              <CardHeader className="pb-3">
-                <div className="flex items-center justify-between">
-                  <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">2. Prompts (1 per line)</CardTitle>
-                  <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
-                    title="Browse prompt library" onClick={() => setShowPromptHelp(true)}>
-                    <HelpCircle className="w-4 h-4" />
-                  </Button>
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <Textarea
-                  placeholder={"sitting on a beach, golden hour\nworking in a café, laptop open\nwalking through a market in Bali\n..."}
-                  value={datasetPrompts}
-                  onChange={e => setDatasetPrompts(e.target.value)}
-                  rows={10}
-                  className="resize-none font-mono text-sm"
-                />
-                <div className="space-y-1">
-                  <Label className="text-xs text-muted-foreground">Aspect ratio</Label>
-                  <Select value={datasetSize} onValueChange={v => { if (v) setDatasetSize(v) }}>
-                    <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {Object.entries(DIMENSIONS).map(([ratio, px]) => (
-                        <SelectItem key={ratio} value={ratio}>{ratio} — {px}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="flex items-center gap-2 p-3 rounded-lg bg-secondary/50 border border-border text-xs text-muted-foreground">
-                  <Info className="w-3.5 h-3.5 shrink-0" />
-                  <span>
-                    <strong className="text-foreground">{cleanPromptLines(datasetPrompts).length}</strong> prompts →{' '}
-                    <strong className="text-primary">{cleanPromptLines(datasetPrompts).length}</strong> dataset images
-                    {refImages.length > 1 && <span className="text-muted-foreground/60"> (cycling {refImages.length} refs)</span>}
-                  </span>
-                </div>
-                {!datasetRunning ? (
-                  <Button className="w-full" onClick={generateDataset}
-                    disabled={!datasetPrompts.trim() || !refImages.length}>
-                    <Play className="w-4 h-4 mr-2" />Generate Dataset
-                  </Button>
-                ) : (
-                  <div className="flex gap-2">
-                    <Button className="flex-1" disabled>
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      Generating... ({datasetProgress.done}/{datasetProgress.total})
-                    </Button>
-                    <Button variant="destructive" onClick={() => { datasetAbortRef.current = true }}>
-                      <Square className="w-4 h-4" />
-                    </Button>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </div>
-
-          {/* Dataset progress bar */}
-          {datasetRunning && (
-            <div className="space-y-1">
-              <div className="h-2 rounded-full bg-secondary overflow-hidden">
-                <div className="h-full bg-primary transition-all duration-300"
-                  style={{ width: `${datasetProgress.total > 0 ? (datasetProgress.done / datasetProgress.total) * 100 : 0}%` }} />
-              </div>
-            </div>
-          )}
-
-          {/* Dataset history */}
+          {/* Replace history */}
           {datasetHistory.length > 0 && (
             <Card>
               <CardHeader className="pb-3">
@@ -1008,7 +831,7 @@ function BulkPageInner() {
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between">
                   <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">
-                    Generated dataset ({selectedDatasetImages.length}/{datasetImages.length} selected)
+                    Replaced images ({selectedDatasetImages.length}/{datasetImages.length} selected)
                   </CardTitle>
                   <div className="flex gap-2 flex-wrap">
                     <Button size="sm" variant="outline" className="h-7 text-xs"
@@ -1127,13 +950,13 @@ function BulkPageInner() {
                 {selectedDatasetImages.length > 0 && (
                   <div className="flex items-center gap-2 p-2.5 rounded-lg bg-primary/10 border border-primary/20 text-xs">
                     <CheckCircle2 className="w-3.5 h-3.5 text-primary shrink-0" />
-                    <span className="text-foreground">{selectedDatasetImages.length} images from Dataset tab selected</span>
+                    <span className="text-foreground">{selectedDatasetImages.length} images from Replace tab selected</span>
                   </div>
                 )}
                 {selectedDatasetImages.length === 0 && (
                   <div className="flex items-center gap-2 p-2.5 rounded-lg bg-yellow-500/10 border border-yellow-500/20 text-xs text-yellow-400">
                     <Info className="w-3.5 h-3.5 shrink-0" />
-                    Generate and select dataset images in the Dataset tab first
+                    Generate and select images in the Replace tab first
                   </div>
                 )}
 
@@ -1680,17 +1503,12 @@ function BulkPageInner() {
             open={showPromptHelp}
             onClose={() => setShowPromptHelp(false)}
             onAdd={prompts => {
-              if (tab === 'Bulk Generate') {
-                setPromptsRaw(prev => {
-                  const existing = prev.trim()
-                  return existing ? existing + '\n' + prompts.join('\n') : prompts.join('\n')
-                })
-              } else {
-                setDatasetPrompts(prev => {
-                  const existing = prev.trim()
-                  return existing ? existing + '\n' + prompts.join('\n') : prompts.join('\n')
-                })
-              }
+              // Only Bulk Generate takes a prompt list now — Replace works off a
+              // single scene-edit prompt, so there is nowhere else to add these.
+              setPromptsRaw(prev => {
+                const existing = prev.trim()
+                return existing ? existing + '\n' + prompts.join('\n') : prompts.join('\n')
+              })
               setShowPromptHelp(false)
               toast.success(`Added ${prompts.length} prompt${prompts.length > 1 ? 's' : ''}`)
             }}
