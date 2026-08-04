@@ -64,3 +64,7 @@ tmp-*.js
 # Editor / tooling local state
 /.cursor
 __pycache__/
+
+# Local WaveSpeed history dumps (scripts/wavespeed-archive.ts)
+/wavespeed-archive
+/wavespeed-archive.zip

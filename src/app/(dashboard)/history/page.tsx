@@ -9,12 +9,11 @@ import {
   Download, Trash2, FolderDown, CheckSquare, Square,
   ImageIcon, Loader2, Filter, RefreshCw, CalendarDays,
   ChevronDown, MoreHorizontal, Sparkles, Wand2, Layers,
-  Copy, Clapperboard, ListTodo, X,
+  Copy, Clapperboard, ListTodo, X, Check,
 } from 'lucide-react'
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
-  DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator,
-  DropdownMenuTrigger,
+  DropdownMenuSeparator, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { ScheduleModal } from '@/components/schedule-modal'
 
@@ -234,29 +233,39 @@ export default function HistoryPage() {
               <ChevronDown className="w-3 h-3 opacity-60" />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-auto min-w-48">
-              <DropdownMenuRadioGroup
-                value={filter}
-                onValueChange={value => setFilter(value as FilterKind)}
+              {/* Plain items with a tick rather than a RadioGroup. Base UI's
+                  RadioGroup registers its own items, and this menu interleaves
+                  separators and section labels between them — which crashed the
+                  page with Base UI error #31. This was the only RadioGroup in
+                  the app, so nothing else was affected and nothing else needs
+                  the pattern. */}
+              <DropdownMenuItem
+                className="text-xs"
+                onClick={() => setFilter('all')}
               >
-                <DropdownMenuRadioItem value="all" className="text-xs">
-                  <Filter className="w-3.5 h-3.5 text-muted-foreground" />
-                  All types
-                </DropdownMenuRadioItem>
-                {FILTER_GROUPS.map(group => (
-                  <Fragment key={group.label}>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuLabel className="text-[10px] uppercase tracking-wider">
-                      {group.label}
-                    </DropdownMenuLabel>
-                    {group.items.map(({ value, icon: Icon }) => (
-                      <DropdownMenuRadioItem key={value} value={value} className="text-xs">
-                        <Icon className="w-3.5 h-3.5 text-muted-foreground" />
-                        {KIND_LABEL[value]}
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </Fragment>
-                ))}
-              </DropdownMenuRadioGroup>
+                <Filter className="w-3.5 h-3.5 text-muted-foreground" />
+                All types
+                {filter === 'all' && <Check className="w-3.5 h-3.5 ml-auto text-primary" />}
+              </DropdownMenuItem>
+              {FILTER_GROUPS.map(group => (
+                <Fragment key={group.label}>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel className="text-[10px] uppercase tracking-wider">
+                    {group.label}
+                  </DropdownMenuLabel>
+                  {group.items.map(({ value, icon: Icon }) => (
+                    <DropdownMenuItem
+                      key={value}
+                      className="text-xs"
+                      onClick={() => setFilter(value)}
+                    >
+                      <Icon className="w-3.5 h-3.5 text-muted-foreground" />
+                      {KIND_LABEL[value]}
+                      {filter === value && <Check className="w-3.5 h-3.5 ml-auto text-primary" />}
+                    </DropdownMenuItem>
+                  ))}
+                </Fragment>
+              ))}
             </DropdownMenuContent>
           </DropdownMenu>
 
