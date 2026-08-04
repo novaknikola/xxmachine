@@ -20,27 +20,37 @@ functions and only one of them was ever visible in the UI.
 
 `src/lib/monitor/analyze.ts` · `probeSourceVideo`
 
+Frames are placed on **events first**, and an even grid fills what is left.
+
 | | |
 |---|---|
-| Frames | `ceil(duration / 1.2)`, floor 8, ceiling 20 |
-| Grid | evenly spaced from `min(0.4, 5% of duration)` to `duration − 0.25` |
-| Extra frames | one at the **middle of each spoken line** from the transcript |
-| Dropped | a line time already within half a grid step of an existing frame |
-| Scene cuts | detected separately (`detectSceneCuts`), not part of the frame budget |
+| Grid size | `ceil(duration / 1.2)`, floor 8, ceiling 20 |
+| Grid span | `min(0.4, 5% of duration)` to `duration − 0.25` |
+| Event: cut | 0.15s **after** each `detectSceneCuts` hit — the new shot, not the dissolve |
+| Event: speech | the **middle of each spoken line** from the transcript |
+| Dedupe | anything within half a grid step of a frame already placed |
+| Total budget | 28 frames; events keep their slots, the grid is thinned |
 
-Real spacing:
+An even grid spends frames where nothing happens as readily as where everything
+does. Cuts and lines are the moments the spec is actually asked about — *which
+shot is this*, *whose mouth is moving* — so they are placed first.
 
-| Clip | Grid frames | Gap |
-|---|---|---|
-| 7s | 8 | 0.91s |
-| 10s | 9 | 1.17s |
-| 15s | 13 | 1.20s |
-| 20s | 17 | 1.21s |
-| 30s | 20 | 1.54s |
+How the budget lands:
 
-Past ~25s the gap widens again — the 20-frame ceiling exists because every
-frame rides in a single vision call, and a model's attention per image drops as
-the count rises.
+| Clip | Cuts | Lines | Frames | On events | Grid |
+|---|---|---|---|---|---|
+| 7s | 0 | 3 | 8 | 3 | 5 |
+| 15s | 2 | 6 | 13 | 8 | 5 |
+| 20s | 4 | 8 | 17 | 9 | 8 |
+| 20s | 0 | 0 | 17 | 0 | 17 |
+| 30s | 6 | 12 | 20 | 13 | 7 |
+| 45s | 10 | 18 | 22 | 19 | 3 |
+
+A silent single-take clip is sampled exactly as before. A busy one spends most
+of its budget where something changes.
+
+The ceiling exists because every frame rides in **one** vision call, and a
+model's attention per image thins as the count climbs.
 
 **All frames go to one call.** Model `GROK_SMART`, `temperature: 0.2`,
 `maxTokens: 4096`.

@@ -178,8 +178,77 @@ async function extractFrameAt(path: string, seconds: number, outPath: string): P
  * The floor keeps short clips exactly where they were; the ceiling caps what a
  * single vision call has to carry.
  */
-const TARGET_FRAME_GAP_SEC = 1.2
-const MAX_PROBE_FRAMES = 20
+/**
+ * Half a second. Anything coarser loses the beat of an action — a gesture that
+ * starts and finishes between two samples never happened as far as the analyser
+ * is concerned, and that is what made recreated clips miss what the source was
+ * actually doing.
+ */
+const TARGET_FRAME_GAP_SEC = 0.5
+
+/**
+ * Grid ceiling — 0.5s spacing held in full up to ~25s of clip.
+ *
+ * Past that the gap widens rather than the budget growing, because every frame
+ * rides in one vision call. A 45s reel at a true 0.5s would be 90 images in a
+ * single request, which is where the model stops reading them carefully. If
+ * long sources become normal, the fix is several calls over chunks of the clip
+ * rather than one enormous one.
+ */
+const MAX_PROBE_FRAMES = 50
+
+/**
+ * Hard budget for one call, events included. Above the grid ceiling because
+ * event frames earn their slot: a frame on a cut or on a spoken line answers a
+ * question the analyser was otherwise guessing at.
+ */
+const MAX_TOTAL_FRAMES = 60
+
+/**
+ * Sampled just after a cut rather than on it. Landing on the cut itself can
+ * catch the dissolve; a beat later is the new shot, which is the thing worth
+ * describing.
+ */
+const POST_CUT_OFFSET_SEC = 0.15
+
+/**
+ * Merge event times into a grid, keeping events and thinning the grid when the
+ * budget runs out.
+ *
+ * An evenly spaced grid spends its frames where nothing is happening as
+ * readily as where everything is. Cuts and spoken lines are the moments the
+ * spec is actually asked about — which shot is this, whose mouth is moving —
+ * so they are placed first and the grid fills what is left.
+ */
+function planSampleTimes(opts: {
+  grid: number[]
+  events: number[]
+  first: number
+  last: number
+  minGap: number
+}): { times: number[]; eventCount: number } {
+  const inRange = (t: number) => Number.isFinite(t) && t > opts.first && t < opts.last
+
+  // Events first, deduped against each other.
+  const events: number[] = []
+  for (const t of opts.events.filter(inRange).sort((a, b) => a - b)) {
+    if (!events.some(e => Math.abs(e - t) < opts.minGap)) events.push(t)
+  }
+
+  const budget = Math.max(0, MAX_TOTAL_FRAMES - events.length)
+  const kept: number[] = []
+  for (const g of opts.grid) {
+    if (kept.length >= budget) break
+    // A grid point next to an event adds nothing but cost.
+    if (events.some(e => Math.abs(e - g) < opts.minGap)) continue
+    kept.push(g)
+  }
+
+  return {
+    times: [...events, ...kept].sort((a, b) => a - b),
+    eventCount: events.length,
+  }
+}
 
 /**
  * @param minFrames floor — duration may push the real count above it.
@@ -223,21 +292,22 @@ export async function probeSourceVideo(
 
     const grid = Array.from({ length: frameCount }, (_, i) => first + step * i)
 
-    // Merge the transcript's moments into the grid, dropping any that already
-    // have a frame within half the grid spacing — a near-duplicate costs a
-    // vision-call image slot and tells the model nothing new.
-    const tooClose = Math.max(0.25, step / 2)
-    const extra = lineTimes
-      .filter(t => Number.isFinite(t) && t > first && t < last)
-      .filter(t => !grid.some(g => Math.abs(g - t) < tooClose))
-
-    const sampleTimes = [...grid, ...extra]
-      .sort((a, b) => a - b)
-      .slice(0, MAX_PROBE_FRAMES + extra.length)
+    // A beat after each cut is the new shot; a beat after a line starts is
+    // where a mouth is reliably moving. Both are questions the spec is asked
+    // and an even grid answers only by luck.
+    const cutFrames = cutTimes.map(t => t + POST_CUT_OFFSET_SEC)
+    const { times: sampleTimes, eventCount } = planSampleTimes({
+      grid,
+      events: [...cutFrames, ...lineTimes],
+      first,
+      last,
+      minGap: Math.max(0.25, step / 2),
+    })
 
     console.log(
-      `[monitor/probe] ${span.toFixed(1)}s clip → ${grid.length} grid frames ~${step.toFixed(2)}s apart` +
-      (extra.length ? ` + ${extra.length} on spoken lines` : ''),
+      `[monitor/probe] ${span.toFixed(1)}s clip → ${sampleTimes.length} frames ` +
+      `(${eventCount} on events: ${cutTimes.length} cuts, ${lineTimes.length} lines · ` +
+      `${sampleTimes.length - eventCount} grid ~${step.toFixed(2)}s apart)`,
     )
 
     const frames: string[] = []
