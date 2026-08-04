@@ -63,8 +63,9 @@ export interface CopyPasteSpec {
  * character looks like.
  */
 export const KEYFRAME_IDENTITY_LOCK =
-  'body proportions, bust size, build, skin tone and skin markings all follow image 2; ' +
-  'do not copy tattoos, piercings, scars, birthmarks or body shape from image 1'
+  'hair colour, hair length and hairstyle, body proportions, bust size, build, skin tone ' +
+  'and skin markings all follow image 2; ' +
+  'do not copy the hair, tattoos, piercings, scars, birthmarks or body shape from image 1'
 
 /** Always overwritten after parsing — never trust the model's own copy of this. */
 export const NEGATIVE_PROMPT_TEMPLATE =
@@ -106,7 +107,7 @@ Return ONLY this JSON shape (fill every key; no markdown, no commentary):
       "id": "short slug, e.g. female_subject / male_subject",
       "role": "their position/relationship in the shot",
       "appearance": "SEE RULE A BELOW",
-      "wardrobe": "garments, colors, footwear, hair color+style — SEE RULE B"
+      "wardrobe": "garments, colors, fabrics, footwear, accessories — clothing only, NO hair for people[0]. SEE RULE A and RULE B"
     }
   ],
   "environment": "location + visible props/background, one rich phrase",
@@ -138,9 +139,10 @@ literally: "reference character is from image. Mature <woman
 or man>, realistic facial features, highly detailed." — choose woman/man based
 on apparent sex, and write NOTHING else in appearance for this person (no hair
 color, skin tone, ethnicity, or age words — those belong in the fixed template
-only). Their "wardrobe" field (clothing + hair color/style) is still fully
-described normally, following RULE B — hair color/style is a styling choice,
-not a facial-identity attribute, so it is described even for the locked person.
+only). Their "wardrobe" field describes CLOTHING ONLY — garments, colors, fabrics,
+footwear, accessories. Write NOTHING about their hair: no color, no length, no
+style, no texture. The hair comes from the reference photo, and describing the
+source person's hair here overrides it. This applies to people[0] only.
 For every OTHER person, "appearance" is a full description (build, face, skin,
 hair, apparent age) — apply RULE B to it.
 

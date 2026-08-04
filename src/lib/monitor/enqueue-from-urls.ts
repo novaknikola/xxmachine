@@ -152,6 +152,10 @@ export async function enqueueReelUrlsForUser(opts: {
 
   // 2) Download API — best path for a single pasted URL
   let missing = parsed.filter(p => !resolved.has(p.shortCode.toLowerCase()))
+  // A spent RapidAPI plan looks exactly like a broken one from here: every call
+  // fails. The failure message used to guess "service is down / upgrading",
+  // which sent people looking at Instagram instead of at their own plan.
+  let quotaExhausted = false
   if (missing.length && rapidApiKey) {
     for (const p of missing) {
       try {
@@ -165,7 +169,9 @@ export async function enqueueReelUrlsForUser(opts: {
           views: r.views ?? 0,
           likes: r.likes ?? 0,
         })
-      } catch {
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (/\b429\b|exceeded the .*quota|too many requests/i.test(msg)) quotaExhausted = true
         /* fall through to the listing path */
       }
     }
@@ -212,7 +218,11 @@ export async function enqueueReelUrlsForUser(opts: {
     const apifyDown = !process.env.APIFY_API_KEY
     const detail = !rapidApiKey
       ? 'No RapidAPI key configured in Settings.'
-      : 'Instagram download service is down / upgrading, and we could not list this reel from the source profile (often age-restricted accounts return 0 reels). Apify is also over quota.'
+      : quotaExhausted
+        // Named exactly, because the fix is a plan upgrade and no amount of
+        // retrying or picking a different reel will help.
+        ? 'Your RapidAPI plan is out of requests for this month (HTTP 429). Upgrade the plan or wait for the quota to reset — retrying will keep failing until then.'
+        : 'The Instagram download service rejected this reel, and we could not list it from the source profile either (age-restricted accounts often return 0 reels).'
     throw new EnqueueUrlsError(`Could not fetch that reel. ${detail}`, 502, {
       resolveErrors,
       invalid,

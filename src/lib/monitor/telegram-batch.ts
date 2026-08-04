@@ -38,24 +38,45 @@ export async function openBatch(chatId: number | string): Promise<TelegramBatch 
 }
 
 /**
- * Store a reference photo and start a batch around it. Any batch still open in
- * this chat is cancelled first — sending a second photo means the user is
- * restarting, not adding a second identity.
+ * Attach a reference photo to the chat's batch.
+ *
+ * A photo arriving while a batch is open without one is the user completing
+ * that batch, not starting over — links sent before the photo must survive.
+ * Cancelling unconditionally meant every reel had to be sent twice, once
+ * before the photo and again after it.
+ *
+ * A photo arriving when the batch already HAS one is the other case — "use
+ * this photo instead" — and does restart, since two identities in one batch
+ * has no meaning.
  */
 export async function startBatchWithPhoto(opts: {
   userId: string
   chatId: number | string
   fileId: string
-}): Promise<TelegramBatch> {
+}): Promise<{ batch: TelegramBatch; replacedPrevious: boolean }> {
   const { buffer, contentType, extension } = await downloadTelegramFile(opts.fileId)
   const path = `telegram/${opts.userId}/ref_${Date.now()}.${extension}`
   const referenceImageUrl = await uploadBuffer(buffer, path, contentType)
 
-  await query(
-    `UPDATE telegram_batches SET status = 'cancelled', updated_at = now()
-      WHERE chat_id = $1 AND status = 'collecting'`,
-    [String(opts.chatId)],
-  )
+  const open = await openBatch(opts.chatId)
+
+  if (open && !open.reference_image_url) {
+    const updated = await one<TelegramBatch>(
+      `UPDATE telegram_batches
+          SET reference_image_url = $2, updated_at = now()
+        WHERE id = $1
+        RETURNING *`,
+      [open.id, referenceImageUrl],
+    )
+    return { batch: updated!, replacedPrevious: false }
+  }
+
+  if (open) {
+    await query(
+      `UPDATE telegram_batches SET status = 'cancelled', updated_at = now() WHERE id = $1`,
+      [open.id],
+    )
+  }
 
   const row = await one<TelegramBatch>(
     `INSERT INTO telegram_batches (user_id, chat_id, reference_image_url)
@@ -63,7 +84,7 @@ export async function startBatchWithPhoto(opts: {
      RETURNING *`,
     [opts.userId, String(opts.chatId), referenceImageUrl],
   )
-  return row!
+  return { batch: row!, replacedPrevious: Boolean(open) }
 }
 
 export interface AddUrlsResult {

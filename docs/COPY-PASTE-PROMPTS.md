@@ -83,19 +83,23 @@ After the images, one text block:
 
 No hair colour, skin tone, ethnicity or age words are allowed in `appearance`.
 
-**This is where hair comes from.** RULE A then says, verbatim:
+**Hair.** RULE A says, verbatim:
 
-> Their "wardrobe" field (clothing + hair color/style) is still fully described
-> normally, following RULE B — hair color/style is a styling choice, not a
-> facial-identity attribute, so it is described even for the locked person.
+> Their "wardrobe" field describes CLOTHING ONLY — garments, colors, fabrics,
+> footwear, accessories. Write NOTHING about their hair: no color, no length, no
+> style, no texture. The hair comes from the reference photo, and describing the
+> source person's hair here overrides it. This applies to people[0] only.
 
-So the analyser writes the **source reel's** hair into `wardrobe`, and
-`wardrobe` is passed straight into the keyframe prompt (§5). That is why the
-reference photo's hairstyle does not survive: it is being overridden by text
-describing someone else's hair.
+It used to say the opposite — that hair is "a styling choice, not a
+facial-identity attribute", and belonged in `wardrobe`. Since `wardrobe` is
+passed straight into the keyframe prompt (§5), the analyser was describing the
+**source reel's** hair and that text was beating the reference photo. Hair is
+now excluded here and named in `KEYFRAME_IDENTITY_LOCK` instead.
 
-The character's own `hairLock` field (`src/lib/types.ts`) is used only by
-`buildCharacterStylePrefix`, which this pipeline never calls.
+The character's own `hairLock` field (`src/lib/types.ts`) is still unused by
+this pipeline — it is read only by `buildCharacterStylePrefix`, which is never
+called here. It remains the option to take if hair should be fixed per
+character rather than per reference photo.
 
 ### RULE B — normalization (`NORMALIZATION_RULES`)
 
@@ -154,7 +158,7 @@ reference photo. Assembled in this order:
 1. `Image 1 is the scene reference, image 2 is the identity reference.`
 2. `Keep the exact pose, camera framing, and background from image 1 unchanged.`
 3. `Replace the main subject's face and body identity with the person from image 2.`
-4. `Wardrobe: {people[0].wardrobe}.` ← **source reel's clothing *and hair***
+4. `Wardrobe: {people[0].wardrobe}.` ← source reel's clothing, **no hair**
 5. `Environment: {spec.environment}.`
 6. `Lighting: {spec.lighting}.`
 7. `Body and skin come from image 2, not image 1: {KEYFRAME_IDENTITY_LOCK}.`
@@ -164,12 +168,14 @@ reference photo. Assembled in this order:
 
 `KEYFRAME_IDENTITY_LOCK`:
 
-> body proportions, bust size, build, skin tone and skin markings all follow
-> image 2; do not copy tattoos, piercings, scars, birthmarks or body shape from
-> image 1
+> hair colour, hair length and hairstyle, body proportions, bust size, build,
+> skin tone and skin markings all follow image 2; do not copy the hair, tattoos,
+> piercings, scars, birthmarks or body shape from image 1
 
-Note what line 7 does **not** list: hair. Line 4 supplies it, from the source.
-Those two lines are the whole hair problem.
+Lines 4 and 7 are the pair that decides appearance. Line 4 carries only what
+should come from the scene (clothing), line 7 names everything that must come
+from the identity photo. Hair sat on the wrong side of that split until
+2026-08-04.
 
 The end keyframe (`renderEndKeyframeEditPrompt`) is chained rather than
 independent — image 3 is the already-rendered start keyframe, and appearance is
@@ -204,7 +210,7 @@ This is the prompt shown as **Rendered prompt** in Details, and it is
 
 | Symptom | Read | Change |
 |---|---|---|
-| Wrong hair | `Wardrobe:` in the keyframe prompt | RULE A's hair clause, or wire `hairLock` |
+| Wrong hair | line 7 in the keyframe prompt; check `Wardrobe:` mentions no hair | `KEYFRAME_IDENTITY_LOCK`, or wire `hairLock` for a per-character lock |
 | Tattoos / body | line 7 + `Avoid:` in the keyframe prompt | `KEYFRAME_IDENTITY_LOCK` |
 | One speaker gets all lines | `scene_events[].speaker` in the spec | RULE D, or denser frames at line times |
 | Wrong action | `shots[]` and `scene_events[].action` | frame density |

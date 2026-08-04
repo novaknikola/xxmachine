@@ -110,13 +110,32 @@ export async function POST(req: NextRequest) {
         const photo = message.photo as Array<{ file_id: string }> | undefined
         if (photo?.length) {
           try {
-            const batch = await startBatchWithPhoto({
+            const { batch, replacedPrevious } = await startBatchWithPhoto({
               userId, chatId, fileId: photo[photo.length - 1].file_id,
             })
+            const already = batch.urls.length
             await sendText(
               chatId,
-              `📌 Reference photo saved.\n\nNow send the Instagram reel links — one per line, up to 30. They can come in several messages.\n\n<code>batch ${batch.id.slice(0, 8)}</code>`,
+              [
+                '📌 Reference photo saved.',
+                replacedPrevious ? 'Previous batch replaced.' : '',
+                '',
+                already
+                  ? `${already} reel${already === 1 ? '' : 's'} already in this batch — press Replicate below, or send more links.`
+                  : 'Now send the Instagram reel links — one per line, up to 30. They can come in several messages.',
+                '',
+                `<code>batch ${batch.id.slice(0, 8)}</code>`,
+              ].filter(l => l !== undefined).join('\n'),
             )
+            // Links that arrived before the photo now have everything they
+            // need, so the buttons appear without asking for them again.
+            if (already) {
+              const ready = await sendText(chatId, 'Ready when you are:') as { message_id?: number }
+              if (ready?.message_id) {
+                await editMessageReplyMarkup(chatId, ready.message_id, batchKeyboard(batch.id))
+                await setPromptMessage(batch.id, ready.message_id)
+              }
+            }
           } catch (err) {
             console.error('[telegram/webhook] photo failed:', err)
             await sendText(chatId, '❌ Could not save that photo. Try sending it again.')
