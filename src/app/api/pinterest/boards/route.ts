@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { one, rows, query } from '@/lib/db'
 import { requireUser } from '@/lib/session'
-import { fetchBoard, parseBoardRef, PinterestError } from '@/lib/pinterest'
+import { fetchBoard, parseBoardRef, PinterestError, explainEmptyBoard } from '@/lib/pinterest'
 
 interface BoardRow {
   id: string
@@ -62,7 +62,10 @@ export async function POST(req: NextRequest) {
   try {
     const fetched = await fetchBoard(ref)
     if (!fetched.pins.length) {
-      throw new PinterestError('Board reachable but no pins found — it may be empty or private')
+      // Say what was actually seen. "Empty or private" was a guess, and it sent
+      // people checking a board that was fine.
+      console.warn('[pinterest/boards] no pins:', ref.boardKey, JSON.stringify(fetched.diagnostics))
+      throw new PinterestError(explainEmptyBoard(fetched.diagnostics))
     }
 
     for (const pin of fetched.pins) {

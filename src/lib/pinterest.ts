@@ -105,13 +105,15 @@ function decodeEntities(s: string): string {
     .replace(/&amp;/g, '&')
 }
 
-async function getText(url: string): Promise<string | null> {
+async function getText(url: string): Promise<{ text: string | null; status: number | 'unreachable' }> {
   try {
     const res = await fetchPublicUrl(url, { headers: { 'User-Agent': UA, Accept: '*/*' } })
-    if (!res.ok) return null
-    return await res.text()
+    // The status is kept even on failure: a 403 and a 404 mean different
+    // things to whoever pasted the URL, and "no pins found" told them neither.
+    if (!res.ok) return { text: null, status: res.status }
+    return { text: await res.text(), status: res.status }
   } catch {
-    return null
+    return { text: null, status: 'unreachable' }
   }
 }
 
@@ -176,6 +178,37 @@ export function parseBoardPagePins(html: string): ParsedPin[] {
 export interface FetchedBoard {
   title: string | null
   pins: ParsedPin[]
+  /** What each surface actually returned — the difference between "private" and "we broke". */
+  diagnostics: BoardDiagnostics
+}
+
+export interface BoardDiagnostics {
+  rssStatus: number | 'unreachable'
+  pageStatus: number | 'unreachable'
+  pageBytes: number
+  /** Every i.pinimg.com reference in the page, before any filtering. */
+  rawImageRefs: number
+  /** Distinct images after the size-segment rule (content sizes, not avatars). */
+  uniqueImages: number
+  /** Dropped as page chrome — a hash appearing only once, e.g. the board's og:image. */
+  droppedAsChrome: number
+  rssItems: number
+}
+
+/** Human-readable reason a board came back with nothing. */
+export function explainEmptyBoard(d: BoardDiagnostics): string {
+  if (d.pageStatus === 404) return 'That board URL returns 404 — check the owner and slug.'
+  if (d.pageStatus === 403 || d.rssStatus === 403) return 'Pinterest refused the request (403) — the board is private, or the IP is being blocked.'
+  if (d.pageStatus === 'unreachable') return 'Could not reach pinterest.com at all.'
+  if (d.rawImageRefs === 0) {
+    return `The board page loaded (${Math.round(d.pageBytes / 1024)}KB) but contained no pin images at all — an empty board, or one whose contents load only after sign-in.`
+  }
+  if (d.uniqueImages === 0) {
+    return `Found ${d.rawImageRefs} image references but none at a content size — the page may be showing only avatars and UI, which usually means the board is private.`
+  }
+  // Everything was filtered: worth naming, because it points at our own rule
+  // rather than at Pinterest.
+  return `Found ${d.uniqueImages} distinct images but all ${d.droppedAsChrome} were treated as page chrome. That is our filter being wrong for this board, not an empty board — report it.`
 }
 
 /** Widest size Pinterest reliably serves when /originals/ is missing. */
@@ -213,14 +246,34 @@ async function resolveHdUrls(pins: ParsedPin[]): Promise<void> {
  */
 export async function fetchBoard(ref: ParsedBoardRef): Promise<FetchedBoard> {
   const rssUrl = `https://www.pinterest.com/${ref.owner}/${ref.slug}.rss`
-  const [rss, html] = await Promise.all([getText(rssUrl), getText(ref.boardUrl)])
+  const [rssRes, pageRes] = await Promise.all([getText(rssUrl), getText(ref.boardUrl)])
+  const rss = rssRes.text
+  const html = pageRes.text
+
+  // Counted before filtering so an empty result can be told apart from a
+  // filter that ate everything.
+  const rawImageRefs = html ? (html.match(/i\.pinimg\.com\/[^"'\s)]+/gi) ?? []).length : 0
+  const pagePins = html ? parseBoardPagePins(html) : []
+  const uniqueImages = html ? countContentImages(html) : 0
+
+  const diagnostics: BoardDiagnostics = {
+    rssStatus: rssRes.status,
+    pageStatus: pageRes.status,
+    pageBytes: html?.length ?? 0,
+    rawImageRefs,
+    uniqueImages,
+    droppedAsChrome: Math.max(0, uniqueImages - pagePins.length),
+    rssItems: rss ? (rss.match(/<item>/g) ?? []).length : 0,
+  }
 
   if (!rss && !html) {
-    throw new PinterestError('Could not reach that board — check the URL, and that the board is public')
+    throw new PinterestError(
+      `Could not reach that board (page ${pageRes.status}, rss ${rssRes.status}).`,
+    )
   }
 
   const byKey = new Map<string, ParsedPin>()
-  if (html) for (const p of parseBoardPagePins(html)) byKey.set(p.pinKey, p)
+  for (const p of pagePins) byKey.set(p.pinKey, p)
   if (rss) {
     for (const p of parseRssPins(rss)) {
       // Same pin can arrive under an image-hash key from the page and a numeric
@@ -238,5 +291,17 @@ export async function fetchBoard(ref: ParsedBoardRef): Promise<FetchedBoard> {
   return {
     title: title ? decodeEntities(title).trim() || null : null,
     pins,
+    diagnostics,
   }
+}
+
+/** Distinct content-sized images in the page, before the chrome filter. */
+function countContentImages(html: string): number {
+  const re = /https:\/\/i\.pinimg\.com\/(?:\d+x|originals)\/[a-z0-9/]+\.(?:jpg|jpeg|png|webp)/gi
+  const keys = new Set<string>()
+  for (const url of html.match(re) ?? []) {
+    const k = imageHashKey(url)
+    if (k) keys.add(k)
+  }
+  return keys.size
 }
