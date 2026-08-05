@@ -23,6 +23,8 @@ interface QueueJob {
     texts?: string[]
     carouselRows?: { prompt: string; images: string[]; status: 'done' | 'error'; error?: string }[]
   } | null
+  /** Already sanitised server-side, so the ZIP matches the Drive names exactly. */
+  input?: { seriesLabel?: string } | null
   attempts: number
   created_at: string
   started_at: string | null
@@ -267,27 +269,55 @@ export function QueueTab() {
     toast.success('CSV downloaded')
   }
 
+  /**
+   * Same four hex chars the Drive filename carries, from the same storage URL,
+   * so a downloaded slide and its archived twin are named identically. Falls
+   * back to no hash outside a secure context, where crypto.subtle is absent.
+   */
+  async function hash4(url: string): Promise<string> {
+    try {
+      const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(url))
+      return Array.from(new Uint8Array(d)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 4)
+    } catch {
+      return ''
+    }
+  }
+
   async function downloadCarouselZip(job: QueueJob) {
-    const rows = (job.output?.carouselRows ?? []).filter(r => r.status === 'done' && r.images.length)
+    // Keep the ORIGINAL index: the Drive subfolder is numbered from the
+    // unfiltered item list, so filtering first would renumber a batch with a
+    // failed carousel and make the ZIP disagree with Drive.
+    const rows = (job.output?.carouselRows ?? [])
+      .map((r, itemIndex) => ({ ...r, itemIndex }))
+      .filter(r => r.status === 'done' && r.images.length)
     if (!rows.length) return
+    const label = job.input?.seriesLabel?.trim() || ''
     setDownloading(job.id)
     try {
       const JSZipMod = (await import('jszip')).default
       const zip = new JSZipMod()
-      await Promise.all(rows.map(async (row, i) => {
-        const folder = zip.folder(`carousel_${String(i + 1).padStart(2, '0')}`)!
+      await Promise.all(rows.map(async row => {
+        const n = String(row.itemIndex + 1).padStart(2, '0')
+        const folder = zip.folder(label ? `${label}_${n}` : `carousel_${n}`)!
         await Promise.all(row.images.map(async (url, imgIdx) => {
           try {
             const blob = await fetch(url).then(r => r.blob())
             const ext = blob.type.includes('png') ? 'png' : 'jpg'
-            folder.file(`image_${imgIdx + 1}.${ext}`, blob)
+            const slide = String(imgIdx + 1).padStart(2, '0')
+            const h = label ? await hash4(url) : ''
+            folder.file(
+              label ? `${slide}${h ? `_${h}` : ''}.${ext}` : `image_${imgIdx + 1}.${ext}`,
+              blob,
+            )
           } catch {}
         }))
       }))
       const content = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } })
       const a = document.createElement('a')
       a.href = URL.createObjectURL(content)
-      a.download = `bulk_carousel_${job.id.slice(0, 8)}_${new Date().toISOString().slice(0, 10)}.zip`
+      a.download = label
+        ? `${label}_${new Date().toISOString().slice(0, 10)}.zip`
+        : `bulk_carousel_${job.id.slice(0, 8)}_${new Date().toISOString().slice(0, 10)}.zip`
       a.click()
       URL.revokeObjectURL(a.href)
       toast.success('ZIP downloaded')

@@ -3,6 +3,7 @@ import { requireUser } from '@/lib/session'
 import { one } from '@/lib/db'
 import { listDriveFiles, listDriveImages } from '@/lib/google-drive'
 import { getUserGoogleAccessToken } from '@/lib/drive-archive/user-google-auth'
+import { sanitizeArchiveLabel } from '@/lib/drive-archive/label'
 import type { VideoEffectOpts } from '@/lib/video-ffmpeg'
 import type { CaptionStyle, CaptionCustomStyle } from '@/lib/captions'
 import { dedupeCaptions } from '@/lib/caption-shuffle'
@@ -125,6 +126,12 @@ export interface CopyPromptsJobInput {
 export interface BulkCarouselJobInput {
   items: BulkImageJobItem[]
   variantsExtra: 1 | 2 | 3 | 4
+  /**
+   * User-chosen base name for the whole batch. Sanitised once at submit so the
+   * Drive filename and the ZIP can never disagree about what it was. Empty
+   * keeps the machine-generated names.
+   */
+  seriesLabel?: string
   presetId?: string
   grokSmart?: boolean
   /** Extra Seedream reference URLs (base image is generated per item). */
@@ -149,6 +156,8 @@ export interface VideoRepurposeJobInput {
   archiveToDrive?: boolean
   /** Drive folder to file under when archiving — the source profile label. */
   characterKey?: string | null
+  /** Base file name; the Copy-Paste chain derives it from the source reel. */
+  seriesLabel?: string | null
   /** Source lives in Drive rather than storage; downloaded with the platform token. */
   driveFileId?: string | null
   /**
@@ -364,7 +373,7 @@ export async function POST(req: NextRequest) {
   if (body.job_type === 'video_repurpose') {
     const {
       videoUrl, videoName, count, baseSeed, effects, archiveToDrive, characterKey,
-      inputDriveFolderId, outputDriveFolderId,
+      inputDriveFolderId, outputDriveFolderId, seriesLabel,
     } = body.input ?? {}
     const inputFolder = String(inputDriveFolderId ?? '').trim()
     const outputFolder = String(outputDriveFolderId ?? '').trim()
@@ -431,6 +440,7 @@ export async function POST(req: NextRequest) {
         effects: effectsInput,
         archiveToDrive: archiveToDrive === true,
         characterKey: characterKey ?? null,
+        seriesLabel: sanitizeArchiveLabel(seriesLabel) || null,
         driveFileId: src.driveFileId,
         outputDriveFolderId: outputFolder || null,
       }
@@ -876,6 +886,9 @@ export async function POST(req: NextRequest) {
       referenceImageUrls: body.input?.referenceImageUrls,
       seedreamOnly: body.input?.seedreamOnly ?? false,
       seedreamResolution: body.input?.seedreamResolution === '2k' ? '2k' : '1k',
+      // Sanitised here, not at use: the ZIP builder in the browser and the Drive
+      // enqueue on the server both read this value, and they must agree.
+      seriesLabel: sanitizeArchiveLabel(body.input?.seriesLabel) || undefined,
     }
 
     const row = await one<{ id: string }>(

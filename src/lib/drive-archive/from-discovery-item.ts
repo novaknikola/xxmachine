@@ -1,5 +1,6 @@
 import { one } from '@/lib/db'
 import { enqueueDriveArchive } from './enqueue'
+import { copyPasteArchiveLabel } from './label'
 import { repurposeImageUrls } from './image-repurpose'
 import { repurposeVideoUrls } from './video-repurpose'
 import type { ContentFormat, DriveArchiveKind } from './types'
@@ -12,6 +13,9 @@ interface DiscoveryArchiveRow {
   kling_video_url: string | null
   image_model: string | null
   video_model: string | null
+  /** Source IG handle + shortcode — the derived archive label. */
+  profile: string | null
+  content_id: string | null
   character_name: string | null
 }
 
@@ -44,6 +48,8 @@ export async function archiveDiscoveryItem(
             d.kling_video_url,
             d.image_model,
             d.video_model,
+            d.profile,
+            d.content_id,
             c.name AS character_name
        FROM discovery_items d
        LEFT JOIN tracked_profiles tp
@@ -57,6 +63,11 @@ export async function archiveDiscoveryItem(
   if (!row) return
 
   const characterKey = options.characterName ?? row.character_name ?? '_none'
+  // Derived, not typed: a Copy-Paste run is a batch over unrelated source reels,
+  // so one typed name would label them all identically. The source handle plus
+  // shortcode is what you actually look for, and it makes the raw original and
+  // its ready/ variants line up by name across the two folders.
+  const seriesLabel = copyPasteArchiveLabel(row.profile, row.content_id)
   const imageFormat = imageFormatForContentType(row.content_type)
   const imageKind: DriveArchiveKind = imageFormat
 
@@ -78,6 +89,7 @@ export async function archiveDiscoveryItem(
       kind: imageKind,
       stage: 'raw',
       modelKey: row.image_model,
+      seriesLabel,
     })
   }
 
@@ -91,6 +103,7 @@ export async function archiveDiscoveryItem(
       kind: 'reels',
       stage: 'raw',
       modelKey: row.video_model,
+      seriesLabel,
     })
   }
 
@@ -104,6 +117,7 @@ export async function archiveDiscoveryItem(
     imageModel: row.image_model,
     videoUrl,
     videoModel: row.video_model,
+    seriesLabel,
   }).catch(err =>
     console.error(`[drive-archive] discovery ready pipeline ${itemId} failed:`, err),
   )
@@ -118,6 +132,8 @@ async function finalizeDiscoveryReady(opts: {
   imageModel: string | null
   videoUrl: string | null
   videoModel: string | null
+  /** Derived from the source reel — same prefix as its raw/ twin. */
+  seriesLabel: string
 }): Promise<void> {
   const base = `monitor/${opts.itemId}/drive`
 
@@ -142,6 +158,7 @@ async function finalizeDiscoveryReady(opts: {
         kind: opts.imageFormat,
         stage: 'ready',
         modelKey: opts.imageModel,
+        seriesLabel: opts.seriesLabel,
       })
     }
   }
@@ -167,6 +184,7 @@ async function finalizeDiscoveryReady(opts: {
         kind: 'reels',
         stage: 'ready',
         modelKey: opts.videoModel,
+        seriesLabel: opts.seriesLabel,
       })
     }
   }

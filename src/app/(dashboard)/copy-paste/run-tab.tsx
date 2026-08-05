@@ -20,12 +20,15 @@ import {
 } from 'lucide-react'
 import { useStudioSettings } from './studio-settings'
 import type { CopyPasteSpec } from '@/lib/monitor/copy-paste-spec'
+import { copyPasteArchiveLabel } from '@/lib/drive-archive/label'
 import { JobDetailSheet } from './job-detail-sheet'
 import { PasteUrlsPanel } from './paste-urls-panel'
 
 interface ReplicateItem {
   id: string
   profile: string
+  /** IG shortcode — half of the derived archive label. */
+  content_id: string | null
   content_url: string
   content_type: string | null
   source_duration: number | null
@@ -289,6 +292,9 @@ export function RunTab() {
             },
             archiveToDrive: true,
             characterKey: item.profile,
+            // Same derived name the original carries, so a manual repurpose
+            // files alongside the automatic one instead of under a random name.
+            seriesLabel: copyPasteArchiveLabel(item.profile, item.content_id),
           },
         }),
       })

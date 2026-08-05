@@ -65,7 +65,7 @@ export async function POST(req: NextRequest) {
 
     const {
       prompt, dimension, batch, loraUrl, loraScale, characterId, characterName, contentFormat,
-      seriesId, seriesIndex, seriesTotal,
+      seriesId, seriesIndex, seriesTotal, seriesLabel, seriesFolder,
     } = await req.json()
 
     if (!prompt) return NextResponse.json({ error: 'Missing prompt' }, { status: 400 })
@@ -116,6 +116,8 @@ export async function POST(req: NextRequest) {
           seriesId: seriesId ?? null,
           seriesIndex: seriesIndex ?? null,
           seriesTotal: seriesTotal ?? null,
+          seriesLabel: seriesLabel ?? null,
+          seriesFolder: seriesFolder ?? null,
         })
       } catch (e) {
         console.error('[generate] history persist failed:', e)

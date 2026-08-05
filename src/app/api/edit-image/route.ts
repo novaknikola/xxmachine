@@ -79,6 +79,8 @@ interface EditImageJsonBody {
   seriesId?: string
   seriesIndex?: number
   seriesTotal?: number
+  seriesLabel?: string
+  seriesFolder?: string
 }
 
 async function saveToHistory(opts: {
@@ -93,6 +95,8 @@ async function saveToHistory(opts: {
   seriesId?: string | null
   seriesIndex?: number | null
   seriesTotal?: number | null
+  seriesLabel?: string | null
+  seriesFolder?: string | null
 }) {
   if (!opts.wavespeedUrls.length) return
   try {
@@ -109,6 +113,8 @@ async function saveToHistory(opts: {
       seriesId: opts.seriesId ?? null,
       seriesIndex: opts.seriesIndex ?? null,
       seriesTotal: opts.seriesTotal ?? null,
+      seriesLabel: opts.seriesLabel ?? null,
+      seriesFolder: opts.seriesFolder ?? null,
     })
   } catch (e) {
     // History is best-effort: never fail the edit because of it.

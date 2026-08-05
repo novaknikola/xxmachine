@@ -30,6 +30,10 @@ export interface PersistGenerationInput {
   seriesId?: string | null
   seriesIndex?: number | null
   seriesTotal?: number | null
+  /** User-chosen base name; blank keeps the machine-generated filename. */
+  seriesLabel?: string | null
+  /** Per-set Drive subfolder (one carousel). */
+  seriesFolder?: string | null
 }
 
 export interface PersistGenerationResult {
@@ -132,6 +136,8 @@ export async function persistGeneration(
     seriesId: input.seriesId,
     seriesIndex: input.seriesIndex,
     seriesTotal: input.seriesTotal,
+    seriesLabel: input.seriesLabel,
+    seriesFolder: input.seriesFolder,
   }
 
   // Originals → raw/ only. Ready variants → ready/ (VA) — only successful repurposes.

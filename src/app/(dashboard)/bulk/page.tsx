@@ -45,6 +45,7 @@ import {
   suggestedDimensionForFormat,
   type ContentFormat,
 } from '@/lib/drive-archive/content-format'
+import { sanitizeArchiveLabel, seriesFolderName } from '@/lib/drive-archive/label'
 
 const PromptHelpDialog = lazy(() =>
   import('./prompt-library').then(m => ({ default: m.PromptHelpDialog })),
@@ -220,6 +221,9 @@ function BulkPageInner() {
   const [bulkLoraUrl, setBulkLoraUrl] = useState('')
   const [bulkLoraScale, setBulkLoraScale] = useState(0.8)
   const [carouselMode, setCarouselMode] = useState(false)
+  /** User-chosen base name for this batch. Empty keeps the machine names. */
+  const [carouselSeriesName, setCarouselSeriesName] = useState('')
+  const carouselLabelPreview = sanitizeArchiveLabel(carouselSeriesName)
   const [carouselExtra, setCarouselExtra] = useState<1 | 2 | 3 | 4>(1)
   const [carouselPresetId, setCarouselPresetId] = useState(DEFAULT_CAROUSEL_PRESET_ID)
   const [carouselGrokSmart, setCarouselGrokSmart] = useState(false)
@@ -382,6 +386,8 @@ function BulkPageInner() {
       seriesId?: string
       seriesIndex?: number
       seriesTotal?: number
+      seriesLabel?: string
+      seriesFolder?: string
     },
   ): Promise<string[]> {
     const res = await fetch('/api/edit-image', {
@@ -401,6 +407,8 @@ function BulkPageInner() {
         seriesId: meta?.seriesId,
         seriesIndex: meta?.seriesIndex,
         seriesTotal: meta?.seriesTotal,
+        seriesLabel: meta?.seriesLabel,
+        seriesFolder: meta?.seriesFolder,
       }),
     })
     const data = await res.json()
@@ -525,6 +533,13 @@ function BulkPageInner() {
     // up front; some positions may end up missing if a variant call fails.
     const seriesId = carouselMode ? crypto.randomUUID() : undefined
     const seriesTotal = carouselMode ? 1 + carouselExtra : undefined
+    // Numbered by position in the visible task list, not by run order: the
+    // runner pulls from a filtered `pending` array, so a rerun of one failed
+    // task would otherwise renumber its folder.
+    const seriesLabel = carouselMode ? (carouselSeriesName.trim() || undefined) : undefined
+    const seriesFolder = seriesLabel
+      ? seriesFolderName(seriesLabel, jobs.findIndex(j => j.id === job.id) + 1)
+      : undefined
 
     updateJob(job.id, { status: 'processing', startedAt: new Date().toISOString(), sentPrompt: generationPrompt, sentLoraUrl: loraUrl ?? undefined })
     try {
@@ -544,6 +559,8 @@ function BulkPageInner() {
           seriesId,
           seriesIndex: 0,
           seriesTotal,
+          seriesLabel,
+          seriesFolder,
         })
       } else {
         const res = await fetch('/api/generate', {
@@ -562,6 +579,8 @@ function BulkPageInner() {
             seriesId,
             seriesIndex: 0,
             seriesTotal,
+            seriesLabel,
+            seriesFolder,
           }),
         })
         const data = await res.json()
@@ -615,6 +634,8 @@ function BulkPageInner() {
               seriesId,
               seriesIndex: vi + 1,
               seriesTotal,
+              seriesLabel,
+              seriesFolder,
             },
           )
           return editUrls[0]
@@ -711,6 +732,7 @@ function BulkPageInner() {
               referenceImageUrls,
               seedreamOnly: refOnly,
               seedreamResolution,
+              seriesLabel: carouselSeriesName.trim() || undefined,
             },
           }
         : { job_type: 'bulk_image', input: { jobs: queueJobs } }
@@ -1192,6 +1214,26 @@ function BulkPageInner() {
                     </label>
                     {carouselMode && (
                       <div className="space-y-2 pl-6">
+                        <div className="space-y-1">
+                          <span className="text-xs text-muted-foreground">
+                            Name <span className="opacity-60">(Drive folder + file names)</span>
+                          </span>
+                          <Input
+                            value={carouselSeriesName}
+                            onChange={e => setCarouselSeriesName(e.target.value)}
+                            placeholder="beach_vacation"
+                            className="h-8 text-xs font-mono"
+                          />
+                          {/* Live preview of the SANITISED name. A fully
+                              non-Latin label sanitises to nothing and silently
+                              reverts to automatic names — this is where that
+                              becomes visible, instead of in Drive an hour later. */}
+                          <p className="text-[10px] text-muted-foreground/70 leading-snug font-mono break-all">
+                            {carouselLabelPreview
+                              ? `${(driveLabel.trim() || '{girl}').toLowerCase()}/carousel/ready/YYYY-MM-DD/${carouselLabelPreview}_01/01_a3f2.jpg`
+                              : 'Empty — keeps automatic names'}
+                          </p>
+                        </div>
                         <div className="flex items-center gap-2">
                           <span className="text-xs text-muted-foreground shrink-0">Extra images:</span>
                           <Select value={String(carouselExtra)} onValueChange={v => { if (v) setCarouselExtra(Number(v) as 1 | 2 | 3 | 4) }}>

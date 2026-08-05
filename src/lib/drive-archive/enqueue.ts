@@ -6,6 +6,7 @@ import {
   hashUrl,
   sanitizeDriveKey,
 } from './paths'
+import { sanitizeArchiveLabel } from './label'
 import { kickDriveArchiveWorker } from './kick'
 import { normalizeDriveStage } from './content-format'
 import type { EnqueueDriveArchiveInput } from './types'
@@ -51,6 +52,10 @@ export async function enqueueDriveArchive(
   const modelKey = sanitizeDriveKey(input.modelKey, '_default')
   const stage = normalizeDriveStage(input.stage)
   const dateKey = (input.dateKey || '').trim() || archiveDateKey()
+  // Sanitised once here so the stored filename and the stored folder can never
+  // disagree about what the label was.
+  const seriesLabel = sanitizeArchiveLabel(input.seriesLabel)
+  const seriesFolder = sanitizeArchiveLabel(input.seriesFolder)
   let enqueued = 0
 
   for (let i = 0; i < urls.length; i++) {
@@ -67,14 +72,15 @@ export async function enqueueDriveArchive(
       modelKey,
       seriesId: input.seriesId,
       seriesIndex: input.seriesIndex,
-      seriesTotal: input.seriesTotal,
+      seriesLabel,
+      seriesFolder,
     })
 
     const result = await query(
       `INSERT INTO drive_exports
          (user_id, source_type, source_id, source_url, url_hash, filename, mime_type,
-          character_key, kind, stage, date_key, model_key, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending')
+          character_key, kind, stage, date_key, model_key, series_folder, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'pending')
        ON CONFLICT (user_id, source_type, source_id, url_hash) DO NOTHING
        RETURNING id`,
       [
@@ -90,6 +96,7 @@ export async function enqueueDriveArchive(
         stage,
         dateKey,
         modelKey,
+        seriesFolder,
       ],
     )
     if (result.rowCount && result.rowCount > 0) enqueued++

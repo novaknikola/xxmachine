@@ -1,4 +1,5 @@
 import { one, query, rows } from '@/lib/db'
+import { copyPasteArchiveLabel } from '@/lib/drive-archive/label'
 import {
   extractCopyPasteSpec,
   transcribeSourceSpeech,
@@ -33,6 +34,8 @@ async function enqueueRepurpose(opts: {
   count: number
   characterKey: string | null
   itemId: string
+  /** Derived from the source reel so variants share the original's prefix. */
+  seriesLabel?: string
 }): Promise<void> {
   if (!opts.count || opts.count < 1) return
 
@@ -54,6 +57,7 @@ async function enqueueRepurpose(opts: {
         },
         archiveToDrive: true,
         characterKey: opts.characterKey,
+        seriesLabel: opts.seriesLabel,
       }),
       opts.count,
     ],
@@ -348,6 +352,7 @@ export async function replicateCopyPasteItem(
       count: opts?.repurposeCount ?? 0,
       characterKey: item.profile,
       itemId,
+      seriesLabel: copyPasteArchiveLabel(item.profile, item.content_id),
     }).catch(err => console.error('[monitor/replicate] repurpose enqueue failed:', err))
     await notifyReplicationDone({
       userId,

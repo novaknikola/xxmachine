@@ -1,4 +1,4 @@
-import { withClient } from '@/lib/db'
+import { withClient, one } from '@/lib/db'
 import { ensureChildFolder } from '@/lib/google-drive'
 import { ensureDriveRootFolder } from './ensure-root-folder'
 import {
@@ -8,6 +8,7 @@ import {
   type DriveArchiveStage,
 } from './content-format'
 import { archiveDateKey, characterDriveFolderName, sanitizeDriveKey } from './paths'
+import { sanitizeArchiveLabel } from './label'
 import type { PoolClient } from 'pg'
 
 async function ensureCachedSegment(
@@ -59,19 +60,23 @@ async function ensureCachedSegment(
  * Every path segment is cached under a per-user advisory lock so concurrent
  * raw/ready uploads reuse the same girl/format folders instead of creating duplicates.
  */
-export async function resolveArchiveFolder(opts: {
-  userId: string
+/**
+ * Every path segment for a set of archive coordinates. Pure — no Drive, no DB —
+ * so the layout can be asserted in a test without touching either.
+ */
+export function archiveFolderPaths(opts: {
   characterKey: string
   kind: DriveArchiveKind | string
   stage?: DriveArchiveStage | string | null
   dateKey?: string | null
-  accessToken: string
-  rootFolderId?: string | null
-}): Promise<string> {
+  /** Per-set subfolder under the date folder (one carousel). '' = flat, as before. */
+  seriesFolder?: string | null
+}) {
   const characterKey = sanitizeDriveKey(opts.characterKey)
   const stage = normalizeDriveStage(opts.stage)
   const dateKey = (opts.dateKey || '').trim() || archiveDateKey()
   const formatName = driveFormatFolderName(opts.kind)
+  const seriesName = sanitizeArchiveLabel(opts.seriesFolder)
   const kindCache = (() => {
     const s = String(opts.kind ?? '').toLowerCase()
     if (s === 'carousel' || s === 'carousels') return 'carousels'
@@ -83,13 +88,64 @@ export async function resolveArchiveFolder(opts: {
   const girlPath = girlName
   const formatPath = `${girlPath}/${formatName}`
   const stagePath = `${formatPath}/${stage}`
-  const leafPath = `${stagePath}/${dateKey}`
+  const dayPath = `${stagePath}/${dateKey}`
+  // No subfolder → leaf IS the day folder, i.e. exactly the previous layout.
+  const leafPath = seriesName ? `${dayPath}/${seriesName}` : dayPath
+
+  return {
+    characterKey, stage, dateKey, formatName, kindCache, seriesName,
+    girlName, girlPath, formatPath, stagePath, dayPath, leafPath,
+  }
+}
+
+export async function resolveArchiveFolder(opts: {
+  userId: string
+  characterKey: string
+  kind: DriveArchiveKind | string
+  stage?: DriveArchiveStage | string | null
+  dateKey?: string | null
+  accessToken: string
+  rootFolderId?: string | null
+  seriesFolder?: string | null
+}): Promise<string> {
+  const p = archiveFolderPaths(opts)
+  const { characterKey, stage, dateKey, formatName, kindCache, girlName } = p
+  const { girlPath, formatPath, stagePath, dayPath, leafPath } = p
 
   const lockKey = `drive-archive:${opts.userId}`
 
+  // Fast path, deliberately OUTSIDE the lock. Once the leaf exists this is a
+  // pure cache read that needs no mutual exclusion, and taking a per-user
+  // exclusive lock for it serialises every upload for that user behind whoever
+  // happens to be creating a folder. Per-carousel subfolders make folder
+  // creation far more frequent (one new leaf per carousel instead of one per
+  // day), so paying a lock for the common case is no longer defensible.
+  const preCached = await one<{ folder_id: string }>(
+    `SELECT folder_id FROM drive_folders WHERE user_id = $1 AND path = $2`,
+    [opts.userId, leafPath],
+  )
+  if (preCached?.folder_id) return preCached.folder_id
+
   return withClient(async client => {
-    await client.query('SELECT pg_advisory_lock(hashtext($1::text))', [lockKey])
+    // Fail fast rather than block: a blocking pg_advisory_lock inside a
+    // statement-timeout window turns "another upload is creating a folder" into
+    // a hard error with a useless message. drive_exports already has attempts
+    // plus exponential backoff, so handing the row back is the cheaper answer.
+    // The message must not contain reconnect/not connected/401 — process.ts
+    // treats those as permanently failed.
+    let locked = false
+    for (let i = 0; i < 3 && !locked; i++) {
+      const r = await client.query<{ got: boolean }>(
+        'SELECT pg_try_advisory_lock(hashtext($1::text)) AS got',
+        [lockKey],
+      )
+      locked = r.rows[0]?.got === true
+      if (!locked) await new Promise(res => setTimeout(res, 200))
+    }
+    if (!locked) throw new Error('drive folder busy — will retry')
     try {
+      // Re-check inside the lock: the race guard for two callers that both
+      // missed the fast path above.
       const cachedLeaf = await client.query<{ folder_id: string }>(
         `SELECT folder_id FROM drive_folders WHERE user_id = $1 AND path = $2`,
         [opts.userId, leafPath],
@@ -141,9 +197,9 @@ export async function resolveArchiveFolder(opts: {
         dateKey: '_',
       })
 
-      return ensureCachedSegment(client, {
+      const dayFolderId = await ensureCachedSegment(client, {
         userId: opts.userId,
-        path: leafPath,
+        path: dayPath,
         parentId: stageFolderId,
         name: dateKey,
         accessToken: opts.accessToken,
@@ -152,8 +208,25 @@ export async function resolveArchiveFolder(opts: {
         stage,
         dateKey,
       })
+      if (!p.seriesName) return dayFolderId
+
+      // One more level: this set's own folder, so a carousel's slides are not
+      // mixed in with everything else archived that day.
+      return ensureCachedSegment(client, {
+        userId: opts.userId,
+        path: leafPath,
+        parentId: dayFolderId,
+        name: p.seriesName,
+        accessToken: opts.accessToken,
+        characterKey,
+        kind: kindCache,
+        stage,
+        dateKey,
+      })
     } finally {
-      await client.query('SELECT pg_advisory_unlock(hashtext($1::text))', [lockKey])
+      if (locked) {
+        await client.query('SELECT pg_advisory_unlock(hashtext($1::text))', [lockKey])
+      }
     }
   })
 }

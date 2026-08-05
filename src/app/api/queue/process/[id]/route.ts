@@ -290,7 +290,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     // ── video_repurpose ───────────────────────────────────────────────────────
     if (job.job_type === 'video_repurpose') {
       const {
-        videoUrl, videoName, count, baseSeed, effects, archiveToDrive, characterKey,
+        videoUrl, videoName, count, baseSeed, effects, archiveToDrive, characterKey, seriesLabel,
         driveFileId, outputDriveFolderId,
       } = job.input as unknown as VideoRepurposeJobInput
       let doneCount = job.done_items
@@ -414,6 +414,9 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               seriesId: id,
               seriesIndex: vi,
               seriesTotal: good.length,
+              // Same prefix the source reel's raw/ copy carries, so an original
+              // and its variants line up by name across the two folders.
+              seriesLabel,
             })
           }
         } catch (err) {
@@ -1226,7 +1229,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
     // ── bulk_carousel ─────────────────────────────────────────────────────────
     if (job.job_type === 'bulk_carousel') {
-      const { items, variantsExtra, presetId, grokSmart, referenceImageUrls, seedreamOnly, seedreamResolution } = job.input as unknown as BulkCarouselJobInput
+      const { items, variantsExtra, presetId, grokSmart, referenceImageUrls, seedreamOnly, seedreamResolution, seriesLabel } = job.input as unknown as BulkCarouselJobInput
       if (!items?.length) throw new Error('No items in job input')
       // Per-item scene references satisfy seedream-only on their own — see the
       // matching check in queue/submit.
@@ -1334,8 +1337,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             // so Drive sorts them in order instead of not having them at all.
             try {
               const { enqueueDriveArchive } = await import('@/lib/drive-archive/enqueue')
+              const { seriesFolderName } = await import('@/lib/drive-archive/label')
               const characterKey = item.characterName || item.characterId || null
               const seriesId = `${id}:${i}`
+              // One folder per carousel, so slides are never mixed in with
+              // everything else archived for this girl that day. Empty when the
+              // user gave no name — then nothing changes from before.
+              const seriesFolder = seriesFolderName(seriesLabel, i + 1)
               for (let si = 0; si < images.length; si++) {
                 await enqueueDriveArchive({
                   userId: job.user_id,
@@ -1346,6 +1354,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                   kind: 'carousels',
                   stage: 'ready',
                   modelKey: 'bulk_carousel',
+                  seriesLabel,
+                  seriesFolder,
                   seriesId,
                   seriesIndex: si,
                   seriesTotal: images.length,
