@@ -43,7 +43,7 @@ export interface ApifyReel {
   inputUrl?: string
 }
 
-async function runApifyActor(input: object): Promise<ApifyReel[]> {
+async function runApifyActor<T = ApifyReel>(input: object): Promise<T[]> {
   const startRes = await fetch(
     `https://api.apify.com/v2/acts/${ACTOR_ID}/runs?token=${APIFY_TOKEN}`,
     {
@@ -79,6 +79,33 @@ export async function runApifyActorForUser(username: string, resultsLimit: numbe
     resultsType: 'reels',
     resultsLimit,
   })
+}
+
+interface ApifyProfileDetails {
+  username?: string
+  followersCount?: number
+  private?: boolean
+}
+
+/**
+ * Profile follower count + privacy, via the same actor's 'details' mode.
+ *
+ * Virality scoring divides by this, so a wrong number is worse than none —
+ * callers get null and are expected to refuse the scan rather than guess.
+ */
+export async function fetchIgProfileViaApify(
+  username: string,
+): Promise<{ followers: number; isPrivate: boolean } | null> {
+  if (!APIFY_TOKEN) return null
+
+  const items = await runApifyActor<ApifyProfileDetails>({
+    directUrls: [`https://www.instagram.com/${username}/`],
+    resultsType: 'details',
+    resultsLimit: 1,
+  })
+  const followers = items?.[0]?.followersCount
+  if (typeof followers !== 'number' || followers <= 0) return null
+  return { followers, isPrivate: items[0].private === true }
 }
 
 /**

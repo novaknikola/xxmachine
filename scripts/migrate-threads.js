@@ -1,5 +1,11 @@
 // Run once: node scripts/migrate-threads.js
+const { resolve } = require('node:path')
 const { Pool } = require('pg')
+
+// Every other migration script loads this itself; deploy.sh does not export the
+// env. Without it DATABASE_URL is undefined, pg silently falls back to
+// localhost:5432, and the script fails ECONNREFUSED on every single deploy.
+require('dotenv').config({ path: resolve(__dirname, '..', '.env.local') })
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,

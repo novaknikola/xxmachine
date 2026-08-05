@@ -1,6 +1,11 @@
 import { one, query } from '@/lib/db'
 import { resolveKey } from '@/lib/user-keys'
-import { listProfileReels, resolveVideoUrlViaRapidApi, type ApifyReel } from '@/lib/instagram-scrape'
+import {
+  listProfileReels,
+  resolveVideoUrlViaRapidApi,
+  fetchIgProfileViaApify,
+  type ApifyReel,
+} from '@/lib/instagram-scrape'
 import { calculateViralityScore, calculateVelocity } from '@/lib/virality'
 import { notifyViralPost } from '@/lib/monitor/notify'
 import type { TrackedProfileRow } from './types'
@@ -41,9 +46,11 @@ export async function scanTrackedProfile(
     followers: listedFollowers,
   } = await listProfileReels(profile.username, limit, rapidApiKey)
 
-  // The lister already knows the follower count when it went through RapidAPI; only the
-  // Apify path needs a separate lookup.
+  // The lister already knows the follower count when it went through RapidAPI; the
+  // Apify path needs a separate lookup. Apify goes first because the RapidAPI
+  // downloader plan is the thing that runs out of monthly requests.
   const followers = listedFollowers
+    ?? await fetchIgProfileViaApify(profile.username).then(p => p?.followers ?? null).catch(() => null)
     ?? (rapidApiKey ? await fetchIgFollowers(profile.username, rapidApiKey).catch(() => null) : null)
 
   // Every part of the score is normalised by follower count, so a missing value
@@ -52,7 +59,7 @@ export async function scanTrackedProfile(
   // filling the review queue with numbers nobody can act on.
   if (!followers || followers < 1) {
     throw new Error(
-      `Could not read follower count for @${profile.username} — virality scores would be meaningless, so nothing was saved. Check the RapidAPI key/quota in Settings and re-scan.`,
+      `Could not read follower count for @${profile.username} — virality scores would be meaningless, so nothing was saved. Neither Apify nor the RapidAPI fallback answered; check APIFY_API_KEY and the RapidAPI key/quota in Settings, then re-scan.`,
     )
   }
 
