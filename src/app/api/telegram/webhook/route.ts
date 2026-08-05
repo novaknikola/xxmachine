@@ -19,6 +19,21 @@ import {
   startBatchWithPhoto,
 } from '@/lib/monitor/telegram-batch'
 import { estimateCopyPasteCost, formatUsd } from '@/lib/monitor/cost-estimate'
+import {
+  getRepurposeSettings,
+  setVariantCount,
+  setOutputFolder,
+  settingsKeyboard,
+  settingsSummary,
+  toggleEffect,
+} from '@/lib/monitor/telegram-repurpose'
+import {
+  enqueueRepurposeFromDriveFolder,
+  enqueueRepurposeJob,
+  parseDriveFolderId,
+} from '@/lib/repurpose/enqueue-from-drive'
+import { copyPasteArchiveLabel } from '@/lib/drive-archive/label'
+import type { VideoEffectOpts } from '@/lib/video-ffmpeg'
 
 const CRON_SECRET = process.env.CRON_SECRET
 
@@ -105,6 +120,74 @@ export async function POST(req: NextRequest) {
       }
 
       if (chatId != null && userId) {
+        const rawText = String(message.text ?? '')
+
+        // ── /settings — repurpose options the bot remembers ──────────
+        if (rawText.startsWith('/settings')) {
+          const s = await getRepurposeSettings(userId)
+          const sent = await sendText(chatId, settingsSummary(s)) as { message_id?: number }
+          if (sent?.message_id) {
+            await editMessageReplyMarkup(chatId, sent.message_id, settingsKeyboard(s))
+          }
+          return NextResponse.json({ ok: true })
+        }
+
+        // ── /output <link> — where repurpose variants are filed ──────
+        if (rawText.startsWith('/output')) {
+          const arg = rawText.slice('/output'.length).trim()
+          if (!arg) {
+            await setOutputFolder(userId, null)
+            await sendText(chatId, '📁 Cleared — variants go to the dated archive folders again.')
+            return NextResponse.json({ ok: true })
+          }
+          const id = parseDriveFolderId(arg)
+          if (!id) {
+            await sendText(chatId, '❌ That is not a Drive folder link. Send /output with no link to clear it.')
+            return NextResponse.json({ ok: true })
+          }
+          await setOutputFolder(userId, id)
+          await sendText(chatId, `📁 Variants will be filed in <code>${escapeHtml(id)}</code>.`)
+          return NextResponse.json({ ok: true })
+        }
+
+        // ── Drive folder link — one repurpose job per video in it ────
+        // Checked before the reel-link path: a Drive URL is not a reel link and
+        // would otherwise fall through to "send a reference photo".
+        const folderId = rawText && !rawText.startsWith('/')
+          ? parseDriveFolderId(rawText)
+          : null
+        if (folderId) {
+          const s = await getRepurposeSettings(userId)
+          try {
+            const { jobIds, videoNames } = await enqueueRepurposeFromDriveFolder({
+              userId,
+              folderId,
+              count: s.variantCount,
+              effects: s.effects,
+              outputDriveFolderId: s.outputDriveFolderId,
+            })
+            const shown = videoNames.slice(0, 5).map(n => `• ${escapeHtml(n)}`).join('\n')
+            await sendText(
+              chatId,
+              [
+                `♻️ <b>${jobIds.length} repurpose job${jobIds.length === 1 ? '' : 's'} queued</b>`,
+                `${s.variantCount} variants each — ${jobIds.length * s.variantCount} videos total.`,
+                '',
+                shown,
+                videoNames.length > 5 ? `…and ${videoNames.length - 5} more` : '',
+                '',
+                'Change the count or effects with /settings.',
+              ].filter(Boolean).join('\n'),
+            )
+          } catch (err) {
+            await sendText(
+              chatId,
+              `❌ ${escapeHtml(err instanceof Error ? err.message : 'Could not queue that folder.')}`,
+            )
+          }
+          return NextResponse.json({ ok: true })
+        }
+
         // A photo starts (or restarts) a batch. Telegram sends several sizes;
         // the last is the largest.
         const photo = message.photo as Array<{ file_id: string }> | undefined
@@ -205,6 +288,88 @@ export async function POST(req: NextRequest) {
     }
 
     const [action, postId] = data.split(':')
+
+    // ── /settings buttons ─────────────────────────────────────────────────
+    if (action === 'rscount' || action === 'rsfx' || action === 'rsfolder') {
+      const chatId = cbMessage?.chat?.id as number | undefined
+      const settingsUserId = chatId != null ? await findUserByChat(chatId) : null
+      if (!chatId || !settingsUserId) {
+        await answerCallbackQuery(callbackId, 'Chat not linked')
+        return NextResponse.json({ ok: true })
+      }
+
+      if (action === 'rscount') {
+        await setVariantCount(settingsUserId, Number(postId))
+        await answerCallbackQuery(callbackId, `${postId} variants`)
+      } else if (action === 'rsfx') {
+        await toggleEffect(settingsUserId, postId as keyof VideoEffectOpts)
+        await answerCallbackQuery(callbackId, 'Updated')
+      } else {
+        // One button, two meanings: clearing is the common case (you set a
+        // folder for one batch and want the archive tree back), and setting one
+        // needs a link, which a button cannot carry.
+        const current = await getRepurposeSettings(settingsUserId)
+        if (current.outputDriveFolderId) {
+          await setOutputFolder(settingsUserId, null)
+          await answerCallbackQuery(callbackId, 'Back to archive folders')
+        } else {
+          await answerCallbackQuery(callbackId, 'Send /output <drive link>')
+          await sendText(
+            chatId,
+            'Send <code>/output</code> followed by a Drive folder link to file variants there instead of the dated archive folders.',
+          )
+        }
+      }
+
+      const next = await getRepurposeSettings(settingsUserId)
+      if (cbMessage?.message_id) {
+        await editMessageText(chatId, cbMessage.message_id, settingsSummary(next))
+        await editMessageReplyMarkup(chatId, cbMessage.message_id, settingsKeyboard(next))
+      }
+      return NextResponse.json({ ok: true })
+    }
+
+    // ── Repurpose-after-Copy-Paste buttons ────────────────────────────────
+    if (action === 'rpgo' || action === 'rpno') {
+      const chatId = cbMessage?.chat?.id as number | undefined
+      const rpUserId = chatId != null ? await findUserByChat(chatId) : null
+      if (!chatId || !rpUserId) {
+        await answerCallbackQuery(callbackId, 'Chat not linked')
+        return NextResponse.json({ ok: true })
+      }
+      // Clear the buttons first either way, so a double tap cannot pay twice.
+      if (cbMessage?.message_id) {
+        await editMessageReplyMarkup(chatId, cbMessage.message_id, {})
+      }
+      if (action === 'rpno') {
+        await answerCallbackQuery(callbackId, 'Skipped')
+        return NextResponse.json({ ok: true })
+      }
+
+      const item = await one<{ kling_video_url: string | null; profile: string; content_id: string | null }>(
+        `SELECT kling_video_url, profile, content_id FROM discovery_items WHERE id = $1 AND user_id = $2`,
+        [postId, rpUserId],
+      )
+      if (!item?.kling_video_url) {
+        await answerCallbackQuery(callbackId, 'No video on that item')
+        return NextResponse.json({ ok: true })
+      }
+
+      const s = await getRepurposeSettings(rpUserId)
+      await enqueueRepurposeJob({
+        userId: rpUserId,
+        videoUrl: item.kling_video_url,
+        videoName: `copypaste_${String(postId).slice(0, 8)}.mp4`,
+        count: s.variantCount,
+        effects: s.effects,
+        outputDriveFolderId: s.outputDriveFolderId,
+        characterKey: item.profile,
+        seriesLabel: copyPasteArchiveLabel(item.profile, item.content_id),
+      })
+      await answerCallbackQuery(callbackId, `Queued ${s.variantCount} variants`)
+      await sendText(chatId, `♻️ ${s.variantCount} variants queued. /settings to change the count.`)
+      return NextResponse.json({ ok: true })
+    }
 
     // ── Copy-Paste batch buttons ──────────────────────────────────────────
     if (action === 'cpstart' || action === 'cpcancel') {

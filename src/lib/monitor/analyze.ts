@@ -13,6 +13,30 @@ const execFileAsync = promisify(execFile)
 const FRAME_WIDTH = 512
 /** ffmpeg scene score above which a frame boundary counts as a hard cut. */
 const SCENE_THRESHOLD = 0.35
+/**
+ * How far either side of a candidate to sample when confirming it. Wide enough
+ * to clear the transition frames, tight enough that ordinary movement within
+ * one shot has not gone anywhere.
+ */
+const CUT_CONFIRM_GAP_SEC = 0.25
+/**
+ * Frame distance above which a candidate is a real cut.
+ *
+ * Calibrated by eye on real sources, not guessed. Measured, with the frames
+ * checked visually in each case:
+ *   0.196  passenger-seat reel at 3.87s — same shot, she moved an arm
+ *   0.185  doorway reel at 6.43s        — same shot, hoodie coming off over her head
+ *   0.388  doorway reel at 12.83s       — genuine: the clip fades to black
+ * So the boundary sits between roughly 0.20 and 0.39, and this splits it with
+ * margin on both sides. Re-check with scripts/verify-cut-detection.ts, which
+ * prints the measured distance per candidate.
+ *
+ * Known limit: a hard cut between two shots that happen to look alike (same
+ * room, same framing) scores low and will read as continuous. That direction is
+ * the safer one to be wrong in — it costs an end frame that may not match,
+ * where the opposite silently drops the end anchor from a clip that had one.
+ */
+const CUT_CONFIRM_DISTANCE = 0.30
 const MAX_VIDEO_BYTES = 40_000_000
 /** Prevents ffmpeg hanging forever on HTML / corrupt downloads. */
 const FF_TIMEOUT_MS = 45_000
@@ -128,8 +152,49 @@ async function probeFormat(path: string): Promise<{
 }
 
 /**
- * Timestamps of hard cuts via ffmpeg's scene score. Positions let the
- * multi-shot path split the source back into its individual shots.
+ * A candidate cut's frames, as a tiny raw RGB thumbnail.
+ *
+ * Downscaled hard: at this size a real cut still changes almost every pixel,
+ * while a hand jerk or a camera shake mostly averages out — which is exactly
+ * the distinction the scene score alone cannot make.
+ */
+const CUT_PROBE_SIZE = 32
+
+async function tinyFrame(path: string, seconds: number): Promise<Buffer | null> {
+  try {
+    // Raw RGB straight out of ffmpeg, so no decoder is needed to compare two
+    // frames. execFileAsync directly rather than the ff() wrapper: this is the
+    // one call that needs a Buffer back instead of a string.
+    const { stdout } = await execFileAsync('ffmpeg', [
+      '-y', '-ss', Math.max(0, seconds).toFixed(3), '-i', path,
+      '-vframes', '1',
+      '-vf', `scale=${CUT_PROBE_SIZE}:${CUT_PROBE_SIZE}`,
+      '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1',
+    ], { timeout: 20_000, encoding: 'buffer', maxBuffer: 1_000_000, killSignal: 'SIGKILL' })
+    const buf = stdout as unknown as Buffer
+    return buf.length === CUT_PROBE_SIZE * CUT_PROBE_SIZE * 3 ? buf : null
+  } catch {
+    return null
+  }
+}
+
+/** Mean absolute per-channel difference, 0 (identical) … 1 (inverted). */
+function frameDistance(a: Buffer, b: Buffer): number {
+  let sum = 0
+  for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i])
+  return sum / a.length / 255
+}
+
+/**
+ * Timestamps of hard cuts via ffmpeg's scene score, each CONFIRMED by actually
+ * comparing the frames on either side.
+ *
+ * The scene score alone scores motion, not editing: a handheld reel where the
+ * subject throws an arm across frame spikes past any threshold low enough to
+ * catch real cuts. That mattered because a phantom cut silently downgrades the
+ * render — the end-frame rule reads this count — so a clip that never cut lost
+ * its end anchor and drifted for its whole length. Confirming costs two tiny
+ * frame extracts per candidate and nothing at all when there are none.
  */
 async function detectSceneCuts(path: string): Promise<number[]> {
   try {
@@ -139,12 +204,26 @@ async function detectSceneCuts(path: string): Promise<number[]> {
       '-f', 'null', '-',
     ], { maxBuffer: 20_000_000, timeout: 60_000 })
 
-    const times: number[] = []
+    const candidates: number[] = []
     for (const m of stderr.matchAll(/pts_time:([0-9.]+)/g)) {
       const t = parseFloat(m[1])
-      if (Number.isFinite(t)) times.push(t)
+      if (Number.isFinite(t)) candidates.push(t)
     }
-    return times.sort((a, b) => a - b)
+    candidates.sort((a, b) => a - b)
+    if (!candidates.length) return []
+
+    const confirmed: number[] = []
+    for (const t of candidates) {
+      const [before, after] = await Promise.all([
+        tinyFrame(path, t - CUT_CONFIRM_GAP_SEC),
+        tinyFrame(path, t + CUT_CONFIRM_GAP_SEC),
+      ])
+      // Undecidable (extraction failed, or the candidate sits at the very
+      // start) — keep it rather than silently dropping a real cut.
+      if (!before || !after) { confirmed.push(t); continue }
+      if (frameDistance(before, after) >= CUT_CONFIRM_DISTANCE) confirmed.push(t)
+    }
+    return confirmed
   } catch {
     return []
   }

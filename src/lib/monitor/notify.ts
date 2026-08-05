@@ -85,6 +85,8 @@ export async function notifyReplicationDone(opts: {
   contentType: string | null
   imageUrl?: string | null
   videoUrl?: string | null
+  /** Offers a Repurpose button — the decision is worth making after seeing the clip. */
+  itemId?: string | null
 }): Promise<void> {
   const folderUrl = await driveFolderLink(opts.userId, opts.profile).catch(() => null)
 
@@ -100,6 +102,26 @@ export async function notifyReplicationDone(opts: {
     imageUrl: opts.videoUrl ? undefined : opts.imageUrl ?? undefined,
     videoUrl: opts.videoUrl ?? undefined,
   })
+
+  // Offered rather than automatic: variants cost money, and the point of seeing
+  // the clip first is being able to decide it is not worth spreading.
+  if (opts.itemId && opts.videoUrl) {
+    const chatId = await resolveChatId(opts.userId).catch(() => null)
+    if (chatId) {
+      const { getRepurposeSettings } = await import('./telegram-repurpose')
+      const s = await getRepurposeSettings(opts.userId)
+      const sent = await sendText(chatId, 'Spread this one?') as { message_id?: number }
+      if (sent?.message_id) {
+        const { editMessageReplyMarkup } = await import('@/lib/telegram')
+        await editMessageReplyMarkup(chatId, sent.message_id, {
+          inline_keyboard: [[
+            { text: `♻️ Repurpose ×${s.variantCount}`, callback_data: `rpgo:${opts.itemId}` },
+            { text: '✖️ No', callback_data: `rpno:${opts.itemId}` },
+          ]],
+        })
+      }
+    }
+  }
 }
 
 export async function notifyViralPost(

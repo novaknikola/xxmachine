@@ -301,6 +301,14 @@ export async function replicateCopyPasteItem(
 
     // 'auto' skips sources that cut: their last frame is from another shot, so
     // pinning it as the end makes Seedance morph between two unrelated framings.
+    //
+    // That rule was only as good as the cut count, and the count used to include
+    // any scene-score spike — a handheld reel where the subject swings an arm
+    // scored as a cut, and silently lost its end anchor. A 14s clip then had one
+    // keyframe and nothing pinning where it was supposed to arrive, which is the
+    // longest, least constrained render this pipeline can produce. Cuts are now
+    // confirmed against the frames either side (see detectSceneCuts), so this
+    // reads a measurement that means what it says.
     const wantEndFrame =
       endFrameMode === 'always' || (endFrameMode === 'auto' && cutCount === 0)
     let generatedEndImageUrl = item.generated_end_image_url
@@ -360,6 +368,9 @@ export async function replicateCopyPasteItem(
       contentUrl: item.content_url,
       contentType: item.content_type,
       videoUrl: result.videoUrl,
+      // Only offer the button when nothing was spread automatically — otherwise
+      // pressing it would pay for a second set of the same variants.
+      itemId: (opts?.repurposeCount ?? 0) > 0 ? null : itemId,
     }).catch(() => {})
 
     return { ok: true, videoUrl: result.videoUrl, model: videoModel, endFrame: Boolean(lastImageUrl) }

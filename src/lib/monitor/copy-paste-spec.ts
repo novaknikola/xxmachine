@@ -422,7 +422,7 @@ export async function transcribeSourceSpeech(videoUrl: string): Promise<SourceTr
  * injected as ground truth), then optional audio transcription merged in.
  */
 export async function extractCopyPasteSpec(
-  probe: Pick<SourceProbe, 'frames' | 'frameTimes' | 'hasAudio' | 'duration' | 'aspectRatio'>,
+  probe: Pick<SourceProbe, 'frames' | 'frameTimes' | 'hasAudio' | 'duration' | 'aspectRatio' | 'cutCount' | 'cutTimes'>,
   videoUrl?: string | null,
   preTranscript?: SourceTranscript | null,
 ): Promise<CopyPasteSpec> {
@@ -453,6 +453,16 @@ export async function extractCopyPasteSpec(
               : '',
             `Measured from the source file: duration ${probe.duration != null ? `${probe.duration.toFixed(1)}s` : 'unknown'}, aspect ratio ${probe.aspectRatio}.`,
             'Use these exact numbers in "format" — do not invent your own duration or aspect ratio.',
+            // Measured with ffmpeg and confirmed frame-by-frame, but never sent
+            // until now: the model was left to infer from the frames alone
+            // whether a jump was an edit or just fast movement, and a wrong
+            // guess puts a cut in "pacing" and "shots" that is not there.
+            probe.cutCount > 0
+              ? `Measured: ${probe.cutCount} hard cut(s) at ${probe.cutTimes.map(t => `${t.toFixed(1)}s`).join(', ')}. `
+                + 'Split "shots" at those times and say so in "pacing" — do not describe this as one continuous take.'
+
+              : 'Measured: NO hard cuts — this is one continuous take. Any large change between consecutive '
+                + 'frames is camera or subject movement, not an edit. Keep "shots" to a single entry.',
             transcript
               ? `Timestamped transcript of the audio (the speaker is NOT labelled — you must work out who is talking using RULE D):\n${transcript}`
               : 'No speech detected — leave scene_events speaker/line empty where nobody talks.',
