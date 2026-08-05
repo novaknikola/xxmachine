@@ -7,7 +7,11 @@
  */
 import { one, query } from '@/lib/db'
 import { resolveKey } from '@/lib/user-keys'
-import { listProfileReels, resolveVideoUrlViaRapidApi } from '@/lib/instagram-scrape'
+import {
+  listProfileReels,
+  resolveVideoUrlViaRapidApi,
+  resolveVideoUrlsViaApify,
+} from '@/lib/instagram-scrape'
 import { enqueueDiscoveryReels, type EnqueueReelInput } from './enqueue'
 import { parseReelUrlList } from './parse-reel-url'
 import { scheduleAutoClassify, scheduleClassifyOnly } from './auto-classify'
@@ -150,8 +154,35 @@ export async function enqueueReelUrlsForUser(opts: {
     }
   }
 
-  // 2) Download API — best path for a single pasted URL
+  // 2) Apify by permalink — one run for the whole batch, and unlike the RapidAPI
+  //    downloaders it is not metered per request, so it survives a spent plan.
   let missing = parsed.filter(p => !resolved.has(p.shortCode.toLowerCase()))
+  let apifyError: string | null = null
+  if (missing.length && process.env.APIFY_API_KEY) {
+    try {
+      const byCode = await resolveVideoUrlsViaApify(missing.map(p => p.permalink))
+      for (const p of missing) {
+        const match = byCode.get(p.shortCode.toLowerCase())
+        if (!match?.videoUrl || !isPlayableVideoUrl(match.videoUrl)) continue
+        resolved.set(p.shortCode.toLowerCase(), {
+          id: match.shortCode ?? p.shortCode,
+          permalink: match.url ?? p.permalink,
+          videoUrl: match.videoUrl,
+          thumbnailUrl: match.displayUrl ?? match.images?.[0] ?? null,
+          views: match.videoViewCount ?? match.videoPlayCount ?? 0,
+          likes: match.likesCount ?? 0,
+          comments: match.commentsCount ?? 0,
+          postedAt: match.timestamp ?? null,
+        })
+      }
+    } catch (err) {
+      apifyError = err instanceof Error ? err.message : String(err)
+      /* fall through to the RapidAPI downloaders */
+    }
+  }
+
+  // 3) Download API — per-reel fallback when Apify could not see the post
+  missing = parsed.filter(p => !resolved.has(p.shortCode.toLowerCase()))
   // A spent RapidAPI plan looks exactly like a broken one from here: every call
   // fails. The failure message used to guess "service is down / upgrading",
   // which sent people looking at Instagram instead of at their own plan.
@@ -177,7 +208,7 @@ export async function enqueueReelUrlsForUser(opts: {
     }
   }
 
-  // 3) Profile listing fallback — needs a real owner handle
+  // 4) Profile listing fallback — needs a real owner handle
   missing = parsed.filter(p => !resolved.has(p.shortCode.toLowerCase()))
   if (missing.length && sourceUsername && (process.env.APIFY_API_KEY || rapidApiKey)) {
     try {
@@ -216,13 +247,18 @@ export async function enqueueReelUrlsForUser(opts: {
     // Prefer a concrete reason over a vague "try again" — usually RapidAPI
     // download outage + Apify quota + age-gated profile with empty listing.
     const apifyDown = !process.env.APIFY_API_KEY
-    const detail = !rapidApiKey
-      ? 'No RapidAPI key configured in Settings.'
-      : quotaExhausted
-        // Named exactly, because the fix is a plan upgrade and no amount of
-        // retrying or picking a different reel will help.
-        ? 'Your RapidAPI plan is out of requests for this month (HTTP 429). Upgrade the plan or wait for the quota to reset — retrying will keep failing until then.'
-        : 'The Instagram download service rejected this reel, and we could not list it from the source profile either (age-restricted accounts often return 0 reels).'
+    // Apify runs first now, so lead with its verdict. Blaming the RapidAPI quota
+    // when Apify is the path that actually failed sends people to buy the wrong
+    // upgrade — and vice versa once Apify is out of credit too.
+    const detail = apifyDown && !rapidApiKey
+      ? 'No reel fetcher configured — set APIFY_API_KEY or add a RapidAPI key in Settings.'
+      : apifyError
+        ? `Apify could not fetch it (${apifyError})${quotaExhausted ? ', and the RapidAPI fallback is out of monthly requests (HTTP 429)' : ''}.`
+        : quotaExhausted
+          // Named exactly, because the fix is a plan upgrade and no amount of
+          // retrying or picking a different reel will help.
+          ? 'Apify returned nothing for this reel and your RapidAPI fallback is out of requests for this month (HTTP 429). Upgrade the plan or wait for the quota to reset.'
+          : 'The reel could not be fetched by Apify or the download API, and we could not list it from the source profile either (private and age-restricted accounts often return nothing).'
     throw new EnqueueUrlsError(`Could not fetch that reel. ${detail}`, 502, {
       resolveErrors,
       invalid,

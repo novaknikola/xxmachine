@@ -3,7 +3,7 @@ import { rows, query } from '@/lib/db'
 import type { TrackedProfile } from '@/lib/types'
 
 const APIFY_TOKEN = process.env.APIFY_API_KEY!
-const ACTOR_ID = 'apify~instagram-reel-scraper'
+const ACTOR_ID = 'apify~instagram-scraper'
 
 interface ApifyReel {
   shortCode?: string
@@ -24,7 +24,11 @@ async function runApifyActorForUser(username: string): Promise<ApifyReel[]> {
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: [username], resultsLimit: 30 }),
+      body: JSON.stringify({
+        directUrls: [`https://www.instagram.com/${username}/`],
+        resultsType: 'reels',
+        resultsLimit: 30,
+      }),
     }
   )
   const startData = await startRes.json()

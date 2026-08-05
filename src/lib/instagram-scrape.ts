@@ -1,5 +1,7 @@
+import { parseReelUrl } from '@/lib/monitor/parse-reel-url'
+
 const APIFY_TOKEN = process.env.APIFY_API_KEY!
-const ACTOR_ID = 'apify~instagram-reel-scraper'
+const ACTOR_ID = 'apify~instagram-scraper'
 const POLL_INTERVAL_MS = 5_000
 const MAX_POLLS = 48 // 4 min cap
 
@@ -37,15 +39,17 @@ export interface ApifyReel {
   likesCount?: number
   commentsCount?: number
   timestamp?: string
+  /** Echo of the directUrls entry that produced this item. */
+  inputUrl?: string
 }
 
-export async function runApifyActorForUser(username: string, resultsLimit: number): Promise<ApifyReel[]> {
+async function runApifyActor(input: object): Promise<ApifyReel[]> {
   const startRes = await fetch(
     `https://api.apify.com/v2/acts/${ACTOR_ID}/runs?token=${APIFY_TOKEN}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: [username], resultsLimit }),
+      body: JSON.stringify(input),
     }
   )
   const startData = await startRes.json()
@@ -65,6 +69,50 @@ export async function runApifyActorForUser(username: string, resultsLimit: numbe
     `https://api.apify.com/v2/actor-runs/${runId}/dataset/items?token=${APIFY_TOKEN}&format=json`
   )
   return dataRes.json()
+}
+
+export async function runApifyActorForUser(username: string, resultsLimit: number): Promise<ApifyReel[]> {
+  // This actor is URL-driven, not username-driven; resultsType 'reels' is what
+  // keeps grid photos and carousels out of the listing.
+  return runApifyActor({
+    directUrls: [`https://www.instagram.com/${username}/`],
+    resultsType: 'reels',
+    resultsLimit,
+  })
+}
+
+/**
+ * Resolves direct video links for pasted reel permalinks, in ONE actor run for the
+ * whole batch. The RapidAPI downloaders are per-reel and per-request metered, so on
+ * a spent plan this is the only path that still answers — and even on a healthy plan
+ * it is one call instead of N.
+ *
+ * Keyed by lowercased shortcode. Missing/non-video posts are simply absent.
+ */
+export async function resolveVideoUrlsViaApify(
+  permalinks: string[],
+): Promise<Map<string, ApifyReel>> {
+  const out = new Map<string, ApifyReel>()
+  if (!APIFY_TOKEN || !permalinks.length) return out
+
+  // resultsLimit is per input URL here — a permalink is a single post either way.
+  const items = await runApifyActor({
+    directUrls: permalinks,
+    resultsType: 'posts',
+    resultsLimit: 1,
+    addParentData: false,
+  })
+
+  for (const item of items ?? []) {
+    // The actor echoes back what it was asked for, so a redirected or reshaped
+    // canonical url still maps onto the shortcode the caller is waiting on.
+    const code =
+      item.shortCode
+      ?? (item.url ? parseReelUrl(item.url)?.shortCode : undefined)
+      ?? (item.inputUrl ? parseReelUrl(item.inputUrl)?.shortCode : undefined)
+    if (code) out.set(code.toLowerCase(), item)
+  }
+  return out
 }
 
 // ─── RapidAPI — lists reels for a username (Apify fallback) ─────────
