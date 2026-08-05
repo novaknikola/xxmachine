@@ -5,14 +5,14 @@ import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
 import {
   Loader2, CheckCircle2, XCircle, Clock, FolderDown,
-  ListTodo, RefreshCw, Trash2, AlertCircle, FileSpreadsheet,
+  ListTodo, RefreshCw, Trash2, AlertCircle, FileSpreadsheet, Square,
 } from 'lucide-react'
 import { toCsv } from '@/lib/csv'
 
 interface QueueJob {
   id: string
   job_type: string
-  status: 'pending' | 'processing' | 'done' | 'failed' | 'cancelled'
+  status: 'pending' | 'processing' | 'paused' | 'done' | 'failed' | 'cancelled'
   total_items: number
   done_items: number
   progress: number
@@ -33,6 +33,7 @@ function StatusBadge({ status }: { status: QueueJob['status'] }) {
   const cfg: Record<QueueJob['status'], { label: string; cls: string; icon: React.ReactNode }> = {
     pending:    { label: 'Waiting',      cls: 'bg-secondary text-muted-foreground',     icon: <Clock className="w-2.5 h-2.5" /> },
     processing: { label: 'Processing',   cls: 'bg-blue-500/15 text-blue-400',           icon: <Loader2 className="w-2.5 h-2.5 animate-spin" /> },
+    paused:     { label: 'Paused',       cls: 'bg-amber-500/15 text-amber-400',         icon: <Clock className="w-2.5 h-2.5" /> },
     done:       { label: 'Done',         cls: 'bg-emerald-500/15 text-emerald-400',     icon: <CheckCircle2 className="w-2.5 h-2.5" /> },
     failed:     { label: 'Error',        cls: 'bg-destructive/15 text-destructive',     icon: <XCircle className="w-2.5 h-2.5" /> },
     cancelled:  { label: 'Cancelled',    cls: 'bg-secondary text-muted-foreground',     icon: <AlertCircle className="w-2.5 h-2.5" /> },
@@ -54,9 +55,10 @@ function duration(start: string | null, end: string | null): string | null {
   return `${Math.floor(s / 60)}m ${s % 60}s`
 }
 
-function JobCard({ job, onCancel, onDownload, downloading }: {
+function JobCard({ job, onStop, onDelete, onDownload, downloading }: {
   job: QueueJob
-  onCancel: () => void
+  onStop: () => void
+  onDelete: () => void
   onDownload: () => void
   downloading: boolean
 }) {
@@ -117,16 +119,27 @@ function JobCard({ job, onCancel, onDownload, downloading }: {
               {usesRows || usesTexts ? 'CSV' : 'ZIP'}
             </Button>
           )}
-          {job.status === 'pending' && (
+          {/* Stop leaves the row (and its finished items) in place; Delete removes
+              it outright. A running job used to offer neither — the only control
+              was a "Cancel" button on pending jobs that actually deleted them. */}
+          {(job.status === 'pending' || job.status === 'processing' || job.status === 'paused') && (
             <Button
               size="sm" variant="ghost"
-              className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
-              onClick={onCancel}
-              title="Cancel"
+              className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+              onClick={onStop}
+              title="Stop (keep in queue, progress kept)"
             >
-              <Trash2 className="w-3 h-3" />
+              <Square className="w-3 h-3" />
             </Button>
           )}
+          <Button
+            size="sm" variant="ghost"
+            className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
+            onClick={onDelete}
+            title="Delete (remove from queue entirely)"
+          >
+            <Trash2 className="w-3 h-3" />
+          </Button>
         </div>
       </div>
 
@@ -193,13 +206,36 @@ export function QueueTab() {
     return () => clearTimeout(t)
   }, [jobs, fetchJobs])
 
-  async function cancelJob(id: string) {
-    const res = await fetch(`/api/queue/${id}`, { method: 'DELETE' })
+  /** Soft cancel: the worker stops between items and the row stays, restartable. */
+  async function stopJob(id: string) {
+    if (!confirm('Stop this job? Finished items are kept and it can be started again later.')) return
+    const res = await fetch(`/api/queue/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'stop' }),
+    })
     if (res.ok) {
-      toast.success('Job cancelled')
+      toast.success('Stopped')
       fetchJobs()
     } else {
-      toast.error('Could not cancel job')
+      const data = await res.json().catch(() => ({}))
+      toast.error(typeof data.error === 'string' ? data.error : 'Could not stop job')
+    }
+  }
+
+  /** Hard delete: cancels an in-flight worker first, then drops the row. */
+  async function deleteJob(id: string) {
+    const job = jobs.find(j => j.id === id)
+    const active = job?.status === 'pending' || job?.status === 'processing' || job?.status === 'paused'
+    if (!confirm(active
+      ? 'Delete this job? It is still running — it will be stopped and removed, and its output is lost. This cannot be undone.'
+      : 'Delete this job from the queue? This cannot be undone.')) return
+    const res = await fetch(`/api/queue/${id}`, { method: 'DELETE' })
+    if (res.ok) {
+      toast.success('Deleted')
+      fetchJobs()
+    } else {
+      toast.error('Could not delete job')
     }
   }
 
@@ -361,7 +397,8 @@ export function QueueTab() {
             <JobCard
               key={job.id}
               job={job}
-              onCancel={() => cancelJob(job.id)}
+              onStop={() => stopJob(job.id)}
+              onDelete={() => deleteJob(job.id)}
               onDownload={() => downloadJob(job)}
               downloading={downloading === job.id}
             />

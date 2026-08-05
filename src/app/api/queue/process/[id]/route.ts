@@ -147,8 +147,8 @@ function myPodItemError(label: string, error: string): MyPodRow {
   }
 }
 
-/** Stop batch early if the job was cancelled or deleted from the queue. */
-async function myPodJobStillRunning(id: string): Promise<boolean> {
+/** Stop batch early if the job was cancelled, paused or deleted from the queue. */
+async function jobStillRunning(id: string): Promise<boolean> {
   const row = await one<{ status: string }>(
     `SELECT status FROM generation_queue WHERE id = $1`,
     [id],
@@ -236,6 +236,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       let doneCount = job.done_items
 
       for (let i = doneCount; i < inputJobs.length; i++) {
+        // A Stop/Delete from the queue UI only flips the row; the worker has to
+        // notice it, or the button lies and paid work keeps running.
+        if (!(await jobStillRunning(id))) {
+          console.log(`[queue/process] bulk_image ${id} stopped at ${i}/${inputJobs.length}`)
+          return NextResponse.json({ ok: true, cancelled: true, done: doneCount })
+        }
         const item = inputJobs[i]
         try {
           const urls = await generateImage({
@@ -313,6 +319,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
       try {
         for (let batchStart = doneCount; batchStart < count; batchStart += VIDEO_BATCH_SIZE) {
+          // A Stop/Delete from the queue UI only flips the row; the worker has to
+          // notice it, or the button lies and paid work keeps running.
+          if (!(await jobStillRunning(id))) {
+            console.log(`[queue/process] video_repurpose ${id} stopped at ${doneCount}/${count}`)
+            return NextResponse.json({ ok: true, cancelled: true, done: doneCount })
+          }
           const batchEnd = Math.min(batchStart + VIDEO_BATCH_SIZE, count)
           const batchIndices = Array.from({ length: batchEnd - batchStart }, (_, i) => batchStart + i)
 
@@ -439,6 +451,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       let doneCount = job.done_items
 
       for (let i = doneCount; i < items.length; i++) {
+        // A Stop/Delete from the queue UI only flips the row; the worker has to
+        // notice it, or the button lies and paid work keeps running.
+        if (!(await jobStillRunning(id))) {
+          console.log(`[queue/process] video_caption ${id} stopped at ${i}/${items.length}`)
+          return NextResponse.json({ ok: true, cancelled: true, done: doneCount })
+        }
         const item = items[i]
         const uid = randomUUID()
         const inputPath = join(tmpdir(), `cap_in_${uid}.mp4`)
@@ -533,6 +551,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       let doneCount = job.done_items
 
       for (let i = doneCount; i < items.length; i++) {
+        // A Stop/Delete from the queue UI only flips the row; the worker has to
+        // notice it, or the button lies and paid work keeps running.
+        if (!(await jobStillRunning(id))) {
+          console.log(`[queue/process] video_transcribe ${id} stopped at ${i}/${items.length}`)
+          return NextResponse.json({ ok: true, cancelled: true, done: doneCount })
+        }
         const item = items[i]
         const inputPath = join(tmpdir(), `tr_in_${randomUUID()}.mp4`)
 
@@ -588,6 +612,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       let doneCount = job.done_items
 
       for (let i = doneCount; i < items.length; i++) {
+        // A Stop/Delete from the queue UI only flips the row; the worker has to
+        // notice it, or the button lies and paid work keeps running.
+        if (!(await jobStillRunning(id))) {
+          console.log(`[queue/process] video_ocr ${id} stopped at ${i}/${items.length}`)
+          return NextResponse.json({ ok: true, cancelled: true, done: doneCount })
+        }
         const item = items[i]
         const inputPath = join(tmpdir(), `ocr_in_${randomUUID()}.mp4`)
 
@@ -641,6 +671,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       let doneCount = job.done_items
 
       for (let i = doneCount; i < texts.length; i += SHUFFLE_BATCH_SIZE) {
+        // A Stop/Delete from the queue UI only flips the row; the worker has to
+        // notice it, or the button lies and paid work keeps running.
+        if (!(await jobStillRunning(id))) {
+          console.log(`[queue/process] caption_shuffle ${id} stopped at ${i}/${texts.length}`)
+          return NextResponse.json({ ok: true, cancelled: true, done: doneCount })
+        }
         const batch = texts.slice(i, i + SHUFFLE_BATCH_SIZE)
 
         try {
@@ -688,6 +724,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       let attempts = 0
 
       while (outTexts.length < count && attempts < maxAttempts) {
+        // A Stop/Delete from the queue UI only flips the row; the worker has to
+        // notice it, or the button lies and paid work keeps running.
+        if (!(await jobStillRunning(id))) {
+          console.log(`[queue/process] caption_generate ${id} stopped at ${outTexts.length}/${count}`)
+          return NextResponse.json({ ok: true, cancelled: true, done: outTexts.length })
+        }
         attempts++
         const needed = Math.min(GENERATE_BATCH_SIZE, count - outTexts.length)
         const sample = sampleExamples(examples, EXAMPLE_SAMPLE_SIZE)
@@ -880,7 +922,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       }
 
       for (let i = doneCount; i < input.items.length; i++) {
-        if (!(await myPodJobStillRunning(id))) break
+        if (!(await jobStillRunning(id))) break
         const item = input.items[i]
         try {
           leaseStage = 'downloading_inputs'
@@ -984,7 +1026,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       await runAnimateEnsure()
 
       for (let i = doneCount; i < input.items.length; i++) {
-        if (!(await myPodJobStillRunning(id))) break
+        if (!(await jobStillRunning(id))) break
         const item = input.items[i]
         try {
           leaseStage = 'downloading_inputs'
@@ -1118,7 +1160,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       }
 
       for (let i = doneCount; i < input.items.length; i++) {
-        if (!(await myPodJobStillRunning(id))) break
+        if (!(await jobStillRunning(id))) break
         const item = input.items[i]
         try {
           leaseStage = 'downloading_inputs'
@@ -1206,6 +1248,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       let doneCount = job.done_items
 
       for (let batchStart = doneCount; batchStart < items.length; batchStart += CAROUSEL_BATCH_SIZE) {
+        // A Stop/Delete from the queue UI only flips the row; the worker has to
+        // notice it, or the button lies and paid work keeps running.
+        if (!(await jobStillRunning(id))) {
+          console.log(`[queue/process] bulk_carousel ${id} stopped at ${doneCount}/${items.length}`)
+          return NextResponse.json({ ok: true, cancelled: true, done: doneCount })
+        }
         const batchEnd = Math.min(batchStart + CAROUSEL_BATCH_SIZE, items.length)
         const batchIndices = Array.from({ length: batchEnd - batchStart }, (_, i) => batchStart + i)
 
@@ -1344,7 +1392,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
       for (let batchStart = doneCount; batchStart < itemIds.length; batchStart += COPY_PASTE_BATCH_SIZE) {
         // Each item is minutes of paid model time — stop promptly if cancelled.
-        if (!(await myPodJobStillRunning(id))) {
+        if (!(await jobStillRunning(id))) {
           console.log(`[queue/process] copy_paste_v2 ${id} cancelled at ${doneCount}/${itemIds.length}`)
           return NextResponse.json({ ok: true, cancelled: true, done: doneCount })
         }
@@ -1409,7 +1457,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       let doneCount = job.done_items
 
       for (let start = doneCount; start < items.length; start += TALK_BATCH_SIZE) {
-        if (!(await myPodJobStillRunning(id))) {
+        if (!(await jobStillRunning(id))) {
           console.log(`[queue/process] infinite_talk ${id} cancelled at ${doneCount}/${items.length}`)
           return NextResponse.json({ ok: true, cancelled: true, done: doneCount })
         }
@@ -1530,7 +1578,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       for (let start = doneCount; start < items.length; start += SEEDANCE_BATCH_SIZE) {
         // Stop has to bite between batches: a 500-item run is real money, and
         // the row's status is the only signal the worker gets.
-        if (!(await myPodJobStillRunning(id))) {
+        if (!(await jobStillRunning(id))) {
           console.log(`[queue/process] seedance_i2v ${id} cancelled at ${doneCount}/${items.length}`)
           return NextResponse.json({ ok: true, cancelled: true, done: doneCount })
         }
@@ -1644,7 +1692,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         // Every item is paid Seedream time, so Stop has to take effect between
         // batches rather than only flipping the row's status while the worker
         // keeps spending. Work already finished stays in output.
-        if (!(await myPodJobStillRunning(id))) {
+        if (!(await jobStillRunning(id))) {
           console.log(`[queue/process] copy_prompts_generate ${id} cancelled at ${doneCount}/${items.length}`)
           return NextResponse.json({ ok: true, cancelled: true, done: doneCount })
         }
