@@ -272,6 +272,45 @@ export async function GET(req: NextRequest) {
     console.error('[cron/tick] monitor scan error:', err)
   }
 
+  // ── Orphaned analyses ─────────────────────────────────────────
+  //
+  // scheduleAutoClassify runs its work in Next's after(), i.e. in this process
+  // and not in a queue. A deploy calls pm2 reload, the process goes away
+  // mid-analysis, and the item is left in pending_classify with nobody to
+  // retry it — items sat in that state for three days. The pipeline logs show
+  // it plainly: a probe line, then "Ready on http://localhost:3000".
+  //
+  // Deliberately not a status change: an item picked up here is analysed for
+  // real, so a genuinely queued one just gets analysed slightly early rather
+  // than being marked failed.
+  let orphanedClassified = 0
+  try {
+    const orphans = await rows<{ id: string; user_id: string }>(
+      `SELECT id, user_id FROM discovery_items
+        WHERE replicate_status = 'pending_classify'
+          AND video_url IS NOT NULL
+          -- Old enough that any in-process run would have finished or died.
+          AND discovered_at < now() - interval '5 minutes'
+        ORDER BY discovered_at
+        LIMIT 3`,
+    )
+    if (orphans.length) {
+      const { classifyDiscoveryItem } = await import('@/lib/monitor/process-item')
+      for (const o of orphans) {
+        try {
+          await classifyDiscoveryItem(o.id, o.user_id)
+          orphanedClassified++
+        } catch (err) {
+          // classifyDiscoveryItem writes replicate_status='failed' itself, so a
+          // dead source URL leaves the tick and stops being retried forever.
+          console.error('[cron/tick] orphan classify', o.id, err instanceof Error ? err.message : err)
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[cron/tick] orphan sweep error:', err)
+  }
+
   // ── Google Drive auto-archive uploads ─────────────────────────
   let driveArchive: Awaited<ReturnType<typeof processDriveExports>> | { error: string } = {
     processed: 0,
@@ -291,6 +330,7 @@ export async function GET(req: NextRequest) {
     reels: { processed: dueReels.length, results: reelResults.map(r => r.status) },
     stats: statsResult,
     queue: { started: queueStarted, comfyuiStarted: comfyStarted, podHealthChecked },
+    orphanedClassified,
     monitor: monitorScans,
     driveArchive,
   })
