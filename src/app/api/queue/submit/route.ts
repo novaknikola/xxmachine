@@ -136,6 +136,7 @@ export interface BulkCarouselJobInput {
 }
 
 export interface VideoRepurposeJobInput {
+  /** Empty when the source is a Drive file — see driveFileId. */
   videoUrl: string
   videoName: string
   count: number
@@ -148,6 +149,14 @@ export interface VideoRepurposeJobInput {
   archiveToDrive?: boolean
   /** Drive folder to file under when archiving — the source profile label. */
   characterKey?: string | null
+  /** Source lives in Drive rather than storage; downloaded with the platform token. */
+  driveFileId?: string | null
+  /**
+   * Override destination. Empty keeps the computed
+   * {character}/{kind}/{stage}/{date} archive tree, which is what keeps
+   * everything sorted — this only exists for "put these right here" runs.
+   */
+  outputDriveFolderId?: string | null
 }
 
 export interface VideoCaptionItem {
@@ -277,7 +286,12 @@ const RUNPOD_POD_URL_RE = /^https:\/\/[a-z0-9-]+-\d+\.proxy\.runpod\.net\/?$/i
 
 export type QueueSubmitBody =
   | { job_type: 'bulk_image'; input: { jobs: BulkImageJobItem[] } }
-  | { job_type: 'video_repurpose'; input: VideoRepurposeJobInput }
+  // inputDriveFolderId is submit-only — it fans out into one job per video and
+  // is never stored on the job itself.
+  | {
+      job_type: 'video_repurpose'
+      input: VideoRepurposeJobInput & { inputDriveFolderId?: string | null }
+    }
   | { job_type: 'video_caption'; input: VideoCaptionJobInput }
   | { job_type: 'video_transcribe'; input: VideoTranscribeJobInput }
   | { job_type: 'video_ocr'; input: VideoOcrJobInput }
@@ -348,35 +362,89 @@ export async function POST(req: NextRequest) {
   }
 
   if (body.job_type === 'video_repurpose') {
-    const { videoUrl, videoName, count, baseSeed, effects, archiveToDrive, characterKey } =
-      body.input ?? {}
-    if (!videoUrl || typeof videoUrl !== 'string') {
-      return NextResponse.json({ error: 'videoUrl required' }, { status: 400 })
+    const {
+      videoUrl, videoName, count, baseSeed, effects, archiveToDrive, characterKey,
+      inputDriveFolderId, outputDriveFolderId,
+    } = body.input ?? {}
+    const inputFolder = String(inputDriveFolderId ?? '').trim()
+    const outputFolder = String(outputDriveFolderId ?? '').trim()
+
+    if (!inputFolder && (!videoUrl || typeof videoUrl !== 'string')) {
+      return NextResponse.json(
+        { error: 'videoUrl or inputDriveFolderId required' },
+        { status: 400 },
+      )
     }
     if (!count || count < 1 || count > 100) {
       return NextResponse.json({ error: 'count must be 1–100' }, { status: 400 })
     }
-
-    const input: VideoRepurposeJobInput = {
-      videoUrl,
-      videoName: videoName ?? 'video.mp4',
-      count,
-      baseSeed: baseSeed ?? Math.floor(Math.random() * 0xffffff),
-      effects: effects ?? {
-        brightness: true, contrast: true, saturation: true,
-        hue: false, speed: false, flipH: false, crop: true, fade: false,
-      },
-      archiveToDrive: archiveToDrive === true,
-      characterKey: characterKey ?? null,
+    // Writing needs the user's own OAuth — the service account has no My Drive
+    // quota. Fail here rather than after the variants have been rendered.
+    if (outputFolder) {
+      const driveUploadOk = await requireUserDriveUploadToken(user.id)
+      if (driveUploadOk instanceof NextResponse) return driveUploadOk
     }
 
-    const row = await one<{ id: string }>(
-      `INSERT INTO generation_queue (user_id, job_type, input, total_items)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id`,
-      [user.id, body.job_type, JSON.stringify(input), count],
-    )
-    return NextResponse.json({ id: row!.id })
+    const effectsInput = effects ?? {
+      brightness: true, contrast: true, saturation: true,
+      hue: false, speed: false, flipH: false, crop: true, fade: false,
+    }
+
+    // One source per job, exactly as the upload path already works — a folder is
+    // just a different way of naming the sources.
+    let sources: { videoUrl: string; videoName: string; driveFileId: string | null }[]
+    if (inputFolder) {
+      let files
+      try {
+        // Listed with the platform service account: input folders are typically
+        // *shared with* it, which user OAuth's drive.file scope cannot see.
+        files = await listDriveFiles(inputFolder)
+      } catch (err) {
+        return NextResponse.json(
+          { error: `Could not read input Drive folder: ${err instanceof Error ? err.message : 'failed'}` },
+          { status: 400 },
+        )
+      }
+      const videos = files.filter(f => /\.(mp4|webm|mov|mkv)$/i.test(f.name))
+      if (!videos.length) {
+        return NextResponse.json(
+          { error: 'Input folder has no videos (mp4/webm/mov/mkv)' },
+          { status: 400 },
+        )
+      }
+      sources = videos.map(f => ({ videoUrl: '', videoName: f.name, driveFileId: f.id }))
+    } else {
+      sources = [{
+        videoUrl: videoUrl as string,
+        videoName: videoName ?? 'video.mp4',
+        driveFileId: null,
+      }]
+    }
+
+    const ids: string[] = []
+    for (const src of sources) {
+      const input: VideoRepurposeJobInput = {
+        videoUrl: src.videoUrl,
+        videoName: src.videoName,
+        count,
+        baseSeed: baseSeed ?? Math.floor(Math.random() * 0xffffff),
+        effects: effectsInput,
+        archiveToDrive: archiveToDrive === true,
+        characterKey: characterKey ?? null,
+        driveFileId: src.driveFileId,
+        outputDriveFolderId: outputFolder || null,
+      }
+      const row = await one<{ id: string }>(
+        `INSERT INTO generation_queue (user_id, job_type, input, total_items)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id`,
+        [user.id, body.job_type, JSON.stringify(input), count],
+      )
+      ids.push(row!.id)
+    }
+
+    // `id` stays the response shape every existing caller reads.
+    return NextResponse.json({ id: ids[0], ids })
   }
 
   if (body.job_type === 'video_caption') {

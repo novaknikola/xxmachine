@@ -62,6 +62,8 @@ export function VideoReproduceTab() {
   const [running, setRunning] = useState(false)
   const [queueing, setQueueing] = useState(false)
   const [progress, setProgress] = useState({ done: 0, total: 0 })
+  const [inputFolderId, setInputFolderId] = useState('')
+  const [outputFolderId, setOutputFolderId] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
   const abortRef = useRef(false)
 
@@ -136,8 +138,46 @@ export function VideoReproduceTab() {
 
   // Queue mode: upload to storage, submit background job(s)
   async function submitToQueue() {
-    if (!sources.length) { toast.error('Upload at least one video'); return }
+    const inputFolder = inputFolderId.trim()
+    if (!sources.length && !inputFolder) {
+      toast.error('Upload at least one video, or give an input Drive folder')
+      return
+    }
     setQueueing(true)
+
+    // Drive folder mode: the server lists the folder and fans out one job per
+    // video, so there is nothing to upload from here.
+    if (inputFolder) {
+      try {
+        const res = await fetch('/api/queue/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            job_type: 'video_repurpose',
+            input: {
+              inputDriveFolderId: inputFolder,
+              outputDriveFolderId: outputFolderId.trim() || null,
+              count,
+              baseSeed: Math.floor(Math.random() * 0xffffff),
+              effects,
+            },
+          }),
+        })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error((data as { error?: string }).error ?? 'Submit failed')
+        const n = (data as { ids?: string[] }).ids?.length ?? 1
+        toast.success(`${n} job${n > 1 ? 's' : ''} queued from Drive — processing in background`, {
+          action: { label: 'Open Queue', onClick: () => router.push('/captions?tab=queue') },
+          duration: 6000,
+        })
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Submit failed')
+      } finally {
+        setQueueing(false)
+      }
+      return
+    }
+
     let submitted = 0
 
     for (const src of sources) {
@@ -157,6 +197,7 @@ export function VideoReproduceTab() {
               count,
               baseSeed: Math.floor(Math.random() * 0xffffff),
               effects,
+              outputDriveFolderId: outputFolderId.trim() || null,
             },
           }),
         })
@@ -247,6 +288,43 @@ export function VideoReproduceTab() {
             </CardContent>
           </Card>
 
+          {/* Google Drive */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">Google Drive</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">
+                  Input folder ID <span className="opacity-60">(optional — videos, flat)</span>
+                </label>
+                <input
+                  value={inputFolderId}
+                  onChange={e => setInputFolderId(e.target.value)}
+                  placeholder="folder ID from the Drive URL"
+                  className="w-full h-10 px-3 rounded-lg bg-secondary/50 border border-border text-sm font-mono focus:outline-none focus:border-primary/50"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  Set this and every video in the folder becomes its own job — uploads above are ignored.
+                </p>
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">
+                  Output folder ID <span className="opacity-60">(optional)</span>
+                </label>
+                <input
+                  value={outputFolderId}
+                  onChange={e => setOutputFolderId(e.target.value)}
+                  placeholder="folder ID from the Drive URL"
+                  className="w-full h-10 px-3 rounded-lg bg-secondary/50 border border-border text-sm font-mono focus:outline-none focus:border-primary/50"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  Leave empty to keep the dated archive tree. Queue mode only.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+
           {/* Variations count */}
           <Card>
             <CardHeader className="pb-3">
@@ -323,10 +401,12 @@ export function VideoReproduceTab() {
                   variant="secondary"
                   className="flex-1"
                   onClick={submitToQueue}
-                  disabled={!sources.length}
+                  disabled={!sources.length && !inputFolderId.trim()}
                 >
                   <ListTodo className="w-4 h-4 mr-2" />
-                  Queue {totalVariants > 0 ? `${totalVariants}` : ''}
+                  {inputFolderId.trim()
+                    ? `Queue folder ×${count}`
+                    : `Queue ${totalVariants > 0 ? totalVariants : ''}`}
                 </Button>
               </div>
             ) : running ? (

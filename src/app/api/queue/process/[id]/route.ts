@@ -283,8 +283,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
     // ── video_repurpose ───────────────────────────────────────────────────────
     if (job.job_type === 'video_repurpose') {
-      const { videoUrl, count, baseSeed, effects, archiveToDrive, characterKey } =
-        job.input as unknown as VideoRepurposeJobInput
+      const {
+        videoUrl, videoName, count, baseSeed, effects, archiveToDrive, characterKey,
+        driveFileId, outputDriveFolderId,
+      } = job.input as unknown as VideoRepurposeJobInput
       let doneCount = job.done_items
 
       // Resume: load existing output URLs from DB
@@ -294,12 +296,18 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         allOutputUrls[i] = existingUrls[i]
       }
 
-      // Download source video to temp file
-      const videoRes = await fetch(videoUrl, { signal: AbortSignal.timeout(120_000) })
-      if (!videoRes.ok) throw new Error(`Failed to download source video: ${videoRes.status}`)
-      const videoBuffer = await videoRes.arrayBuffer()
+      // Download source video to temp file. A Drive source is read with the
+      // platform service account, same as the folder listing at submit time.
+      let sourceBuffer: Buffer
+      if (driveFileId) {
+        sourceBuffer = await downloadDriveFile(driveFileId)
+      } else {
+        const videoRes = await fetch(videoUrl, { signal: AbortSignal.timeout(120_000) })
+        if (!videoRes.ok) throw new Error(`Failed to download source video: ${videoRes.status}`)
+        sourceBuffer = Buffer.from(await videoRes.arrayBuffer())
+      }
       const inputPath = join(tmpdir(), `vr_in_${randomUUID()}.mp4`)
-      writeFileSync(inputPath, Buffer.from(videoBuffer))
+      writeFileSync(inputPath, sourceBuffer)
 
       const fadeDuration = effects.fade ? (await getVideoDuration(inputPath) ?? undefined) : undefined
 
@@ -317,6 +325,27 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                 const buf = readFileSync(outputPath)
                 const url = await uploadBuffer(buf, `queue/${id}/${variantIdx + 1}.mp4`, 'video/mp4')
                 allOutputUrls[variantIdx] = url
+
+                // Explicit destination folder. Its own try/catch: the variant is
+                // already rendered and stored, so a Drive hiccup must not mark it
+                // failed — it is logged and the run carries on.
+                if (outputDriveFolderId) {
+                  const base = (videoName ?? 'video').replace(/\.[^.]+$/, '')
+                  try {
+                    await uploadToDriveFolderResilient(
+                      job.user_id,
+                      outputDriveFolderId,
+                      `${base}_${String(variantIdx + 1).padStart(3, '0')}.mp4`,
+                      buf,
+                      'video/mp4',
+                    )
+                  } catch (err) {
+                    console.error(
+                      `[queue/process] video_repurpose ${id} variant ${variantIdx + 1} Drive upload failed:`,
+                      err instanceof Error ? err.message : err,
+                    )
+                  }
+                }
               } catch {
                 allOutputUrls[variantIdx] = `error:upload failed`
               } finally {
@@ -354,7 +383,9 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       // Opt-in only: the Repurpose page never sets this, so its behaviour is
       // unchanged. Variants share one seriesId so Drive sorts them together
       // instead of scattering them by hash — same pattern as bulk_carousel.
-      if (archiveToDrive) {
+      // Skipped when an explicit output folder was given: that is an override of
+      // the computed {character}/{kind}/{stage}/{date} tree, not a second copy.
+      if (archiveToDrive && !outputDriveFolderId) {
         try {
           const { enqueueDriveArchive } = await import('@/lib/drive-archive/enqueue')
           const good = finalUrls.filter(u => !u.startsWith('error:'))
