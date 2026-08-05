@@ -81,7 +81,19 @@ async function enqueueRepurpose(opts: {
  * rendered prompt so they can be reviewed/edited before paying for a Seedance call.
  * Requires a source video — Copy-Paste has no still-image path.
  */
-export async function classifyDiscoveryItem(itemId: string, userId: string) {
+/**
+ * Re-runs the vision analysis over the source video and rewrites the spec.
+ *
+ * `reset` additionally clears the finished render. Without it, re-analyzing a
+ * `done` item changes nothing a viewer can see: replicateCopyPasteItem returns
+ * early on an existing kling_video_url, so the new spec never reaches Seedance.
+ * The finished video is not lost — Drive archiving has already copied it.
+ */
+export async function classifyDiscoveryItem(
+  itemId: string,
+  userId: string,
+  opts?: { reset?: boolean },
+) {
   const item = await one<DiscoveryItemRow>(
     `SELECT * FROM discovery_items WHERE id = $1 AND user_id = $2`,
     [itemId, userId],
@@ -104,11 +116,16 @@ export async function classifyDiscoveryItem(itemId: string, userId: string) {
     const spec = await extractCopyPasteSpec(probe, item.video_url, transcript)
     const renderedPrompt = renderCopyPastePrompt(spec)
 
+    // A prompt the user typed outlives a re-analysis. They can take the new one
+    // by clearing the textarea, which also clears this flag.
+    const promptKept = item.prompt_edited_at !== null && item.prompt_edited_at !== undefined
+    const reset = opts?.reset === true
+
     await query(
       `UPDATE discovery_items
           SET content_type = 'video_gen',
               copy_paste_spec = $2::jsonb,
-              rendered_prompt = $3,
+              rendered_prompt = CASE WHEN $11::bool THEN rendered_prompt ELSE $3 END,
               source_duration = $4,
               source_cut_count = $5,
               source_aspect_ratio = $6,
@@ -117,7 +134,17 @@ export async function classifyDiscoveryItem(itemId: string, userId: string) {
               source_first_frame_url = coalesce($9, source_first_frame_url),
               source_last_frame_url = coalesce($10, source_last_frame_url),
               replicate_status = 'classified',
-              replicate_error = NULL
+              replicate_error = NULL,
+              -- reset only: the keyframes and their prompts are a composite of the
+              -- source frame and the identity photo, and the hook is deliberately
+              -- kept out of them — so a plain re-analysis does not invalidate them
+              -- and there is no reason to re-spend on Seedream.
+              kling_video_url        = CASE WHEN $12::bool THEN NULL ELSE kling_video_url END,
+              video_model            = CASE WHEN $12::bool THEN NULL ELSE video_model END,
+              generated_image_url    = CASE WHEN $12::bool THEN NULL ELSE generated_image_url END,
+              generated_end_image_url= CASE WHEN $12::bool THEN NULL ELSE generated_end_image_url END,
+              keyframe_prompt        = CASE WHEN $12::bool THEN NULL ELSE keyframe_prompt END,
+              end_keyframe_prompt    = CASE WHEN $12::bool THEN NULL ELSE end_keyframe_prompt END
         WHERE id = $1`,
       [
         itemId,
@@ -133,10 +160,12 @@ export async function classifyDiscoveryItem(itemId: string, userId: string) {
         // skips its probe when a spec already exists, so the only chance to
         // capture the last frame is here.
         probe.lastFrameUrl,
+        promptKept,
+        reset,
       ],
     )
 
-    return { content_type: 'video_gen' as const, spec, renderedPrompt }
+    return { content_type: 'video_gen' as const, spec, renderedPrompt, promptKept, reset }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     await query(

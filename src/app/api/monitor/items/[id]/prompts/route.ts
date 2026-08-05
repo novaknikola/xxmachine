@@ -31,8 +31,15 @@ export async function PATCH(
   }
 
   const v = typeof body.rendered_prompt === 'string' ? body.rendered_prompt.trim() : null
+  // Re-analyze must not overwrite a prompt a human wrote, and it cannot tell one
+  // from a stale render — so the edit is recorded here, at the only place one can
+  // happen. Clearing the prompt clears the flag too, which keeps the documented
+  // "empty string re-renders next time" behaviour and doubles as the escape hatch.
   await query(
-    `UPDATE discovery_items SET rendered_prompt = $3 WHERE id = $1 AND user_id = $2`,
+    `UPDATE discovery_items
+        SET rendered_prompt = $3,
+            prompt_edited_at = CASE WHEN $3::text IS NULL THEN NULL ELSE now() END
+      WHERE id = $1 AND user_id = $2`,
     [id, auth.id, v || null],
   )
 

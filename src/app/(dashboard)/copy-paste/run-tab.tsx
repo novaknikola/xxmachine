@@ -11,6 +11,10 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Field, FieldLabel } from '@/components/ui/field'
 import { Pagination } from '@/components/ui/pagination'
 import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import {
   Loader2, Play, RefreshCw, CheckCircle2, XCircle, ExternalLink,
   ImageIcon, Video, Sparkles, Eye, SquareStack, Copy,
 } from 'lucide-react'
@@ -48,6 +52,10 @@ interface ReplicateItem {
 function specSummary(spec: CopyPasteSpec | null): string | null {
   if (!spec) return null
   const bits = [
+    // Hook first: it is the one line that says whether the analysis understood
+    // the clip, so it should be readable without opening Details. Truthiness,
+    // not `in` — the cast lies about old specs, which have no hook at all.
+    spec.hook,
     spec.people?.length ? `${spec.people.length} ${spec.people.length === 1 ? 'person' : 'people'}` : null,
     spec.environment,
     spec.style,
@@ -108,6 +116,8 @@ export function RunTab() {
   const [working, setWorking] = useState<string | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [detailId, setDetailId] = useState<string | null>(null)
+  /** Only set for items that already have a render — re-analysis clears it. */
+  const [reanalyzeTarget, setReanalyzeTarget] = useState<ReplicateItem | null>(null)
   /** Submitted to the queue but the worker has not flipped their status yet. */
   const [queuedIds, setQueuedIds] = useState<Set<string>>(new Set())
   const [page, setPage] = useState(1)
@@ -173,13 +183,21 @@ export function RunTab() {
     return studio.estimateFor(avgDur, anyCut ? 1 : 0)
   }, [items, studio])
 
-  async function runClassify(id: string) {
+  async function runClassify(id: string, reset = false) {
     setWorking(id)
     try {
-      const res = await fetch(`/api/monitor/classify/${id}`, { method: 'POST' })
+      const res = await fetch(`/api/monitor/classify/${id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reset }),
+      })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
-      toast.success('Analyzed')
+      toast.success(
+        data.promptKept
+          ? 'Spec updated — your edited prompt was kept. Clear it in Details to use the new one.'
+          : 'Analyzed',
+      )
       load()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed')
@@ -540,11 +558,15 @@ export function RunTab() {
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2 pt-1">
-                        {item.replicate_status === 'failed' && (
+                        {/* Was gated to failed items only, which left no way to
+                            re-run analysis after the spec schema changed. */}
+                        {!isActive && !isQueued && (
                           <Button
                             variant="outline"
                             disabled={working === item.id}
-                            onClick={() => runClassify(item.id)}
+                            onClick={() => item.kling_video_url
+                              ? setReanalyzeTarget(item)
+                              : runClassify(item.id)}
                           >
                             {working === item.id
                               ? <Loader2 className="w-4 h-4 animate-spin" />
@@ -624,6 +646,32 @@ export function RunTab() {
           />
         </div>
       )}
+
+      <AlertDialog open={!!reanalyzeTarget} onOpenChange={open => { if (!open) setReanalyzeTarget(null) }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Re-analyze and clear the render?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This re-runs the analysis over the source video. The existing video, keyframes
+              and keyframe prompts on this item are cleared so a new render can actually run —
+              re-analyzing without clearing them would change nothing. The finished video stays
+              in Drive. An edited prompt, if you wrote one, is kept.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                const t = reanalyzeTarget
+                setReanalyzeTarget(null)
+                if (t) runClassify(t.id, true)
+              }}
+            >
+              Re-analyze
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <JobDetailSheet
         item={detailItem}

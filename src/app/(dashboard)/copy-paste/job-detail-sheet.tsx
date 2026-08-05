@@ -229,6 +229,20 @@ export function JobDetailSheet({
             </section>
           ) : null}
 
+          {/* Above Scene on purpose: this is the field you read to decide whether
+              the analysis understood the clip at all. Absent on older specs. */}
+          {spec?.hook || spec?.subject_motion ? (
+            <section className="space-y-2">
+              <h3 className="font-medium">Hook</h3>
+              <ul className="space-y-1.5 text-muted-foreground leading-relaxed">
+                {spec.hook && <li className="text-foreground/90">{spec.hook}</li>}
+                {spec.subject_motion && (
+                  <li><span className="text-foreground/80">Body motion:</span> {spec.subject_motion}</li>
+                )}
+              </ul>
+            </section>
+          ) : null}
+
           {spec && (
             <section className="space-y-2">
               <h3 className="font-medium">Scene</h3>
@@ -258,6 +272,9 @@ export function JobDetailSheet({
                       </p>
                     )}
                     {e.action && <p className="text-xs text-muted-foreground/80 leading-relaxed">{e.action}</p>}
+                    {/* Dimmer than the action: this is what must differ beat to
+                        beat, so identical lines down the column are the tell. */}
+                    {e.motion && <p className="text-xs text-muted-foreground/60 leading-relaxed italic">{e.motion}</p>}
                   </div>
                 ))}
               </div>

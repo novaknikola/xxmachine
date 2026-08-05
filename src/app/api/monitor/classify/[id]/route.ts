@@ -10,8 +10,11 @@ export async function POST(
   if (auth instanceof NextResponse) return auth
 
   const { id } = await params
+  // reset also clears the finished render, so the new spec can actually reach
+  // Seedance — without it, re-analyzing a done item changes nothing visible.
+  const body = await req.json().catch(() => ({})) as { reset?: boolean }
   try {
-    const result = await classifyDiscoveryItem(id, auth.id)
+    const result = await classifyDiscoveryItem(id, auth.id, { reset: body.reset === true })
     return NextResponse.json({ ok: true, ...result })
   } catch (err) {
     return NextResponse.json(

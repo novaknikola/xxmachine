@@ -25,6 +25,13 @@ export interface CopyPasteSceneEvent {
   line: string
   delivery: string
   action: string
+  /**
+   * The phase of the body movement at this beat — the one field that has to
+   * differ event to event. `action` answers "what task", which does not change
+   * across a clip of someone doing one thing, and that is how a timeline of four
+   * identical entries got produced.
+   */
+  motion: string
 }
 
 export interface CopyPasteShot {
@@ -36,6 +43,16 @@ export interface CopyPasteShot {
 
 export interface CopyPasteSpec {
   format: string
+  /**
+   * The single reason a viewer stops scrolling, as a physical fact.
+   *
+   * Top level rather than on people[0] because enforceReferenceLock() overwrites
+   * that person's `appearance` on every parse — anything living there is at risk
+   * of being rewritten out from under itself.
+   */
+  hook: string
+  /** How people[0]'s body moves across the clip: parts, driver, rhythm, amplitude. */
+  subject_motion: string
   people: CopyPastePerson[]
   environment: string
   lighting: string
@@ -79,6 +96,16 @@ export const NEGATIVE_PROMPT_TEMPLATE =
   // Skin marks belonging to the source subject were surviving the identity swap.
   'no tattoos, no visible body ink, no piercings not present on the identity reference'
 
+/**
+ * Seedream tends to "tidy" an edited subject into a neutral upright pose, which
+ * deletes the very motion cue Seedance would otherwise animate from. Contains
+ * nothing anatomical on purpose — it protects evidence already in the frame
+ * rather than describing the body.
+ */
+const PRESERVE_MOTION_CUE =
+  'Preserve any motion blur, hair displacement, cloth movement and body lean present in image 1 — ' +
+  'do not straighten the pose, do not settle the subject into a neutral standing position.'
+
 /** Forced value for whichever person (always people[0]) gets the reference photo. */
 function referenceLockAppearance(genderHint: string): string {
   const isMan = /\b(male|man|guy|boyfriend|husband|coach|him|his)\b/i.test(genderHint)
@@ -102,6 +129,8 @@ scene — you decide which person that is (see RULE A).
 Return ONLY this JSON shape (fill every key; no markdown, no commentary):
 {
   "format": "aspect ratio + duration + one phrase describing capture style, e.g. '9:16 vertical video format, 0:14 duration, raw smartphone social media clip' — you will be told the ACTUAL measured duration and aspect ratio below; use those exact numbers here, do not invent your own.",
+  "hook": "SEE RULE E. ONE sentence: the single specific thing that makes a viewer stop scrolling, stated as a physical fact a camera can see. This is the most important field in this JSON — everything else must be consistent with it.",
+  "subject_motion": "SEE RULE E. How people[0]'s body actually moves across the whole clip: which parts move, what drives them, the rhythm and the amplitude. Movement only — never size or shape.",
   "people": [
     {
       "id": "short slug, e.g. female_subject / male_subject",
@@ -113,18 +142,18 @@ Return ONLY this JSON shape (fill every key; no markdown, no commentary):
   "environment": "location + visible props/background, one rich phrase",
   "lighting": "lighting direction/quality/mood",
   "color_grading": "overall look — warm/cool, contrast, filmic or flat phone-camera grade",
-  "atmosphere": "mood/energy of the scene",
+  "atmosphere": "mood/energy of the scene — must be consistent with \\"hook\\". Never a neutral task label when the clip is not really about the task.",
   "audio": "what's audible — dialogue presence, music, ambient sound, silence",
   "pacing": "editing rhythm — single continuous take, quick cuts, etc.",
   "background_activity": "anything happening behind/around the main action",
   "scene_events": [
-    { "timestamp": "0:00", "speaker": "a person id from people[], or \\"offscreen\\" for a voice behind the camera, or \\"none\\" when nobody speaks — SEE RULE D", "line": "spoken words, or empty", "delivery": "tone of delivery", "action": "physical action at this moment" }
+    { "timestamp": "0:00", "speaker": "a person id from people[], or \\"offscreen\\" for a voice behind the camera, or \\"none\\" when nobody speaks — SEE RULE D", "line": "spoken words, or empty", "delivery": "tone of delivery", "action": "physical action at this moment", "motion": "SEE RULE E — the PHASE of the body movement at THIS timestamp, read off the frame nearest it. Must not repeat the previous scene_event's motion." }
   ],
   "style": "overall visual/production style in one phrase",
   "camera_logic": "how the camera behaves across the whole clip — handheld/static/framing logic",
   "imperfections": ["raw, authentic, amateur-feeling details actually visible — NOT invented"],
   "shots": [
-    { "time": "0:00-0:07", "action": "what happens in this shot", "camera_behavior": "camera movement/framing for this shot", "scene_event_cue": "matching scene_events timestamp, or empty" }
+    { "time": "0:00-0:07", "action": "what happens in this shot — describe the MOVEMENT, not the task category, and never with a stabilising adverb", "camera_behavior": "camera movement/framing for this shot", "scene_event_cue": "matching scene_events timestamp, or empty" }
   ],
   "end_behavior": "how the clip ends — hard cut, hold, fade, loop-friendly, etc.",
   "negative_prompt": "leave this exact string empty — it is filled by our own code, not you"
@@ -169,8 +198,56 @@ not in frame at all. Do not assume the visible person said everything.
   harmless; a line put in the wrong mouth makes the recreated subject speak
   someone else's words.
 
+RULE E — THE HOOK AND THE BODY MOTION (this is what the whole spec exists for):
+A reel is not watched because of what the person is doing. It is watched because of
+one specific thing that is visible while they do it. A description that would equally
+well describe a hundred boring clips has missed the point, however accurate it is.
+
+"hook" — one sentence, the single reason a viewer stops scrolling, written as a
+physical fact a camera can see. Not a mood, not a topic. If the reason is the
+subject's body, say WHICH PART and WHAT IT IS DOING, in plain anatomical words:
+"her breasts bounce up and down with each downward chop", "her chest jiggles as she
+laughs", "her top rides up when she reaches overhead". Do NOT soften this into
+"secondary torso motion", "subtle movement" or any other euphemism — a vague hook
+produces a video that misses the point of the source, which is the only way this
+task can fail. If the real hook genuinely is not physical (a punchline, a reveal,
+a reaction), say that plainly instead.
+
+MOVEMENT ONLY, NEVER SIZE OR SHAPE. "breasts bounce with each chop" is right;
+"large breasts bounce" is wrong. Body proportions come from the identity photo
+(RULE A) — a size word here fights it and changes the wrong thing.
+
+"subject_motion" — which parts move, what drives them, the rhythm, the amplitude.
+Name the parts directly (chest, breasts, hips, thighs, shoulders, hair). Say what is
+being moved BY something else rather than moved deliberately — that involuntary,
+secondary movement is almost always what the clip is about, and it is the first
+thing a text-to-video model drops unless told. Give tempo concretely ("about two
+chops a second"), never as "steady".
+
+"scene_events[].motion" — the PHASE at that exact timestamp. Two consecutive
+scene_events must NEVER carry the same motion text. If the action is a repeating
+cycle, break the cycle across the events: knife raised and chest lifted -> knife
+driven down and chest drops -> chest rebounds and settles -> next lift. Four
+identical entries means you described the task instead of the movement.
+
+NEVER write "steadily", "calmly", "smoothly", "gently", "evenly" or "consistently"
+about a moving body anywhere in this JSON. Those words instruct the video model to
+damp the exact movement you were asked to capture.
+
+RULE B does not apply here. RULE B normalizes hair colour, garment colour, ethnicity,
+skin tone and age. It says nothing about how a body moves, and you must not
+self-censor motion into vagueness in order to feel safe.
+
 OTHER RULES:
-- Be concrete and specific, not vague. Every field should read like a director's shot list, not a vibe description.
+- Be concrete and specific, not vague: every field must describe something a camera
+  could see, never a mood word standing in for a fact. Shot-list register applies to
+  the DESCRIPTIVE fields — environment, lighting, wardrobe, camera, format. It does
+  NOT apply to "hook" and "subject_motion": those two exist precisely to say what a
+  neutral transcription leaves out. A spec that is a perfect transcription and an
+  empty hook has failed.
+- Cross-check before returning: if the thing you named in "hook" does not also appear
+  in "subject_motion" and in the scene_events' "motion" fields, the spec is wrong.
+  Fix it rather than returning it.
 - imperfections must reflect what is ACTUALLY visible (shaky frame, harsh phone flash, off-mic audio, etc.) — never invent generic filler.
 - scene_events and shots must be chronological and cover the full clip start to end.
 - Do not mention Instagram UI, captions, or watermarks anywhere.`
@@ -203,13 +280,17 @@ function normalizeSceneEvent(raw: unknown): CopyPasteSceneEvent | null {
   const o = raw as Record<string, unknown>
   const line = asString(o.line)
   const action = asString(o.action)
-  if (!line && !action) return null
+  // A beat carrying only motion is exactly what the schema now asks for on a
+  // wordless clip — dropping it here would delete the differentiation.
+  const motion = asString(o.motion)
+  if (!line && !action && !motion) return null
   return {
     timestamp: asString(o.timestamp),
     speaker: asString(o.speaker) || 'none',
     line,
     delivery: asString(o.delivery),
     action,
+    motion,
   }
 }
 
@@ -250,6 +331,9 @@ export function normalizeCopyPasteSpec(raw: unknown): CopyPasteSpec {
 
   return {
     format: asString(obj.format),
+    // Absent on every spec written before this field existed; '' renders nothing.
+    hook: asString(obj.hook),
+    subject_motion: asString(obj.subject_motion),
     people,
     environment: asString(obj.environment),
     lighting: asString(obj.lighting),
@@ -377,7 +461,9 @@ export async function extractCopyPasteSpec(
         },
       ],
     }],
-    maxTokens: 4096,
+    // A long reel with a differentiated motion line per beat can outgrow 4096,
+    // and a truncated response fails JSON.parse and throws the analysis away.
+    maxTokens: 6144,
     temperature: 0.2,
   })
 
@@ -396,6 +482,14 @@ export function renderCopyPastePrompt(spec: CopyPasteSpec): string {
   const blocks: string[] = []
 
   if (spec.format) blocks.push(spec.format)
+
+  // Second, right after format: early tokens carry the most weight, and this is
+  // the one thing the recreation kept losing. Deliberately unlabelled — "Hook:"
+  // is a meta-token Seedance has nothing to ground, while a bare physical
+  // sentence is the register an i2v model reads best. Sitting before the people
+  // block also primes how the subject is then described.
+  const hookBits = [spec.hook, spec.subject_motion].filter(Boolean)
+  if (hookBits.length) blocks.push(hookBits.join(' '))
 
   for (const p of spec.people) {
     const bits = [p.role, p.appearance, p.wardrobe].filter(Boolean)
@@ -434,7 +528,8 @@ export function renderCopyPastePrompt(spec: CopyPasteSpec): string {
         speech = 'a voice from behind the camera speaks, off-screen and unseen'
       }
 
-      return [e.timestamp, speech, e.action].filter(Boolean).join(' — ')
+      // Motion last so each beat ends on the movement rather than the task.
+      return [e.timestamp, speech, e.action, e.motion].filter(Boolean).join(' — ')
     }).filter(Boolean)
     if (lines.length) blocks.push(`Timeline: ${lines.join(' → ')}.`)
   }
@@ -482,6 +577,11 @@ export function renderKeyframeEditPrompt(spec: CopyPasteSpec): string {
     // particular were being carried over from image 1 by "keep everything from
     // image 1", with nothing here to say otherwise.
     `Body and skin come from image 2, not image 1: ${KEYFRAME_IDENTITY_LOCK}.`,
+    // The hook itself is deliberately NOT injected here — it would give Seedream a
+    // second authority on body shape, contradicting the identity lock above. What
+    // it can safely do is stop the edit from tidying the subject into a neutral
+    // pose, which is what deletes the motion cue Seedance animates from.
+    PRESERVE_MOTION_CUE,
     'Photorealistic, natural skin texture, no beauty filter, no AI skin smoothing.',
     'Do not add any other people. Do not change the composition, angle, or background.',
     // Negatives existed but only ever reached the video prompt, never the image
@@ -506,6 +606,7 @@ export function renderEndKeyframeEditPrompt(spec: CopyPasteSpec): string {
     "Replace the main subject's face and body identity with the person from image 2.",
     'The person must look IDENTICAL to the person in image 3 — same face, same hair colour and styling, same wardrobe, same skin tone and lighting. Only the pose and framing differ.',
     locked?.wardrobe && `Wardrobe: ${locked.wardrobe}.`,
+    PRESERVE_MOTION_CUE,
     'Photorealistic, natural skin texture, no beauty filter, no AI skin smoothing.',
     'Do not add any other people. Do not change the composition, angle, or background.',
   ].filter(Boolean)

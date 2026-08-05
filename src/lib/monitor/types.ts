@@ -60,6 +60,8 @@ export interface DiscoveryItemRow {
   copy_paste_spec: Record<string, unknown> | null
   /** Flattened prose sent to Seedance as `prompt` — user-editable before Replicate. */
   rendered_prompt: string | null
+  /** Set when a human edited rendered_prompt, so re-analysis leaves it alone. */
+  prompt_edited_at: string | null
   source_aspect_ratio: '9:16' | '16:9' | '1:1' | 'other' | null
   source_width: number | null
   source_height: number | null
