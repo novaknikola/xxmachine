@@ -138,6 +138,42 @@ export async function notifyViralPost(
   await notifyMonitorUser(userId, lines.join('\n'))
 }
 
+/**
+ * video_repurpose never told the bot it was done — the queue processor just
+ * flipped the DB row to 'done' and returned. Mirrors notifyReplicationDone's
+ * shape so the two feel like one product instead of two.
+ */
+export async function notifyRepurposeDone(opts: {
+  userId: string
+  total: number
+  failed: number
+  videoName?: string | null
+  outputDriveFolderId?: string | null
+}): Promise<void> {
+  const folderUrl = opts.outputDriveFolderId
+    ? `https://drive.google.com/drive/folders/${opts.outputDriveFolderId}`
+    : null
+  const okCount = opts.total - opts.failed
+  const lines = [
+    `♻️ <b>Repurpose done</b>${opts.videoName ? ` — ${escapeHtml(opts.videoName)}` : ''}`,
+    `${okCount}/${opts.total} variant${opts.total === 1 ? '' : 's'} ready` +
+      (opts.failed ? `, ${opts.failed} failed` : ''),
+    folderUrl ? `<a href="${folderUrl}">📁 Drive folder</a>` : '',
+  ].filter(Boolean)
+  await notifyMonitorUser(opts.userId, lines.join('\n'))
+}
+
+export async function notifyRepurposeFailed(
+  userId: string,
+  error: string,
+  videoName?: string | null,
+): Promise<void> {
+  await notifyMonitorUser(
+    userId,
+    `❌ Repurpose failed${videoName ? ` — ${escapeHtml(videoName)}` : ''}\n${escapeHtml(error.slice(0, 300))}`,
+  )
+}
+
 export async function notifyReplicationFailed(
   userId: string,
   profile: string,

@@ -424,6 +424,17 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         }
       }
 
+      {
+        const { notifyRepurposeDone } = await import('@/lib/monitor/notify')
+        await notifyRepurposeDone({
+          userId: job.user_id,
+          total: count,
+          failed: finalUrls.filter(u => u.startsWith('error:')).length,
+          videoName,
+          outputDriveFolderId,
+        }).catch(() => {})
+      }
+
       return NextResponse.json({ ok: true, done: count })
     }
 
@@ -1871,6 +1882,11 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         `UPDATE generation_queue SET status='failed', error=$1, finished_at=now() WHERE id=$2`,
         [errMsg, id],
       )
+      if (job.job_type === 'video_repurpose') {
+        const { notifyRepurposeFailed } = await import('@/lib/monitor/notify')
+        const videoName = (job.input as { videoName?: string } | undefined)?.videoName
+        await notifyRepurposeFailed(job.user_id, errMsg, videoName).catch(() => {})
+      }
     } else {
       await query(
         `UPDATE generation_queue SET status='pending', error=$1 WHERE id=$2`,
