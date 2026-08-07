@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
     [
       email.toLowerCase(),
       display_name,
-      role === 'admin' ? 'admin' : 'chatter',
+      role === 'admin' ? 'admin' : 'user',
       hash,
     ]
   )

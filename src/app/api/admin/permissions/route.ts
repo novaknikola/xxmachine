@@ -1,14 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { rows, query } from '@/lib/db'
-import { requireAdmin } from '@/lib/session'
+import { requireAdmin, requireUser } from '@/lib/session'
 
 export async function GET(req: NextRequest) {
-  const admin = await requireAdmin(req)
-  if (admin instanceof NextResponse) return admin
+  const user = await requireUser(req)
+  if (user instanceof NextResponse) return user
 
   const userId = req.nextUrl.searchParams.get('userId')
   if (!userId) {
     return NextResponse.json({ error: 'userId required' }, { status: 400 })
+  }
+
+  if (user.role !== 'admin' && user.id !== userId) {
+    return NextResponse.json({ error: 'forbidden' }, { status: 403 })
   }
 
   const permissions = await rows(
