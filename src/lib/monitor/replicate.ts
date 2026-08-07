@@ -13,9 +13,15 @@ const POLL_INTERVAL_MS = 5_000
  * proxy_read_timeout. Seedream's own poll (pollEditResult in wavespeed.ts) caps
  * at ~360s, so the signal here is deliberately looser — otherwise it would abort
  * the call before that poll can report a real failure.
+ *
+ * Seedance is now video-edit (restyles the real source clip) rather than
+ * image-to-video (synthesized from a still) — it processes actual video frames,
+ * not just one image, so it runs noticeably longer than the old model. The
+ * first live run under this model was still going at the old 12-minute cap
+ * with no error, so this is widened rather than guessed down.
  */
-const SEEDANCE_POLL_ATTEMPTS = 144            // 144 × 5s ≈ 12 min
-const SEEDANCE_ABORT_MS = 740_000
+const SEEDANCE_POLL_ATTEMPTS = 240            // 240 × 5s = 20 min
+const SEEDANCE_ABORT_MS = 1_220_000           // ~20.3 min
 const SEEDREAM_ABORT_MS = 400_000
 
 async function pollV3(
