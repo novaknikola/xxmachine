@@ -22,6 +22,7 @@ export interface TelegramBatch {
   prompt_message_id: string | number | null
   custom_prompt: string | null
   awaiting_prompt: boolean
+  prompt_asked: boolean
 }
 
 export async function findUserByChat(chatId: number | string): Promise<string | null> {
@@ -179,6 +180,14 @@ export async function setAwaitingPrompt(batchId: string, awaiting: boolean): Pro
   await query(
     `UPDATE telegram_batches SET awaiting_prompt = $2, updated_at = now() WHERE id = $1`,
     [batchId, awaiting],
+  )
+}
+
+/** Marks that the "add anything to the prompt?" choice has been offered, so it is not asked again. */
+export async function markPromptAsked(batchId: string): Promise<void> {
+  await query(
+    `UPDATE telegram_batches SET prompt_asked = true, updated_at = now() WHERE id = $1`,
+    [batchId],
   )
 }
 

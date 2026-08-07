@@ -150,6 +150,16 @@ export function batchKeyboard(batchId: string) {
   }
 }
 
+/** Asked once, the first time a batch has both a photo and links. */
+export function promptChoiceKeyboard(batchId: string) {
+  return {
+    inline_keyboard: [[
+      { text: '⏭ Skip', callback_data: `cpskip:${batchId}` },
+      { text: '✍️ Add text', callback_data: `cpprompt:${batchId}` },
+    ]],
+  }
+}
+
 /** Edit a plain text message (sendPhoto captions use editMessageCaption). */
 export async function editMessageText(
   chatId: string | number,

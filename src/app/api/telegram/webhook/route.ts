@@ -9,6 +9,7 @@ import {
   editMessageReplyMarkup,
   editMessageText,
   mainMenuKeyboard,
+  promptChoiceKeyboard,
   sendText,
 } from '@/lib/telegram'
 import { enqueueReelUrlsForUser, EnqueueUrlsError } from '@/lib/monitor/enqueue-from-urls'
@@ -17,11 +18,13 @@ import {
   findUserByChat,
   getBatch,
   markBatch,
+  markPromptAsked,
   openBatch,
   setAwaitingPrompt,
   setCustomPrompt,
   setPromptMessage,
   startBatchWithPhoto,
+  type TelegramBatch,
 } from '@/lib/monitor/telegram-batch'
 import { estimateCopyPasteCost, formatUsd } from '@/lib/monitor/cost-estimate'
 import {
@@ -80,6 +83,32 @@ function batchSummary(
     '',
     `Estimated: <b>${formatUsd(total)}</b> (${formatUsd(per.totalUsd)} × ${urls.length}, at default clip length)`,
   ].filter(Boolean).join('\n')
+}
+
+/**
+ * Called the moment a batch first has both a photo and links, from whichever
+ * message completed it. First time: offer the prompt choice instead of going
+ * straight to Replicate — asked once (prompt_asked), not on every later link
+ * added to the same batch. After that (or once the prompt is skipped/set),
+ * shows the normal Replicate/Add prompt/Cancel keyboard.
+ */
+async function presentBatchReady(chatId: number, batch: TelegramBatch): Promise<void> {
+  if (!batch.prompt_asked) {
+    await markPromptAsked(batch.id)
+    const sent = await sendText(
+      chatId,
+      '📝 Want to add anything to the prompt for this batch? (style, lighting, anything extra)',
+    ) as { message_id?: number }
+    if (sent?.message_id) {
+      await editMessageReplyMarkup(chatId, sent.message_id, promptChoiceKeyboard(batch.id))
+    }
+    return
+  }
+  const sent = await sendText(chatId, 'Ready when you are:') as { message_id?: number }
+  if (sent?.message_id) {
+    await editMessageReplyMarkup(chatId, sent.message_id, batchKeyboard(batch.id))
+    await setPromptMessage(batch.id, sent.message_id)
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -227,6 +256,7 @@ export async function POST(req: NextRequest) {
               ? `✍️ Added to every rendered prompt in this batch: “${escapeHtml(arg)}”`
               : '✍️ Cleared — nothing extra will be added to the rendered prompt.',
           )
+          if (open.urls.length && open.reference_image_url) await presentBatchReady(chatId, open)
           return NextResponse.json({ ok: true })
         }
 
@@ -242,6 +272,7 @@ export async function POST(req: NextRequest) {
                 ? `✍️ Added to every rendered prompt in this batch: “${escapeHtml(rawText.trim())}”`
                 : '✍️ Cleared — nothing extra will be added to the rendered prompt.',
             )
+            if (open.urls.length && open.reference_image_url) await presentBatchReady(chatId, open)
             return NextResponse.json({ ok: true })
           }
         }
@@ -300,20 +331,16 @@ export async function POST(req: NextRequest) {
                 replacedPrevious ? 'Previous batch replaced.' : '',
                 '',
                 already
-                  ? `${already} reel${already === 1 ? '' : 's'} already in this batch — press Replicate below, or send more links.`
+                  ? `${already} reel${already === 1 ? '' : 's'} already in this batch — ready to go, or send more links.`
                   : 'Now send the Instagram reel links — one per line, up to 30. They can come in several messages.',
                 '',
                 `<code>batch ${batch.id.slice(0, 8)}</code>`,
               ].filter(l => l !== undefined).join('\n'),
             )
             // Links that arrived before the photo now have everything they
-            // need, so the buttons appear without asking for them again.
+            // need, so the next step (prompt choice, or straight to Replicate) fires without asking again.
             if (already) {
-              const ready = await sendText(chatId, 'Ready when you are:') as { message_id?: number }
-              if (ready?.message_id) {
-                await editMessageReplyMarkup(chatId, ready.message_id, batchKeyboard(batch.id))
-                await setPromptMessage(batch.id, ready.message_id)
-              }
+              await presentBatchReady(chatId, batch)
             }
           } catch (err) {
             console.error('[telegram/webhook] photo failed:', err)
@@ -353,11 +380,9 @@ export async function POST(req: NextRequest) {
             })}`,
           ) as { message_id?: number }
 
-          // Buttons only once the batch can actually run.
+          // Next step only once the batch can actually run.
           if (batch.urls.length && batch.reference_image_url) {
-            const withButtons = await sendText(chatId, 'Ready when you are:') as { message_id?: number }
-            await editMessageReplyMarkup(chatId, withButtons.message_id!, batchKeyboard(batch.id))
-            if (withButtons.message_id) await setPromptMessage(batch.id, withButtons.message_id)
+            await presentBatchReady(chatId, batch)
           } else if (sent?.message_id) {
             await setPromptMessage(batch.id, sent.message_id)
           }
@@ -573,6 +598,21 @@ export async function POST(req: NextRequest) {
             : '✍️ Send the text to add to the end of the rendered prompt.',
         )
       }
+      return NextResponse.json({ ok: true })
+    }
+
+    // ── Skip the prompt-choice step — go straight to Replicate/Cancel ──────
+    if (action === 'cpskip') {
+      const chatId = cbMessage?.chat?.id as number | undefined
+      const batch = postId ? await getBatch(postId) : null
+
+      if (!batch || batch.status !== 'collecting') {
+        await answerCallbackQuery(callbackId, 'This batch was already handled')
+        return NextResponse.json({ ok: true })
+      }
+
+      await answerCallbackQuery(callbackId, '')
+      if (chatId) await presentBatchReady(chatId, batch)
       return NextResponse.json({ ok: true })
     }
 
