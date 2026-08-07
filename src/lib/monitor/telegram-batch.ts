@@ -20,6 +20,7 @@ export interface TelegramBatch {
   urls: string[]
   status: string
   prompt_message_id: string | number | null
+  custom_prompt: string | null
 }
 
 export async function findUserByChat(chatId: number | string): Promise<string | null> {
@@ -161,6 +162,14 @@ export async function setPromptMessage(batchId: string, messageId: number): Prom
   await query(
     `UPDATE telegram_batches SET prompt_message_id = $2 WHERE id = $1`,
     [batchId, messageId],
+  )
+}
+
+/** Text appended to every item's rendered prompt when this batch replicates. Empty clears it. */
+export async function setCustomPrompt(batchId: string, text: string): Promise<void> {
+  await query(
+    `UPDATE telegram_batches SET custom_prompt = $2, updated_at = now() WHERE id = $1`,
+    [batchId, text.trim() || null],
   )
 }
 

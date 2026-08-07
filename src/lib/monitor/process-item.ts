@@ -37,6 +37,8 @@ async function enqueueRepurpose(opts: {
   itemId: string
   /** Derived from the source reel so variants share the original's prefix. */
   seriesLabel?: string
+  /** Override destination. Empty keeps the computed archive tree. */
+  outputDriveFolderId?: string | null
 }): Promise<void> {
   if (!opts.count || opts.count < 1) return
 
@@ -59,6 +61,7 @@ async function enqueueRepurpose(opts: {
         archiveToDrive: true,
         characterKey: opts.characterKey,
         seriesLabel: opts.seriesLabel,
+        outputDriveFolderId: opts.outputDriveFolderId ?? null,
       }),
       opts.count,
     ],
@@ -189,7 +192,13 @@ export async function classifyDiscoveryItem(
 export async function replicateCopyPasteItem(
   itemId: string,
   userId: string,
-  opts?: { endFrame?: EndFrameMode; repurposeCount?: number },
+  opts?: {
+    endFrame?: EndFrameMode
+    repurposeCount?: number
+    outputDriveFolderId?: string | null
+    /** Appended to the end of the rendered prompt for the video-edit call only. */
+    customPrompt?: string | null
+  },
 ) {
   const endFrameMode: EndFrameMode = opts?.endFrame ?? 'auto'
   const item = await one<DiscoveryItemRow>(
@@ -336,12 +345,15 @@ export async function replicateCopyPasteItem(
     }
     const lastImageUrl = wantEndFrame ? generatedEndImageUrl : null
     const referenceImageUrls = [generatedImageUrl, ...(lastImageUrl ? [lastImageUrl] : [])]
+    const finalPrompt = opts?.customPrompt?.trim()
+      ? `${renderedPrompt} ${opts.customPrompt.trim()}`
+      : renderedPrompt
 
     await query(`UPDATE discovery_items SET replicate_status = 'video_generating' WHERE id = $1`, [itemId])
     const result = await generateSeedanceVideo({
       videoUrl: item.video_url,
       referenceImageUrls,
-      prompt: renderedPrompt,
+      prompt: finalPrompt,
       aspectRatio,
     }, apiKey)
     // Record the variant on the row so the A/B comparison lives in the data,
@@ -364,6 +376,7 @@ export async function replicateCopyPasteItem(
       characterKey: item.profile,
       itemId,
       seriesLabel: copyPasteArchiveLabel(item.profile, item.content_id),
+      outputDriveFolderId: opts?.outputDriveFolderId ?? null,
     }).catch(err => console.error('[monitor/replicate] repurpose enqueue failed:', err))
     await notifyReplicationDone({
       userId,

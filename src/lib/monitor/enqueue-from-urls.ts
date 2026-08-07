@@ -71,6 +71,14 @@ export async function enqueueReelUrlsForUser(opts: {
    * to the Replicate button; a caller with no UI has to ask for it.
    */
   autoReplicate?: boolean
+  /** Pin the clip's end with a matching second keyframe. Default 'auto'. */
+  endFrame?: 'auto' | 'always' | 'off'
+  /** Fan each finished video out into N repurposed variants. 0/undefined = off. */
+  repurposeCount?: number
+  /** Where repurpose variants land. Empty = the computed archive tree. */
+  outputDriveFolderId?: string | null
+  /** Appended to the end of every item's rendered prompt. */
+  customPrompt?: string | null
   onReplicateQueued?: (r: { jobId: string | null; classified: number; failed: number }) => Promise<void>
 }): Promise<EnqueueUrlsResult> {
   const { userId, rawText } = opts
@@ -298,6 +306,10 @@ export async function enqueueReelUrlsForUser(opts: {
   if (opts.autoReplicate) {
     scheduleAutoClassify(userId, result.ids, {
       thenReplicate: true,
+      endFrame: opts.endFrame,
+      repurposeCount: opts.repurposeCount,
+      outputDriveFolderId: opts.outputDriveFolderId,
+      customPrompt: opts.customPrompt,
       onQueued: opts.onReplicateQueued,
     })
   } else {

@@ -15,6 +15,7 @@ import {
   getBatch,
   markBatch,
   openBatch,
+  setCustomPrompt,
   setPromptMessage,
   startBatchWithPhoto,
 } from '@/lib/monitor/telegram-batch'
@@ -47,18 +48,30 @@ function escapeHtml(s: string): string {
  * The estimate is deliberately on the button's own message: Telegram makes it
  * far too easy to start an expensive job with a thumb, and a keyframe plus a
  * Seedance render per reel is real money. Duration is unknown until the reel is
- * probed, so this quotes the default-length case and says so.
+ * probed, so this quotes the default-length case and says so. Repurpose/output/
+ * prompt come from the account's saved /settings and the batch's own /prompt,
+ * shown here so a tap on Replicate never surprises with settings picked up
+ * silently in the background.
  */
-function batchSummary(urls: string[], hasReference: boolean): string {
+function batchSummary(
+  urls: string[],
+  hasReference: boolean,
+  settings: { repurposeCount: number; outputDriveFolderId: string | null; customPrompt: string | null },
+): string {
   const per = estimateCopyPasteCost(null)
   const total = per.totalUsd * urls.length
   return [
     `🎬 <b>Copy-Paste batch</b>`,
     `Reels: <b>${urls.length}</b>`,
     hasReference ? 'Reference photo: ✅' : '⚠️ No reference photo yet — send one before starting.',
+    settings.repurposeCount > 0
+      ? `Repurpose: <b>${settings.repurposeCount}</b> variant${settings.repurposeCount === 1 ? '' : 's'} per video`
+      : 'Repurpose: off (/settings to turn on)',
+    settings.outputDriveFolderId ? `Output folder: <code>${escapeHtml(settings.outputDriveFolderId)}</code>` : '',
+    settings.customPrompt ? `Extra prompt: “${escapeHtml(settings.customPrompt)}”` : '',
     '',
     `Estimated: <b>${formatUsd(total)}</b> (${formatUsd(per.totalUsd)} × ${urls.length}, at default clip length)`,
-  ].join('\n')
+  ].filter(Boolean).join('\n')
 }
 
 export async function POST(req: NextRequest) {
@@ -147,6 +160,27 @@ export async function POST(req: NextRequest) {
           }
           await setOutputFolder(userId, id)
           await sendText(chatId, `📁 Variants will be filed in <code>${escapeHtml(id)}</code>.`)
+          return NextResponse.json({ ok: true })
+        }
+
+        // ── /prompt <text> — appended to the rendered prompt for this batch ──
+        // Scoped to the open batch, not the account: a per-run instruction
+        // ("golden hour lighting") has no reason to survive past the batch
+        // that requested it, unlike /settings and /output.
+        if (rawText.startsWith('/prompt')) {
+          const arg = rawText.slice('/prompt'.length).trim()
+          const open = await openBatch(chatId)
+          if (!open) {
+            await sendText(chatId, 'No batch open yet — send a reference photo or reel links first.')
+            return NextResponse.json({ ok: true })
+          }
+          await setCustomPrompt(open.id, arg)
+          await sendText(
+            chatId,
+            arg
+              ? `✍️ Added to every rendered prompt in this batch: “${escapeHtml(arg)}”`
+              : '✍️ Cleared — nothing extra will be added to the rendered prompt.',
+          )
           return NextResponse.json({ ok: true })
         }
 
@@ -247,9 +281,14 @@ export async function POST(req: NextRequest) {
             atCap ? 'batch is at the 30 reel cap' : '',
           ].filter(Boolean).join(' · ')
 
+          const repurposeSettings = await getRepurposeSettings(userId)
           const sent = await sendText(
             chatId,
-            `${notes}\n\n${batchSummary(batch.urls, !!batch.reference_image_url)}`,
+            `${notes}\n\n${batchSummary(batch.urls, !!batch.reference_image_url, {
+              repurposeCount: repurposeSettings.variantCount,
+              outputDriveFolderId: repurposeSettings.outputDriveFolderId,
+              customPrompt: batch.custom_prompt,
+            })}`,
           ) as { message_id?: number }
 
           // Buttons only once the batch can actually run.
@@ -403,6 +442,7 @@ export async function POST(req: NextRequest) {
       }
 
       try {
+        const repurposeSettings = await getRepurposeSettings(batch.user_id)
         const result = await enqueueReelUrlsForUser({
           userId: batch.user_id,
           rawText: batch.urls.join('\n'),
@@ -410,6 +450,9 @@ export async function POST(req: NextRequest) {
           // Nobody is going to press Replicate for a chat, and the message
           // below promises a finished video.
           autoReplicate: true,
+          repurposeCount: repurposeSettings.variantCount,
+          outputDriveFolderId: repurposeSettings.outputDriveFolderId,
+          customPrompt: batch.custom_prompt,
           onReplicateQueued: async ({ jobId, classified, failed }) => {
             if (!chatId) return
             await sendText(

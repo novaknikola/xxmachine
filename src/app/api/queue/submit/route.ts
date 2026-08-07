@@ -76,6 +76,10 @@ export interface CopyPasteJobInput {
   endFrame?: 'auto' | 'always' | 'off'
   /** Fan each finished video out into N repurposed variants. 0 = off. */
   repurposeCount?: number
+  /** Where repurpose variants land. Empty = the computed archive tree. */
+  outputDriveFolderId?: string | null
+  /** Appended to the end of every item's rendered prompt. */
+  customPrompt?: string | null
 }
 
 export interface CopyPromptsJobItem {

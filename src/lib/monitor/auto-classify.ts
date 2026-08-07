@@ -21,6 +21,9 @@ export function scheduleAutoClassify(
     thenReplicate?: boolean
     endFrame?: 'auto' | 'always' | 'off'
     repurposeCount?: number
+    outputDriveFolderId?: string | null
+    /** Appended to the end of every item's rendered prompt. */
+    customPrompt?: string | null
     /** Called with the queue job id, or with the reason nothing was queued. */
     onQueued?: (result: { jobId: string | null; classified: number; failed: number }) => Promise<void>
   },
@@ -54,6 +57,8 @@ export function scheduleAutoClassify(
               itemIds: classified,
               endFrame: opts.endFrame ?? 'auto',
               repurposeCount: opts.repurposeCount ?? 0,
+              outputDriveFolderId: opts.outputDriveFolderId ?? null,
+              customPrompt: opts.customPrompt ?? null,
             }),
             classified.length,
           ],
