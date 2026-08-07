@@ -16,12 +16,15 @@ const POLL_INTERVAL_MS = 5_000
  *
  * Seedance is now video-edit (restyles the real source clip) rather than
  * image-to-video (synthesized from a still) — it processes actual video frames,
- * not just one image, so it runs noticeably longer than the old model. The
- * first live run under this model was still going at the old 12-minute cap
- * with no error, so this is widened rather than guessed down.
+ * not just one image, so it runs noticeably longer than the old model, and
+ * inconsistently so. A live run finished successfully on WaveSpeed's side at
+ * ~22 minutes after our own 20-minute cap had already aborted the poll and
+ * recorded it as failed — WaveSpeed still bills for that even though we never
+ * got the result, so an early abort is pure waste, not a safety net. Set this
+ * long enough that it only fires for a genuinely dead request, not a slow one.
  */
-const SEEDANCE_POLL_ATTEMPTS = 240            // 240 × 5s = 20 min
-const SEEDANCE_ABORT_MS = 1_220_000           // ~20.3 min
+const SEEDANCE_POLL_ATTEMPTS = 540            // 540 × 5s = 45 min
+const SEEDANCE_ABORT_MS = 2_700_000           // 45 min
 const SEEDREAM_ABORT_MS = 400_000
 
 async function pollV3(

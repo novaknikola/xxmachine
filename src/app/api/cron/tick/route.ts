@@ -97,8 +97,12 @@ export async function GET(req: NextRequest) {
   ).catch(err => console.error('[cron/tick] reset stuck queue jobs:', err))
 
   // copy_paste_v2 and copy_prompts_generate write progressAt after every batch.
-  // No progress for 25 minutes means the worker died (deploy/crash), not that
-  // it is still grinding — a large Seedream batch legitimately runs for hours.
+  // Seedance video-edit alone can legitimately run 45 minutes (see
+  // SEEDANCE_ABORT_MS in monitor/replicate.ts) and up to 2 items run in
+  // parallel per batch, so this must stay well above that or it flags a job
+  // that is still genuinely polling. No progress for 60 minutes means the
+  // worker actually died (deploy/crash) — a large Seedream-only batch still
+  // heartbeats between items, so that case doesn't hit this at all.
   //
   // This never auto-requeues: a dead worker can leave a paid WaveSpeed call
   // in flight with no local record of it, and resubmitting blind risks paying
@@ -107,14 +111,14 @@ export async function GET(req: NextRequest) {
   await query(
     `UPDATE generation_queue
         SET status = 'failed',
-            error = COALESCE(error, 'Job stalled — no progress for 25 minutes. Check WaveSpeed usage before resubmitting; the original call may have already billed.'),
+            error = COALESCE(error, 'Job stalled — no progress for 60 minutes. Check WaveSpeed usage before resubmitting; the original call may have already billed.'),
             finished_at = now()
       WHERE status = 'processing'
         AND job_type IN ('copy_paste_v2', 'copy_prompts_generate', 'seedance_i2v', 'infinite_talk')
         AND COALESCE(
               NULLIF(output->>'progressAt', '')::timestamptz,
               started_at
-            ) < now() - interval '25 minutes'`,
+            ) < now() - interval '60 minutes'`,
   ).catch(err => console.error('[cron/tick] fail stale heartbeat jobs:', err))
 
   // My Pod resume lease: worker heartbeats progressAt ~every 60s during Comfy/Python work.
