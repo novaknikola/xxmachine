@@ -1,18 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { one, query } from '@/lib/db'
 import type { ViralReel } from '@/lib/types'
+import { requireUser } from '@/lib/session'
+import { getUserApiKey } from '@/lib/user-config'
 
-const WAVESPEED_KEY = process.env.WAVESPEED_API_KEY!
 // v3 API — motion control models use a different base than z-image (v2)
 const API_BASE = 'https://api.wavespeed.ai/api/v3'
 const MODEL = 'kwaivgi/kling-v2.6-std/motion-control'
 
-async function pollResult(requestId: string, signal: AbortSignal): Promise<string> {
+async function pollResult(requestId: string, apiKey: string, signal: AbortSignal): Promise<string> {
   for (let i = 0; i < 60; i++) {
     if (signal.aborted) throw new Error('Aborted')
     await new Promise(r => setTimeout(r, 5000))
     const res = await fetch(`${API_BASE}/predictions/${requestId}/result`, {
-      headers: { Authorization: `Bearer ${WAVESPEED_KEY}` },
+      headers: { Authorization: `Bearer ${apiKey}` },
       signal,
     })
     const data = await res.json()
@@ -28,9 +29,17 @@ async function pollResult(requestId: string, signal: AbortSignal): Promise<strin
 }
 
 export async function POST(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireUser(req)
+  if (auth instanceof NextResponse) return auth
+
+  const apiKey = await getUserApiKey(auth.id, 'wavespeed_api_key').catch(() => '')
+  if (!apiKey) {
+    return NextResponse.json({ error: 'WAVESPEED_API_KEY not configured' }, { status: 500 })
+  }
+
   const { id } = await params
   const reel = await one<ViralReel>('SELECT * FROM viral_reels WHERE id = $1', [id])
   if (!reel) return NextResponse.json({ error: 'Reel not found' }, { status: 404 })
@@ -42,7 +51,7 @@ export async function POST(
     const initRes = await fetch(`${API_BASE}/${MODEL}`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${WAVESPEED_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -58,7 +67,7 @@ export async function POST(
     const requestId = initData?.data?.id ?? initData?.id
     if (!requestId) throw new Error('No request ID from Wavespeed')
 
-    const videoUrl = await pollResult(requestId, abort)
+    const videoUrl = await pollResult(requestId, apiKey, abort)
 
     await query(
       'UPDATE viral_reels SET kling_video_url = $1, status = $2 WHERE id = $3',

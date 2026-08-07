@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { one } from '@/lib/db'
+import { requireUser } from '@/lib/session'
+import { getUserApiKey } from '@/lib/user-config'
 import JSZip from 'jszip'
 
 export const maxDuration = 30
 
-const API_KEY = process.env.WAVESPEED_API_KEY
 const UPLOAD_URL = 'https://api.wavespeed.ai/api/v3/media/upload/binary'
 const TRAINER_URL = 'https://api.wavespeed.ai/api/v3/wavespeed-ai/z-image-lora-trainer'
 
@@ -14,11 +15,11 @@ async function downloadImage(url: string): Promise<Buffer> {
   return Buffer.from(await res.arrayBuffer())
 }
 
-async function uploadZipToWavespeed(zipBuffer: Buffer): Promise<string> {
+async function uploadZipToWavespeed(zipBuffer: Buffer, apiKey: string): Promise<string> {
   const res = await fetch(UPLOAD_URL, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${API_KEY}`,
+      Authorization: `Bearer ${apiKey}`,
       'X-Entity-Type': 'application/zip',
       'X-Entity-Name': `dataset_${Date.now()}.zip`,
       'X-Entity-Length': String(zipBuffer.length),
@@ -35,7 +36,11 @@ async function uploadZipToWavespeed(zipBuffer: Buffer): Promise<string> {
 }
 
 export async function POST(req: NextRequest) {
-  if (!API_KEY) return NextResponse.json({ error: 'WAVESPEED_API_KEY not configured' }, { status: 500 })
+  const auth = await requireUser(req)
+  if (auth instanceof NextResponse) return auth
+
+  const apiKey = await getUserApiKey(auth.id, 'wavespeed_api_key').catch(() => '')
+  if (!apiKey) return NextResponse.json({ error: 'WAVESPEED_API_KEY not configured' }, { status: 500 })
 
   try {
     const { imageUrls, name, triggerWord, steps, learningRate, loraRank } = await req.json() as {
@@ -65,13 +70,13 @@ export async function POST(req: NextRequest) {
     )
 
     // 2. Upload ZIP to Wavespeed media
-    const zipUrl = await uploadZipToWavespeed(zipBuffer)
+    const zipUrl = await uploadZipToWavespeed(zipBuffer, apiKey)
 
     // 3. Start LoRA training
     const trainRes = await fetch(TRAINER_URL, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -92,9 +97,9 @@ export async function POST(req: NextRequest) {
 
     // 4. Save to DB as 'training'
     const row = await one<{ id: string }>(
-      `INSERT INTO loras (name, trigger_word, steps, learning_rate, lora_rank, wavespeed_request_id)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-      [name, triggerWord, steps ?? 1000, learningRate ?? 0.0001, loraRank ?? 16, requestId]
+      `INSERT INTO loras (name, trigger_word, steps, learning_rate, lora_rank, wavespeed_request_id, user_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      [name, triggerWord, steps ?? 1000, learningRate ?? 0.0001, loraRank ?? 16, requestId, auth.id]
     )
 
     return NextResponse.json({ ok: true, loraId: row!.id, requestId })

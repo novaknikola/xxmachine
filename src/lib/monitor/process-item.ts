@@ -11,6 +11,7 @@ import {
 } from './copy-paste-spec'
 import { probeSourceVideo, type SourceAspectRatio } from './analyze'
 import { generateCopyPasteKeyframe, generateSeedanceVideo } from './replicate'
+import { getUserApiKey } from '@/lib/user-config'
 import { notifyReplicationDone, notifyReplicationFailed } from './notify'
 import { archiveDiscoveryItem } from '@/lib/drive-archive/from-discovery-item'
 import type { DiscoveryItemRow, EndFrameMode, TrackedProfileRow } from './types'
@@ -199,6 +200,8 @@ export async function replicateCopyPasteItem(
   if (item.admin_status !== 'APPROVED') throw new Error('Item must be approved before replication')
   if (!item.video_url) throw new Error('Item has no source video')
 
+  const apiKey = await getUserApiKey(userId, 'wavespeed_api_key')
+
   // Items that came from a profile scan were never part of a manual paste, so
   // they carry no per-batch photo. Fall back to the account default before
   // failing, otherwise the whole scan → approve → replicate loop is unusable.
@@ -291,7 +294,7 @@ export async function replicateCopyPasteItem(
         prompt: keyframePrompt,
         aspectRatio,
         itemId,
-      })
+      }, apiKey)
       generatedImageUrl = keyframe.imageUrl
       await query(
         `UPDATE discovery_items SET generated_image_url = $2, replicate_status = 'image_done' WHERE id = $1`,
@@ -324,7 +327,7 @@ export async function replicateCopyPasteItem(
         itemId,
         matchImageUrl: generatedImageUrl,
         slot: 'keyframe-end',
-      })
+      }, apiKey)
       generatedEndImageUrl = endKeyframe.imageUrl
       await query(
         `UPDATE discovery_items SET generated_end_image_url = $2, replicate_status = 'image_done' WHERE id = $1`,
@@ -340,7 +343,7 @@ export async function replicateCopyPasteItem(
       prompt: renderedPrompt,
       durationSec,
       aspectRatio,
-    })
+    }, apiKey)
     // Record the variant on the row so the A/B comparison lives in the data,
     // not in whichever run someone happens to remember.
     const videoModel = lastImageUrl ? `${result.model}+end_frame` : result.model

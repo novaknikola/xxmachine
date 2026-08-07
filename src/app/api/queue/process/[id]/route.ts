@@ -8,6 +8,7 @@ import { generateSeedanceVideo } from '@/lib/runpod-seedance'
 import { generateTalkingVideo } from '@/lib/runpod-infinitetalk'
 import { promptForImage } from '@/lib/seedance-prompt'
 import { resolveKey } from '@/lib/user-keys'
+import { getUserApiKey } from '@/lib/user-config'
 import { processVideoVariant, getVideoDuration, getVideoDimensions } from '@/lib/video-ffmpeg'
 import { generateAssFile, buildManualSegments, buildStaticSegment, type CaptionSegment } from '@/lib/captions'
 import { transcribeVideoFile } from '@/lib/transcribe'
@@ -220,8 +221,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   try {
     // ── bulk_image ────────────────────────────────────────────────────────────
     if (job.job_type === 'bulk_image') {
-      const apiKey = process.env.WAVESPEED_API_KEY ?? ''
-      const hfToken = process.env.HF_TOKEN ?? ''
+      const apiKey = await getUserApiKey(job.user_id, 'wavespeed_api_key').catch(() => '')
+      const hfToken = await getUserApiKey(job.user_id, 'hf_token').catch(() => '')
 
       if (!apiKey) {
         await query(
@@ -451,7 +452,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
       if (items.length === 0) throw new Error('No items in job input')
 
-      const hfToken = process.env.HF_TOKEN ?? ''
+      const hfToken = await getUserApiKey(job.user_id, 'hf_token').catch(() => '')
       const needsTranscription = items.some((it, idx) => !it.text?.trim() && !(idx === 0 && legacySegments?.length))
       if (!hfToken && needsTranscription) {
         await query(
@@ -552,7 +553,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const { items } = job.input as unknown as VideoTranscribeJobInput
       if (!items?.length) throw new Error('No items in job input')
 
-      const hfToken = process.env.HF_TOKEN ?? ''
+      const hfToken = await getUserApiKey(job.user_id, 'hf_token').catch(() => '')
       if (!hfToken) {
         await query(
           `UPDATE generation_queue SET status='failed', error=$1, finished_at=now() WHERE id=$2`,
@@ -1248,8 +1249,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         throw new Error('Seedream-only carousel requires referenceImageUrls')
       }
 
-      const apiKey = process.env.WAVESPEED_API_KEY ?? ''
-      const hfToken = process.env.HF_TOKEN ?? ''
+      const apiKey = await getUserApiKey(job.user_id, 'wavespeed_api_key').catch(() => '')
+      const hfToken = await getUserApiKey(job.user_id, 'hf_token').catch(() => '')
       if (!apiKey) {
         await query(
           `UPDATE generation_queue SET status='failed', error=$1, finished_at=now() WHERE id=$2`,
@@ -1696,8 +1697,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       } = job.input as unknown as CopyPromptsJobInput
       if (!items?.length) throw new Error('No items in job input')
 
-      const apiKey = process.env.WAVESPEED_API_KEY ?? ''
-      const hfToken = process.env.HF_TOKEN ?? ''
+      const apiKey = await getUserApiKey(job.user_id, 'wavespeed_api_key').catch(() => '')
+      const hfToken = await getUserApiKey(job.user_id, 'hf_token').catch(() => '')
       if (!apiKey) {
         await query(
           `UPDATE generation_queue SET status='failed', error=$1, finished_at=now() WHERE id=$2`,

@@ -1,17 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { one, query } from '@/lib/db'
 import type { ViralReel } from '@/lib/types'
+import { requireUser } from '@/lib/session'
+import { getUserApiKey } from '@/lib/user-config'
 
-const WAVESPEED_KEY = process.env.WAVESPEED_API_KEY!
 const MODEL = 'wavespeed-ai/z-image/turbo-lora'
 const API_BASE = 'https://api.wavespeed.ai/api/v2'
 
-async function pollResult(requestId: string, signal: AbortSignal): Promise<string> {
+async function pollResult(requestId: string, apiKey: string, signal: AbortSignal): Promise<string> {
   for (let i = 0; i < 40; i++) {
     if (signal.aborted) throw new Error('Aborted')
     await new Promise(r => setTimeout(r, 3000))
     const res = await fetch(`${API_BASE}/predictions/${requestId}/result`, {
-      headers: { Authorization: `Bearer ${WAVESPEED_KEY}` },
+      headers: { Authorization: `Bearer ${apiKey}` },
       signal,
     })
     const data = await res.json()
@@ -30,7 +31,11 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  if (!WAVESPEED_KEY) {
+  const auth = await requireUser(req)
+  if (auth instanceof NextResponse) return auth
+
+  const apiKey = await getUserApiKey(auth.id, 'wavespeed_api_key').catch(() => '')
+  if (!apiKey) {
     return NextResponse.json({ error: 'WAVESPEED_API_KEY not configured' }, { status: 500 })
   }
 
@@ -65,7 +70,7 @@ export async function POST(
     const initRes = await fetch(`${API_BASE}/${MODEL}`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${WAVESPEED_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(payload),
@@ -77,7 +82,7 @@ export async function POST(
     const requestId = initData?.data?.id ?? initData?.id
     if (!requestId) throw new Error('No request ID from Wavespeed')
 
-    const imageUrl = await pollResult(requestId, abort)
+    const imageUrl = await pollResult(requestId, apiKey, abort)
 
     await query(
       'UPDATE viral_reels SET generated_image_url = $1, status = $2 WHERE id = $3',

@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireUser } from '@/lib/session'
 import { persistGeneration } from '@/lib/persist-generation'
+import { getUserApiKey } from '@/lib/user-config'
 
-const API_KEY = process.env.WAVESPEED_API_KEY!
-const HF_TOKEN = process.env.HF_TOKEN!
 const MODEL = 'wavespeed-ai/z-image/turbo-lora'
 const API_BASE = 'https://api.wavespeed.ai/api/v2'
 
@@ -17,10 +16,10 @@ const DIMENSION_MAP: Record<string, string> = {
   '3:2': '1152*768',
 }
 
-function convertToDirectLink(url: string): string {
+function convertToDirectLink(url: string, hfToken: string): string {
   if (!url) return url
   if (url.includes('huggingface.co')) {
-    return url.replace('/blob/', '/resolve/').split('?')[0] + '?token=' + HF_TOKEN
+    return url.replace('/blob/', '/resolve/').split('?')[0] + '?token=' + hfToken
   }
   if (url.includes('drive.google.com')) {
     const match = url.match(/\/d\/([a-zA-Z0-9_-]+)/)
@@ -30,7 +29,7 @@ function convertToDirectLink(url: string): string {
   return url
 }
 
-async function pollResult(requestId: string, signal?: AbortSignal): Promise<string[]> {
+async function pollResult(requestId: string, apiKey: string, signal?: AbortSignal): Promise<string[]> {
   const maxAttempts = 40
   const interval = 3000
 
@@ -38,7 +37,7 @@ async function pollResult(requestId: string, signal?: AbortSignal): Promise<stri
     if (signal?.aborted) throw new Error('Request aborted')
     await new Promise(r => setTimeout(r, interval))
     const res = await fetch(`${API_BASE}/predictions/${requestId}/result`, {
-      headers: { Authorization: `Bearer ${API_KEY}` },
+      headers: { Authorization: `Bearer ${apiKey}` },
       signal,
     })
     const data = await res.json()
@@ -61,7 +60,9 @@ export async function POST(req: NextRequest) {
     const auth = await requireUser(req)
     if (auth instanceof NextResponse) return auth
 
-    if (!API_KEY) return NextResponse.json({ error: 'WAVESPEED_API_KEY is not configured' }, { status: 500 })
+    const apiKey = await getUserApiKey(auth.id, 'wavespeed_api_key').catch(() => '')
+    if (!apiKey) return NextResponse.json({ error: 'WAVESPEED_API_KEY is not configured' }, { status: 500 })
+    const hfToken = await getUserApiKey(auth.id, 'hf_token').catch(() => '')
 
     const {
       prompt, dimension, batch, loraUrl, loraScale, characterId, characterName, contentFormat,
@@ -73,7 +74,7 @@ export async function POST(req: NextRequest) {
     const size = DIMENSION_MAP[dimension] ?? '756*1344'
     const allUrls: string[] = []
 
-    const loraPath = loraUrl ? convertToDirectLink(loraUrl) : null
+    const loraPath = loraUrl ? convertToDirectLink(loraUrl, hfToken) : null
     const payload: Record<string, unknown> = {
       prompt,
       size,
@@ -85,7 +86,7 @@ export async function POST(req: NextRequest) {
       const initRes = await fetch(`${API_BASE}/${MODEL}`, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${API_KEY}`,
+          Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(payload),
@@ -96,7 +97,7 @@ export async function POST(req: NextRequest) {
       }
       const requestId = initData?.data?.id ?? initData?.id
       if (!requestId) throw new Error('No request ID returned')
-      const urls = await pollResult(requestId, abort)
+      const urls = await pollResult(requestId, apiKey, abort)
       allUrls.push(...urls)
     }
 

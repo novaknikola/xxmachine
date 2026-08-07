@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { editImage, type SeedreamResolution } from '@/lib/wavespeed'
 import { requireUser } from '@/lib/session'
 import { persistGeneration } from '@/lib/persist-generation'
+import { getUserApiKey } from '@/lib/user-config'
 
 const UPLOAD_URL = 'https://api.wavespeed.ai/api/v3/media/upload/binary'
 const ALLOWED_MIME = new Set(['image/jpeg', 'image/png', 'image/webp'])
@@ -10,19 +11,13 @@ const SIZE_MAP: Record<string, string> = {
   '16:9': '1344*756', '9:16': '756*1344', '2:3': '768*1152', '3:2': '1152*768',
 }
 
-function wavespeedKey(): string {
-  const key = process.env.WAVESPEED_API_KEY
-  if (!key) throw new Error('WAVESPEED_API_KEY is not configured')
-  return key
-}
-
-async function uploadToWavespeed(file: File): Promise<string> {
+async function uploadToWavespeed(file: File, apiKey: string): Promise<string> {
   const fd = new FormData()
   fd.append('file', file)
 
   const res = await fetch(UPLOAD_URL, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${wavespeedKey()}` },
+    headers: { Authorization: `Bearer ${apiKey}` },
     body: fd,
   })
   const data = await res.json()
@@ -129,7 +124,7 @@ export async function POST(req: NextRequest) {
     const auth = await requireUser(req)
     if (auth instanceof NextResponse) return auth
 
-    const apiKey = wavespeedKey()
+    const apiKey = await getUserApiKey(auth.id, 'wavespeed_api_key')
 
     const contentType = req.headers.get('content-type') ?? ''
 
@@ -216,7 +211,7 @@ export async function POST(req: NextRequest) {
         imageUrls = [directUrl, ...referenceUrlList]
         if (referenceFiles.length) {
           for (const f of referenceFiles) assertImageFile(f)
-          const uploaded = await Promise.all(referenceFiles.map(f => uploadToWavespeed(f)))
+          const uploaded = await Promise.all(referenceFiles.map(f => uploadToWavespeed(f, apiKey)))
           imageUrls.push(...uploaded)
         }
       } else {
@@ -226,7 +221,7 @@ export async function POST(req: NextRequest) {
 
         if (!allFiles.length) return NextResponse.json({ error: 'Missing file or imageUrl' }, { status: 400 })
         for (const f of allFiles) assertImageFile(f)
-        imageUrls = await Promise.all(allFiles.map(f => uploadToWavespeed(f)))
+        imageUrls = await Promise.all(allFiles.map(f => uploadToWavespeed(f, apiKey)))
         if (referenceUrlList.length) imageUrls.push(...referenceUrlList)
       }
     } catch (err) {

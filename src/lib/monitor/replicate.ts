@@ -18,14 +18,9 @@ const SEEDANCE_POLL_ATTEMPTS = 144            // 144 × 5s ≈ 12 min
 const SEEDANCE_ABORT_MS = 740_000
 const SEEDREAM_ABORT_MS = 400_000
 
-export function wavespeedKey(): string {
-  const key = process.env.WAVESPEED_API_KEY
-  if (!key) throw new Error('WAVESPEED_API_KEY not configured')
-  return key
-}
-
 async function pollV3(
   requestId: string,
+  apiKey: string,
   signal: AbortSignal,
   label: string,
   maxAttempts = 60,
@@ -34,7 +29,7 @@ async function pollV3(
     if (signal.aborted) throw new Error('Aborted')
     await new Promise(r => setTimeout(r, POLL_INTERVAL_MS))
     const res = await fetch(`${API_V3}/predictions/${requestId}/result`, {
-      headers: { Authorization: `Bearer ${wavespeedKey()}` },
+      headers: { Authorization: `Bearer ${apiKey}` },
       signal,
     })
     const data = await res.json()
@@ -82,8 +77,7 @@ export interface KeyframeResult {
 }
 
 /** Composites the reference photo's identity onto a source frame via Seedream v5 Pro Edit. */
-export async function generateCopyPasteKeyframe(input: KeyframeInput): Promise<KeyframeResult> {
-  const apiKey = wavespeedKey()
+export async function generateCopyPasteKeyframe(input: KeyframeInput, apiKey: string): Promise<KeyframeResult> {
   const size = input.aspectRatio === 'other' ? '9:16' : input.aspectRatio
   const imageUrls = [input.sourceFrameUrl, input.referenceImageUrl]
   if (input.matchImageUrl) imageUrls.push(input.matchImageUrl)
@@ -106,14 +100,13 @@ export async function generateCopyPasteKeyframe(input: KeyframeInput): Promise<K
 }
 
 /** Single path: reference photo as image, rendered scene JSON as prompt, straight to Seedance i2v. */
-export async function generateSeedanceVideo(input: SeedanceCallInput): Promise<SeedanceVideoResult> {
-  const key = wavespeedKey()
+export async function generateSeedanceVideo(input: SeedanceCallInput, apiKey: string): Promise<SeedanceVideoResult> {
   const payload = buildSeedancePayload(input)
 
   const initRes = await fetch(`${API_V3}/${SEEDANCE_MODEL}`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${key}`,
+      Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(payload),
@@ -127,6 +120,7 @@ export async function generateSeedanceVideo(input: SeedanceCallInput): Promise<S
 
   const videoUrl = await pollV3(
     requestId,
+    apiKey,
     AbortSignal.timeout(SEEDANCE_ABORT_MS),
     'Seedance',
     SEEDANCE_POLL_ATTEMPTS,

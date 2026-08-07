@@ -1,24 +1,33 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { one } from '@/lib/db'
 import type { LoraRow } from '../../route'
-
-const API_KEY = process.env.WAVESPEED_API_KEY
+import { requireUser } from '@/lib/session'
+import { getUserApiKey } from '@/lib/user-config'
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireUser(req)
+  if (auth instanceof NextResponse) return auth
+
   const { id } = await params
 
-  const lora = await one<LoraRow>('SELECT * FROM loras WHERE id = $1', [id])
+  const lora = await one<LoraRow & { user_id: string | null; is_public: boolean }>(
+    'SELECT * FROM loras WHERE id = $1', [id],
+  )
   if (!lora) return NextResponse.json({ error: 'LoRA not found' }, { status: 404 })
+  if (auth.role !== 'admin' && lora.user_id !== auth.id && !lora.is_public) {
+    return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  }
 
   // Already resolved
   if (lora.status === 'ready' || lora.status === 'failed') {
     return NextResponse.json({ lora })
   }
 
-  if (!lora.wavespeed_request_id || !API_KEY) {
+  const apiKey = await getUserApiKey(auth.id, 'wavespeed_api_key').catch(() => '')
+  if (!lora.wavespeed_request_id || !apiKey) {
     return NextResponse.json({ lora })
   }
 
@@ -26,7 +35,7 @@ export async function GET(
   try {
     const res = await fetch(
       `https://api.wavespeed.ai/api/v3/predictions/${lora.wavespeed_request_id}/result`,
-      { headers: { Authorization: `Bearer ${API_KEY}` } }
+      { headers: { Authorization: `Bearer ${apiKey}` } }
     )
     const data = await res.json()
     const status = data?.data?.status ?? data?.status

@@ -1,18 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { internalBaseUrl } from '@/lib/internal-url'
+import { requireUser } from '@/lib/session'
+import { getUserApiKey } from '@/lib/user-config'
 
-const API_KEY = process.env.WAVESPEED_API_KEY!
 const API_BASE = 'https://api.wavespeed.ai/api/v2'
 const UPLOAD_URL = 'https://api.wavespeed.ai/api/v3/media/upload/binary'
 const RESULT_BASE = 'https://api.wavespeed.ai/api/v3/predictions'
 const MODEL = 'alibaba/wan-2.6/image-to-video'
 
-async function uploadToWavespeed(file: File): Promise<string> {
+async function uploadToWavespeed(file: File, apiKey: string): Promise<string> {
   const fd = new FormData()
   fd.append('file', file)
   const res = await fetch(UPLOAD_URL, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${API_KEY}` },
+    headers: { Authorization: `Bearer ${apiKey}` },
     body: fd,
   })
   const data = await res.json()
@@ -22,12 +23,12 @@ async function uploadToWavespeed(file: File): Promise<string> {
   return url as string
 }
 
-async function pollResult(requestId: string, signal: AbortSignal): Promise<string> {
+async function pollResult(requestId: string, apiKey: string, signal: AbortSignal): Promise<string> {
   for (let i = 0; i < 80; i++) {
     if (signal.aborted) throw new Error('Aborted')
     await new Promise(r => setTimeout(r, 4000))
     const res = await fetch(`${RESULT_BASE}/${requestId}/result`, {
-      headers: { Authorization: `Bearer ${API_KEY}` },
+      headers: { Authorization: `Bearer ${apiKey}` },
       signal,
     })
     const data = await res.json()
@@ -45,7 +46,11 @@ async function pollResult(requestId: string, signal: AbortSignal): Promise<strin
 export async function POST(req: NextRequest) {
   const abort = AbortSignal.timeout(360_000)
   try {
-    if (!API_KEY) return NextResponse.json({ error: 'WAVESPEED_API_KEY not configured' }, { status: 500 })
+    const auth = await requireUser(req)
+    if (auth instanceof NextResponse) return auth
+
+    const apiKey = await getUserApiKey(auth.id, 'wavespeed_api_key').catch(() => '')
+    if (!apiKey) return NextResponse.json({ error: 'WAVESPEED_API_KEY not configured' }, { status: 500 })
 
     const contentType = req.headers.get('content-type') ?? ''
     let imageUrl: string
@@ -61,13 +66,13 @@ export async function POST(req: NextRequest) {
       const file = form.get('file') as File | null
       const urlParam = (form.get('imageUrl') as string | null)?.trim()
       if (file) {
-        imageUrl = await uploadToWavespeed(file)
+        imageUrl = await uploadToWavespeed(file, apiKey)
       } else if (urlParam) {
         // Proxy external URL through server to get a Wavespeed-uploadable blob
         const imgRes = await fetch(`${internalBaseUrl()}/api/proxy-image?url=${encodeURIComponent(urlParam)}`)
         if (!imgRes.ok) throw new Error('Could not fetch image URL')
         const blob = await imgRes.blob()
-        imageUrl = await uploadToWavespeed(new File([blob], 'image.jpg', { type: blob.type || 'image/jpeg' }))
+        imageUrl = await uploadToWavespeed(new File([blob], 'image.jpg', { type: blob.type || 'image/jpeg' }), apiKey)
       } else {
         return NextResponse.json({ error: 'No image provided' }, { status: 400 })
       }
@@ -85,7 +90,7 @@ export async function POST(req: NextRequest) {
 
     const initRes = await fetch(`${API_BASE}/${MODEL}`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt, image: imageUrl, duration, resolution }),
     })
     const initData = await initRes.json()
@@ -93,7 +98,7 @@ export async function POST(req: NextRequest) {
     const requestId = initData?.data?.id ?? initData?.id
     if (!requestId) throw new Error('No request ID from Wavespeed')
 
-    const videoUrl = await pollResult(requestId, abort)
+    const videoUrl = await pollResult(requestId, apiKey, abort)
     return NextResponse.json({ url: videoUrl })
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : 'Unknown error' }, { status: 500 })
