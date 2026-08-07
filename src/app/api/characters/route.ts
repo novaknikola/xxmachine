@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { rows, one, query } from '@/lib/db'
-import { requireAdmin, requireUser } from '@/lib/session'
+import { requireUser } from '@/lib/session'
 
 /** Accept string[] or newline/comma-separated string; keep http(s) URLs only. */
 function normalizeUrlList(raw: unknown): string[] {
@@ -40,7 +40,9 @@ export async function GET(req: NextRequest) {
         ig_username,
         google_drive_folder_id
        FROM characters
-       ORDER BY name`
+       WHERE $1 OR user_id = $2
+       ORDER BY name`,
+      [auth.role === 'admin', auth.id],
     )
 
     return NextResponse.json(chars)
@@ -50,8 +52,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const admin = await requireAdmin(req)
-  if (admin instanceof NextResponse) return admin
+  const auth = await requireUser(req)
+  if (auth instanceof NextResponse) return auth
 
   try {
     const body = await req.json()
@@ -63,8 +65,8 @@ export async function POST(req: NextRequest) {
     const faceRefUrls = normalizeUrlList(body.faceRefUrls)
     const char = await one(
       `INSERT INTO characters
-       (name, lora_url, lora_scale, base_prompt_style, story, start_date, default_mode, face_ref_urls)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       (name, lora_url, lora_scale, base_prompt_style, story, start_date, default_mode, face_ref_urls, user_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        RETURNING
         id,
         name,
@@ -84,6 +86,7 @@ export async function POST(req: NextRequest) {
         body.startDate ?? '',
         body.defaultMode ?? 'SFW',
         faceRefUrls,
+        auth.id,
       ]
     )
 
@@ -94,8 +97,8 @@ export async function POST(req: NextRequest) {
 }
 
 export async function PATCH(req: NextRequest) {
-  const admin = await requireAdmin(req)
-  if (admin instanceof NextResponse) return admin
+  const auth = await requireUser(req)
+  if (auth instanceof NextResponse) return auth
 
   try {
     const body = await req.json()
@@ -117,7 +120,7 @@ export async function PATCH(req: NextRequest) {
         start_date = COALESCE($6, start_date),
         default_mode = COALESCE($7, default_mode),
         face_ref_urls = COALESCE($8, face_ref_urls)
-       WHERE id=$9`,
+       WHERE id=$9 AND ($10 OR user_id=$11)`,
       [
         body.name ?? null,
         body.loraUrl ?? null,
@@ -128,6 +131,8 @@ export async function PATCH(req: NextRequest) {
         body.defaultMode ?? null,
         faceRefUrls,
         body.id,
+        auth.role === 'admin',
+        auth.id,
       ]
     )
 
@@ -138,8 +143,8 @@ export async function PATCH(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
-  const admin = await requireAdmin(req)
-  if (admin instanceof NextResponse) return admin
+  const auth = await requireUser(req)
+  if (auth instanceof NextResponse) return auth
 
   try {
     const { id } = await req.json()
@@ -148,7 +153,7 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json({ error: 'id required' }, { status: 400 })
     }
 
-    await query(`DELETE FROM characters WHERE id=$1`, [id])
+    await query(`DELETE FROM characters WHERE id=$1 AND ($2 OR user_id=$3)`, [id, auth.role === 'admin', auth.id])
 
     return NextResponse.json({ ok: true })
   } catch (err) {

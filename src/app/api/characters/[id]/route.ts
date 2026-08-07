@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { one } from '@/lib/db'
+import { requireUser } from '@/lib/session'
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const auth = await requireUser(req)
+  if (auth instanceof NextResponse) return auth
+
   const { id } = await params
   const body = await req.json()
   const allowed = ['googleDriveFolderId', 'proxy_url', 'ig_username', 'ig_password', 'ig_totp_secret']
@@ -24,7 +28,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     }
   }
   if (!sets.length) return NextResponse.json({ error: 'Nothing to update' }, { status: 400 })
-  vals.push(id)
-  await one(`UPDATE characters SET ${sets.join(',')} WHERE id=$${idx}`, vals)
+  vals.push(id, auth.role === 'admin', auth.id)
+  const result = await one(
+    `UPDATE characters SET ${sets.join(',')} WHERE id=$${idx} AND ($${idx + 1} OR user_id=$${idx + 2}) RETURNING id`,
+    vals,
+  )
+  if (!result) return NextResponse.json({ error: 'not_found_or_forbidden' }, { status: 404 })
   return NextResponse.json({ ok: true })
 }
