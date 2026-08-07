@@ -125,6 +125,7 @@ export function batchKeyboard(batchId: string) {
   return {
     inline_keyboard: [[
       { text: '▶️ Replicate', callback_data: `cpstart:${batchId}` },
+      { text: '✍️ Add prompt', callback_data: `cpprompt:${batchId}` },
       { text: '✖️ Cancel', callback_data: `cpcancel:${batchId}` },
     ]],
   }

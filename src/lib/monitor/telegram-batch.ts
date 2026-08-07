@@ -21,6 +21,7 @@ export interface TelegramBatch {
   status: string
   prompt_message_id: string | number | null
   custom_prompt: string | null
+  awaiting_prompt: boolean
 }
 
 export async function findUserByChat(chatId: number | string): Promise<string | null> {
@@ -170,6 +171,14 @@ export async function setCustomPrompt(batchId: string, text: string): Promise<vo
   await query(
     `UPDATE telegram_batches SET custom_prompt = $2, updated_at = now() WHERE id = $1`,
     [batchId, text.trim() || null],
+  )
+}
+
+/** Arms the "next text message is the prompt, not reel links" flag. */
+export async function setAwaitingPrompt(batchId: string, awaiting: boolean): Promise<void> {
+  await query(
+    `UPDATE telegram_batches SET awaiting_prompt = $2, updated_at = now() WHERE id = $1`,
+    [batchId, awaiting],
   )
 }
 

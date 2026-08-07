@@ -15,6 +15,7 @@ import {
   getBatch,
   markBatch,
   openBatch,
+  setAwaitingPrompt,
   setCustomPrompt,
   setPromptMessage,
   startBatchWithPhoto,
@@ -175,6 +176,7 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ ok: true })
           }
           await setCustomPrompt(open.id, arg)
+          await setAwaitingPrompt(open.id, false)
           await sendText(
             chatId,
             arg
@@ -182,6 +184,22 @@ export async function POST(req: NextRequest) {
               : '✍️ Cleared — nothing extra will be added to the rendered prompt.',
           )
           return NextResponse.json({ ok: true })
+        }
+
+        // ── Text expected after the "Add prompt" button, not reel links ──
+        if (rawText && !rawText.startsWith('/')) {
+          const open = await openBatch(chatId)
+          if (open?.awaiting_prompt) {
+            await setCustomPrompt(open.id, rawText)
+            await setAwaitingPrompt(open.id, false)
+            await sendText(
+              chatId,
+              rawText.trim()
+                ? `✍️ Added to every rendered prompt in this batch: “${escapeHtml(rawText.trim())}”`
+                : '✍️ Cleared — nothing extra will be added to the rendered prompt.',
+            )
+            return NextResponse.json({ ok: true })
+          }
         }
 
         // ── Drive folder link — one repurpose job per video in it ────
@@ -486,6 +504,29 @@ export async function POST(req: NextRequest) {
           await editMessageText(chatId, cbMessage.message_id, `❌ ${escapeHtml(msg)}`)
           await editMessageReplyMarkup(chatId, cbMessage.message_id, batchKeyboard(batch.id))
         }
+      }
+      return NextResponse.json({ ok: true })
+    }
+
+    // ── Add prompt button — arms "next message is the prompt, not links" ──
+    if (action === 'cpprompt') {
+      const chatId = cbMessage?.chat?.id as number | undefined
+      const batch = postId ? await getBatch(postId) : null
+
+      if (!batch || batch.status !== 'collecting') {
+        await answerCallbackQuery(callbackId, 'This batch was already handled')
+        return NextResponse.json({ ok: true })
+      }
+
+      await setAwaitingPrompt(batch.id, true)
+      await answerCallbackQuery(callbackId, 'Send the text')
+      if (chatId) {
+        await sendText(
+          chatId,
+          batch.custom_prompt
+            ? `✍️ Send the new text to add to the prompt (replaces “${escapeHtml(batch.custom_prompt)}”), or send nothing to clear it.`
+            : '✍️ Send the text to add to the end of the rendered prompt.',
+        )
       }
       return NextResponse.json({ ok: true })
     }
