@@ -47,6 +47,7 @@ interface ReplicateItem {
   rendered_prompt: string | null
   keyframe_prompt: string | null
   end_keyframe_prompt: string | null
+  sent_prompt: string | null
   kling_video_url: string | null
   thumbnail_url: string | null
   discovered_at: string

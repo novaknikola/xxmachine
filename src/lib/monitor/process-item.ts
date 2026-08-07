@@ -362,10 +362,10 @@ export async function replicateCopyPasteItem(
 
     await query(
       `UPDATE discovery_items
-          SET kling_video_url = $2, video_model = $3,
+          SET kling_video_url = $2, video_model = $3, sent_prompt = $4,
               replicate_status = 'done', replicate_error = NULL
         WHERE id = $1`,
-      [itemId, result.videoUrl, videoModel],
+      [itemId, result.videoUrl, videoModel, finalPrompt],
     )
     await archiveDiscoveryItem(itemId, { characterName: item.profile })
       .catch(err => console.error('[monitor/replicate] drive archive failed:', err))

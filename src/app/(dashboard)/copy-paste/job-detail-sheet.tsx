@@ -35,6 +35,10 @@ interface ItemLike {
   /** What Seedream Edit was actually sent — recorded per render, read-only. */
   keyframe_prompt: string | null
   end_keyframe_prompt: string | null
+  /** What actually went to Seedance for the video call — rendered_prompt plus
+   *  any Telegram /prompt text, which is applied at generation time and never
+   *  written into rendered_prompt itself. Null until the render finishes. */
+  sent_prompt: string | null
   kling_video_url: string | null
   thumbnail_url: string | null
 }
@@ -326,7 +330,7 @@ export function JobDetailSheet({
           <section className="space-y-2">
             <div className="flex items-center justify-between gap-2">
               <h3 className="font-medium">Rendered prompt</h3>
-              {canEdit && (
+              {canEdit && !item.sent_prompt && (
                 <span className="text-xs text-muted-foreground">Sent to Seedance as-is</span>
               )}
             </div>
@@ -346,6 +350,23 @@ export function JobDetailSheet({
               <p className="text-muted-foreground text-xs">No prompt yet — run Classify first.</p>
             )}
           </section>
+
+          {/* Only shown once it differs from rendered_prompt above — proof a
+              Telegram /prompt addition (or a manual edit made after the render
+              already used the old text) actually reached Seedance, since that
+              text is applied at generation time and never written back into
+              rendered_prompt itself. */}
+          {item.sent_prompt && item.sent_prompt !== (item.rendered_prompt ?? '') && (
+            <section className="space-y-2">
+              <h3 className="font-medium">Actually sent to Seedance</h3>
+              <p className="text-xs text-muted-foreground">
+                Differs from the rendered prompt above — includes text added after analysis.
+              </p>
+              <pre className="whitespace-pre-wrap rounded-lg border border-primary/30 bg-primary/5 p-4 text-xs leading-relaxed text-foreground max-h-64 overflow-y-auto">
+                {item.sent_prompt}
+              </pre>
+            </section>
+          )}
 
           {canEdit && (
             <Button
