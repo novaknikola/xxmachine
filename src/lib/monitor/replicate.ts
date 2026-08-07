@@ -99,7 +99,7 @@ export async function generateCopyPasteKeyframe(input: KeyframeInput, apiKey: st
   return { imageUrl, model: SEEDREAM_KEYFRAME_MODEL }
 }
 
-/** Single path: reference photo as image, rendered scene JSON as prompt, straight to Seedance i2v. */
+/** Edits the original source clip in place, guided by the Seedream keyframe(s) and the rendered scene prompt. */
 export async function generateSeedanceVideo(input: SeedanceCallInput, apiKey: string): Promise<SeedanceVideoResult> {
   const payload = buildSeedancePayload(input)
 

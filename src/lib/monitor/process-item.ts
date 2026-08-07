@@ -335,13 +335,13 @@ export async function replicateCopyPasteItem(
       )
     }
     const lastImageUrl = wantEndFrame ? generatedEndImageUrl : null
+    const referenceImageUrls = [generatedImageUrl, ...(lastImageUrl ? [lastImageUrl] : [])]
 
     await query(`UPDATE discovery_items SET replicate_status = 'video_generating' WHERE id = $1`, [itemId])
     const result = await generateSeedanceVideo({
-      imageUrl: generatedImageUrl,
-      lastImageUrl,
+      videoUrl: item.video_url,
+      referenceImageUrls,
       prompt: renderedPrompt,
-      durationSec,
       aspectRatio,
     }, apiKey)
     // Record the variant on the row so the A/B comparison lives in the data,

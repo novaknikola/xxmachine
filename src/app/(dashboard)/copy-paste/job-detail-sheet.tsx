@@ -139,7 +139,7 @@ export function JobDetailSheet({
             {estimate && (
               <div className="rounded-lg border border-border/60 bg-secondary/30 p-4 space-y-1.5">
                 <div className="flex justify-between"><span>Keyframe(s) (Seedream Edit)</span><span className="tabular-nums">{formatUsd(estimate.keyframeUsd)}</span></div>
-                <div className="flex justify-between"><span>Video (Seedance 2.0)</span><span className="tabular-nums">{formatUsd(estimate.videoUsd)}</span></div>
+                <div className="flex justify-between"><span>Video (Seedance 2.0 Edit)</span><span className="tabular-nums">{formatUsd(estimate.videoUsd)}</span></div>
                 <div className="flex justify-between font-medium pt-1 border-t border-border/50">
                   <span>Est. total</span>
                   <span className="tabular-nums">{formatUsd(estimate.totalUsd)}</span>
@@ -200,8 +200,8 @@ export function JobDetailSheet({
               </div>
               {item.generated_end_image_url && (
                 <p className="text-xs text-muted-foreground">
-                  Both ends pinned — Seedance interpolates between them. Compare the two
-                  keyframes: if wardrobe or hair differ, the clip will drift.
+                  Both keyframes are sent as character reference alongside the source clip.
+                  Compare the two: if wardrobe or hair differ, the edit will drift.
                 </p>
               )}
             </section>

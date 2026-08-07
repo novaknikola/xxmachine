@@ -1,14 +1,16 @@
 /**
- * WaveSpeed unit-cost estimate for Copy-Paste v2 (Seedream v5 Pro Edit keyframe + Seedance 2.0 video).
+ * WaveSpeed unit-cost estimate for Copy-Paste v2 (Seedream v5 Pro Edit keyframe + Seedance 2.0 Video Edit).
  *
- * Seedance rate matches POST https://api.wavespeed.ai/api/v3/model/pricing (probed Jul 2026).
+ * Seedance Video Edit rate matches https://wavespeed.ai/models/bytedance/seedance-2.0/video-edit
+ * (probed Aug 2026): $0.15/s at 720p, billed on (input clip + output clip) seconds combined,
+ * input clamped to 2-15s. Output auto-matches input length, so we bill for 2x the clip length.
  * Seedream rate matches https://wavespeed.ai/models/bytedance/seedream-v5.0-pro/edit
  * (probed Aug 2026): $0.045/run at 1k + $0.003 per image beyond the first — we always
  * send exactly 2 (source frame + reference photo), so it's a flat $0.048/keyframe.
  * Not a live ledger — Grok vision tokens / HF Whisper ASR are outside WaveSpeed.
  */
 
-const SEEDANCE_PER_SEC_USD = 0.24
+const SEEDANCE_PER_SEC_USD = 0.15
 const SEEDREAM_BASE_USD = 0.045
 const SEEDREAM_EXTRA_IMAGE_USD = 0.003
 /** Start keyframe: source frame + reference photo. */
@@ -23,9 +25,12 @@ export interface CostBreakdown {
   note: string
 }
 
+/** Billed seconds = input clip (clamped 2-15s) + output clip (auto-matches input). */
 function seedanceSeconds(durationSec?: number | null): number {
-  if (durationSec == null || !Number.isFinite(durationSec) || durationSec <= 0) return 5
-  return Math.min(15, Math.max(4, Math.round(durationSec)))
+  const clip = durationSec == null || !Number.isFinite(durationSec) || durationSec <= 0
+    ? 5
+    : Math.min(15, Math.max(2, Math.round(durationSec)))
+  return clip * 2
 }
 
 export function estimateCopyPasteCost(
@@ -42,7 +47,7 @@ export function estimateCopyPasteCost(
     keyframeUsd,
     videoUsd,
     totalUsd: roundUsd(keyframeUsd + videoUsd),
-    note: `Seedream v5 Pro Edit ${opts?.endFrame ? 'start + end keyframes' : 'keyframe'}: $${keyframeUsd.toFixed(3)}. WaveSpeed Seedance 2.0 (720p): ≈$${SEEDANCE_PER_SEC_USD.toFixed(2)}/s × ${billedSec}s billed. Grok / HF Whisper not included.`,
+    note: `Seedream v5 Pro Edit ${opts?.endFrame ? 'start + end keyframes' : 'keyframe'}: $${keyframeUsd.toFixed(3)}. WaveSpeed Seedance 2.0 Video Edit (720p): ≈$${SEEDANCE_PER_SEC_USD.toFixed(2)}/s × ${billedSec}s billed (source + output). Grok / HF Whisper not included.`,
   }
 }
 
