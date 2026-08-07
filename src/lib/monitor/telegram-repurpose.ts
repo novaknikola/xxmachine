@@ -6,17 +6,23 @@ import { one, query } from '@/lib/db'
 import type { VideoEffectOpts } from '@/lib/video-ffmpeg'
 import { DEFAULT_REPURPOSE_EFFECTS } from '@/lib/repurpose/enqueue-from-drive'
 
+export type EndFrameMode = 'auto' | 'always' | 'off'
+
 export interface TelegramRepurposeSettings {
   variantCount: number
   effects: VideoEffectOpts
   outputDriveFolderId: string | null
+  endFrameMode: EndFrameMode
 }
 
 const DEFAULTS: TelegramRepurposeSettings = {
   variantCount: 5,
   effects: DEFAULT_REPURPOSE_EFFECTS,
   outputDriveFolderId: null,
+  endFrameMode: 'auto',
 }
+
+export const END_FRAME_MODES: EndFrameMode[] = ['auto', 'always', 'off']
 
 /** Counts offered as buttons — the row has to fit a phone screen. */
 export const COUNT_CHOICES = [3, 5, 10, 20, 50] as const
@@ -36,8 +42,9 @@ export async function getRepurposeSettings(userId: string): Promise<TelegramRepu
     variant_count: number
     effects: VideoEffectOpts
     output_drive_folder_id: string | null
+    end_frame_mode: EndFrameMode
   }>(
-    `SELECT variant_count, effects, output_drive_folder_id
+    `SELECT variant_count, effects, output_drive_folder_id, end_frame_mode
        FROM telegram_repurpose_settings WHERE user_id = $1`,
     [userId],
   )
@@ -48,6 +55,7 @@ export async function getRepurposeSettings(userId: string): Promise<TelegramRepu
     // written before it existed.
     effects: { ...DEFAULT_REPURPOSE_EFFECTS, ...(row.effects ?? {}) },
     outputDriveFolderId: row.output_drive_folder_id,
+    endFrameMode: row.end_frame_mode ?? 'auto',
   }
 }
 
@@ -78,6 +86,41 @@ export async function setOutputFolder(userId: string, folderId: string | null): 
      ON CONFLICT (user_id) DO UPDATE SET output_drive_folder_id = $2, updated_at = now()`,
     [userId, folderId],
   )
+}
+
+export async function setEndFrameMode(userId: string, mode: EndFrameMode): Promise<void> {
+  await query(
+    `INSERT INTO telegram_repurpose_settings (user_id, end_frame_mode)
+     VALUES ($1, $2)
+     ON CONFLICT (user_id) DO UPDATE SET end_frame_mode = $2, updated_at = now()`,
+    [userId, mode],
+  )
+}
+
+const END_FRAME_LABEL: Record<EndFrameMode, string> = {
+  auto: 'Auto — only when the clip has no internal cut',
+  always: 'Always — pin a second keyframe on every clip',
+  off: 'Off — animate from the start keyframe only',
+}
+
+export function endFrameSummary(mode: EndFrameMode): string {
+  return [
+    '🎬 <b>End frame mode</b>',
+    `Current: <b>${mode}</b>`,
+    '',
+    ...END_FRAME_MODES.map(m => `${m === mode ? '•' : '◦'} <b>${m}</b> — ${END_FRAME_LABEL[m]}`),
+  ].join('\n')
+}
+
+export function endFrameKeyboard(mode: EndFrameMode) {
+  return {
+    inline_keyboard: [
+      END_FRAME_MODES.map(m => ({
+        text: m === mode ? `• ${m} •` : m,
+        callback_data: `mefset:${m}`,
+      })),
+    ],
+  }
 }
 
 export function settingsSummary(s: TelegramRepurposeSettings): string {

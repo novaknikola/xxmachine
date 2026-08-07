@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { one, query } from '@/lib/db'
+import { encryptOrNull } from '@/lib/crypto'
 import {
   answerCallbackQuery,
   batchKeyboard,
+  deleteMessage,
   editMessageCaption,
   editMessageReplyMarkup,
   editMessageText,
+  mainMenuKeyboard,
   sendText,
 } from '@/lib/telegram'
 import { enqueueReelUrlsForUser, EnqueueUrlsError } from '@/lib/monitor/enqueue-from-urls'
@@ -22,12 +25,16 @@ import {
 } from '@/lib/monitor/telegram-batch'
 import { estimateCopyPasteCost, formatUsd } from '@/lib/monitor/cost-estimate'
 import {
+  endFrameKeyboard,
+  endFrameSummary,
   getRepurposeSettings,
+  setEndFrameMode,
   setVariantCount,
   setOutputFolder,
   settingsKeyboard,
   settingsSummary,
   toggleEffect,
+  type EndFrameMode,
 } from '@/lib/monitor/telegram-repurpose'
 import {
   enqueueRepurposeFromDriveFolder,
@@ -135,6 +142,43 @@ export async function POST(req: NextRequest) {
 
       if (chatId != null && userId) {
         const rawText = String(message.text ?? '')
+
+        // ── Text expected after the "WaveSpeed API key" menu button ──
+        // Account-level, unlike awaiting_prompt (batch-scoped) — checked before
+        // any command so a stray non-command message right after tapping the
+        // button is never misread as reel links.
+        if (rawText && !rawText.startsWith('/')) {
+          const acct = await one<{ telegram_awaiting: string | null }>(
+            `SELECT telegram_awaiting FROM users WHERE id = $1`, [userId],
+          )
+          if (acct?.telegram_awaiting === 'apikey') {
+            const key = rawText.trim()
+            await query(
+              `INSERT INTO user_settings (user_id, wavespeed_api_key, updated_at)
+               VALUES ($1, $2, now())
+               ON CONFLICT (user_id) DO UPDATE SET wavespeed_api_key = $2, updated_at = now()`,
+              [userId, encryptOrNull(key)],
+            )
+            await query(`UPDATE users SET telegram_awaiting = NULL WHERE id = $1`, [userId])
+            if (message.message_id) await deleteMessage(chatId, message.message_id)
+            await sendText(
+              chatId,
+              key
+                ? '🔑 Saved. Your key was deleted from this chat and will be used for your own generations.'
+                : '🔑 Cleared — your account will use the platform default key again.',
+            )
+            return NextResponse.json({ ok: true })
+          }
+        }
+
+        // ── /menu — everything that is not a reel link ───────────────
+        if (rawText.startsWith('/menu')) {
+          const sent = await sendText(chatId, '📋 <b>XXmachine Bot Menu</b>\n\nPick one:') as { message_id?: number }
+          if (sent?.message_id) {
+            await editMessageReplyMarkup(chatId, sent.message_id, mainMenuKeyboard())
+          }
+          return NextResponse.json({ ok: true })
+        }
 
         // ── /settings — repurpose options the bot remembers ──────────
         if (rawText.startsWith('/settings')) {
@@ -468,6 +512,7 @@ export async function POST(req: NextRequest) {
           // Nobody is going to press Replicate for a chat, and the message
           // below promises a finished video.
           autoReplicate: true,
+          endFrame: repurposeSettings.endFrameMode,
           repurposeCount: repurposeSettings.variantCount,
           outputDriveFolderId: repurposeSettings.outputDriveFolderId,
           customPrompt: batch.custom_prompt,
@@ -529,6 +574,108 @@ export async function POST(req: NextRequest) {
         )
       }
       return NextResponse.json({ ok: true })
+    }
+
+    // ── /menu buttons ──────────────────────────────────────────────────────
+    if (['msettings', 'moutput', 'mapikey', 'mendframe', 'mefset', 'mjobs', 'mhelp'].includes(action)) {
+      const chatId = cbMessage?.chat?.id as number | undefined
+      const menuUserId = chatId != null ? await findUserByChat(chatId) : null
+      if (!chatId || !menuUserId) {
+        await answerCallbackQuery(callbackId, 'Chat not linked')
+        return NextResponse.json({ ok: true })
+      }
+
+      if (action === 'msettings') {
+        const s = await getRepurposeSettings(menuUserId)
+        await answerCallbackQuery(callbackId, '')
+        const sent = await sendText(chatId, settingsSummary(s)) as { message_id?: number }
+        if (sent?.message_id) await editMessageReplyMarkup(chatId, sent.message_id, settingsKeyboard(s))
+        return NextResponse.json({ ok: true })
+      }
+
+      if (action === 'moutput') {
+        const s = await getRepurposeSettings(menuUserId)
+        await answerCallbackQuery(callbackId, '')
+        await sendText(chatId, [
+          '📁 <b>Output folder</b>',
+          s.outputDriveFolderId
+            ? `Current: <code>${escapeHtml(s.outputDriveFolderId)}</code>`
+            : 'Current: dated archive folders (default)',
+          '',
+          'Send <code>/output &lt;drive folder link&gt;</code> to change it, or <code>/output</code> with nothing to clear it.',
+        ].join('\n'))
+        return NextResponse.json({ ok: true })
+      }
+
+      if (action === 'mapikey') {
+        await query(`UPDATE users SET telegram_awaiting = 'apikey' WHERE id = $1`, [menuUserId])
+        await answerCallbackQuery(callbackId, 'Send the key')
+        await sendText(
+          chatId,
+          '🔑 Paste your WaveSpeed API key. I\'ll delete your message right after saving it — nobody else will see it in this chat. Send nothing to go back to the platform default key.',
+        )
+        return NextResponse.json({ ok: true })
+      }
+
+      if (action === 'mendframe') {
+        const s = await getRepurposeSettings(menuUserId)
+        await answerCallbackQuery(callbackId, '')
+        const sent = await sendText(chatId, endFrameSummary(s.endFrameMode)) as { message_id?: number }
+        if (sent?.message_id) await editMessageReplyMarkup(chatId, sent.message_id, endFrameKeyboard(s.endFrameMode))
+        return NextResponse.json({ ok: true })
+      }
+
+      if (action === 'mefset') {
+        const mode = postId as EndFrameMode
+        await setEndFrameMode(menuUserId, mode)
+        await answerCallbackQuery(callbackId, `End frame: ${mode}`)
+        if (cbMessage?.message_id) {
+          await editMessageText(chatId, cbMessage.message_id, endFrameSummary(mode))
+          await editMessageReplyMarkup(chatId, cbMessage.message_id, endFrameKeyboard(mode))
+        }
+        return NextResponse.json({ ok: true })
+      }
+
+      if (action === 'mjobs') {
+        await answerCallbackQuery(callbackId, '')
+        const jobs = await one<{ rows: Array<{
+          job_type: string; status: string; done_items: number; total_items: number; created_at: string
+        }> }>(
+          `SELECT json_agg(t) AS rows FROM (
+             SELECT job_type, status, done_items, total_items, created_at
+               FROM generation_queue
+              WHERE user_id = $1 AND job_type IN ('copy_paste_v2', 'copy_prompts_generate')
+              ORDER BY created_at DESC LIMIT 5
+           ) t`,
+          [menuUserId],
+        )
+        const rows = jobs?.rows ?? []
+        const icon = (s: string) => s === 'done' ? '✅' : s === 'failed' ? '❌' : s === 'processing' ? '⏳' : '•'
+        await sendText(chatId, [
+          '📊 <b>Recent jobs</b>',
+          '',
+          ...(rows.length
+            ? rows.map(r => `${icon(r.status)} ${r.job_type} — ${r.status} (${r.done_items}/${r.total_items})`)
+            : ['<i>Nothing yet.</i>']),
+        ].join('\n'))
+        return NextResponse.json({ ok: true })
+      }
+
+      if (action === 'mhelp') {
+        await answerCallbackQuery(callbackId, '')
+        await sendText(chatId, [
+          '❓ <b>Commands</b>',
+          '',
+          '<b>/menu</b> — this menu',
+          '<b>/settings</b> — repurpose variant count + effects',
+          '<b>/output &lt;link&gt;</b> — Drive folder for repurpose variants',
+          '<b>/prompt &lt;text&gt;</b> — appended to the current batch\'s rendered prompt',
+          '<b>/cancel</b> — drop the batch you are assembling',
+          '',
+          'To replicate: send a reference photo, then reel links (one per line, up to 30) — same reference for all of them.',
+        ].join('\n'))
+        return NextResponse.json({ ok: true })
+      }
     }
 
     if (!postId || !['approve', 'reject'].includes(action)) {

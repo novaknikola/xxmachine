@@ -84,6 +84,11 @@ export async function answerCallbackQuery(callbackQueryId: string, text: string)
   })
 }
 
+/** Best-effort: used to scrub a message containing a pasted secret (API key) from the chat. */
+export async function deleteMessage(chatId: string | number, messageId: number): Promise<void> {
+  await call('deleteMessage', { chat_id: chatId, message_id: messageId }).catch(() => {})
+}
+
 export function approvalKeyboard(postId: string) {
   return {
     inline_keyboard: [[
@@ -117,6 +122,20 @@ export async function downloadTelegramFile(fileId: string): Promise<{
     buffer: await res.arrayBuffer(),
     contentType: res.headers.get('content-type') ?? 'image/jpeg',
     extension: /^(jpe?g|png|webp)$/.test(extension) ? extension : 'jpg',
+  }
+}
+
+/** Entry point for everything that isn't reel links: /menu. */
+export function mainMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: '⚙️ Repurpose settings', callback_data: 'msettings' }],
+      [{ text: '📁 Output folder', callback_data: 'moutput' }],
+      [{ text: '🔑 WaveSpeed API key', callback_data: 'mapikey' }],
+      [{ text: '🎬 End frame mode', callback_data: 'mendframe' }],
+      [{ text: '📊 Recent jobs', callback_data: 'mjobs' }],
+      [{ text: '❓ Help', callback_data: 'mhelp' }],
+    ],
   }
 }
 
