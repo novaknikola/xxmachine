@@ -23,6 +23,8 @@ export interface TelegramBatch {
   custom_prompt: string | null
   awaiting_prompt: boolean
   prompt_asked: boolean
+  /** Items classified and awaiting the "confirm replicate?" tap — empty once confirmed. */
+  classified_item_ids: string[]
 }
 
 export async function findUserByChat(chatId: number | string): Promise<string | null> {
@@ -193,4 +195,12 @@ export async function markPromptAsked(batchId: string): Promise<void> {
 
 export async function getBatch(batchId: string): Promise<TelegramBatch | null> {
   return await one<TelegramBatch>(`SELECT * FROM telegram_batches WHERE id = $1`, [batchId])
+}
+
+/** Records which items classification succeeded for, awaiting the confirm tap. */
+export async function setClassifiedItemIds(batchId: string, ids: string[]): Promise<void> {
+  await query(
+    `UPDATE telegram_batches SET classified_item_ids = $2::uuid[], updated_at = now() WHERE id = $1`,
+    [batchId, ids],
+  )
 }

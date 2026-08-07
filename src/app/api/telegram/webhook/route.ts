@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { one, query } from '@/lib/db'
 import { encryptOrNull } from '@/lib/crypto'
+import { internalBaseUrl } from '@/lib/internal-url'
 import {
   answerCallbackQuery,
   batchKeyboard,
@@ -21,6 +22,7 @@ import {
   markPromptAsked,
   openBatch,
   setAwaitingPrompt,
+  setClassifiedItemIds,
   setCustomPrompt,
   setPromptMessage,
   startBatchWithPhoto,
@@ -529,26 +531,35 @@ export async function POST(req: NextRequest) {
       }
 
       try {
-        const repurposeSettings = await getRepurposeSettings(batch.user_id)
         const result = await enqueueReelUrlsForUser({
           userId: batch.user_id,
           rawText: batch.urls.join('\n'),
           referenceImageUrl: batch.reference_image_url,
-          // Nobody is going to press Replicate for a chat, and the message
-          // below promises a finished video.
-          autoReplicate: true,
-          endFrame: repurposeSettings.endFrameMode,
-          repurposeCount: repurposeSettings.variantCount,
-          outputDriveFolderId: repurposeSettings.outputDriveFolderId,
-          customPrompt: batch.custom_prompt,
-          onReplicateQueued: async ({ jobId, classified, failed }) => {
+          // Analysis runs in the background; replication itself is queued
+          // synchronously once the Confirm button below is tapped — see
+          // scheduleAutoClassify for why it is not queued from here directly.
+          onClassified: async ({ classifiedIds, failed }) => {
             if (!chatId) return
-            await sendText(
+            if (!classifiedIds.length) {
+              await sendText(
+                chatId,
+                `⚠️ Analysis finished but nothing could be replicated${failed ? ` — ${failed} failed to analyse` : ''}.`,
+              ).catch(() => { /* the chat may have been closed */ })
+              return
+            }
+            await setClassifiedItemIds(batch.id, classifiedIds)
+            const sent = await sendText(
               chatId,
-              jobId
-                ? `🎬 Replicating ${classified} reel${classified === 1 ? '' : 's'}${failed ? ` · ${failed} could not be analysed` : ''}.`
-                : `⚠️ Analysis finished but nothing could be replicated${failed ? ` — ${failed} failed to analyse` : ''}.`,
-            ).catch(() => { /* the chat may have been closed */ })
+              `✅ Analyzed ${classifiedIds.length} reel${classifiedIds.length === 1 ? '' : 's'}${failed ? ` · ${failed} could not be analysed` : ''}. Confirm to start generating?`,
+            ).catch(() => null) as { message_id?: number } | null
+            if (sent?.message_id) {
+              await editMessageReplyMarkup(chatId, sent.message_id, {
+                inline_keyboard: [[
+                  { text: '▶️ Confirm Replicate', callback_data: `cpgo:${batch.id}` },
+                  { text: '✖️ Cancel', callback_data: `cpcancel:${batch.id}` },
+                ]],
+              }).catch(() => {})
+            }
           },
         })
         if (chatId && cbMessage?.message_id) {
@@ -557,10 +568,10 @@ export async function POST(req: NextRequest) {
             chatId,
             cbMessage.message_id,
             [
-              `✅ <b>Queued ${result.enqueued} reel${result.enqueued === 1 ? '' : 's'}</b>`,
+              `✅ <b>Queued ${result.enqueued} reel${result.enqueued === 1 ? '' : 's'}</b> for analysis`,
               failed ? `${failed} could not be resolved and were skipped.` : '',
               '',
-              'You will get the Drive folder here when it finishes.',
+              `I'll ask you to confirm here once they're analyzed.`,
             ].filter(Boolean).join('\n'),
           )
         }
@@ -573,6 +584,84 @@ export async function POST(req: NextRequest) {
         if (chatId && cbMessage?.message_id) {
           await editMessageText(chatId, cbMessage.message_id, `❌ ${escapeHtml(msg)}`)
           await editMessageReplyMarkup(chatId, cbMessage.message_id, batchKeyboard(batch.id))
+        }
+      }
+      return NextResponse.json({ ok: true })
+    }
+
+    // ── Confirm Replicate — queues copy_paste_v2 synchronously, in this
+    // request, rather than from inside the classify-time after() continuation.
+    // That continuation has silently failed to reach this same insert before
+    // (see scheduleAutoClassify) with no error logged — a paid job needs a
+    // path that either runs or visibly throws, not one riding on a background
+    // continuation with no retry.
+    if (action === 'cpgo') {
+      const chatId = cbMessage?.chat?.id as number | undefined
+      const batch = postId ? await getBatch(postId) : null
+
+      if (!batch || batch.status !== 'submitted' || !batch.classified_item_ids.length) {
+        await answerCallbackQuery(callbackId, 'Nothing to confirm — already handled or expired')
+        return NextResponse.json({ ok: true })
+      }
+
+      await answerCallbackQuery(callbackId, 'Starting…')
+      if (chatId && cbMessage?.message_id) {
+        await editMessageReplyMarkup(chatId, cbMessage.message_id, {})
+      }
+
+      const itemIds = batch.classified_item_ids
+      // Cleared immediately so a double tap can never queue the same items twice.
+      await setClassifiedItemIds(batch.id, [])
+
+      try {
+        const settings = await getRepurposeSettings(batch.user_id)
+        const row = await one<{ id: string }>(
+          `INSERT INTO generation_queue (user_id, job_type, input, total_items)
+           VALUES ($1, 'copy_paste_v2', $2, $3)
+           RETURNING id`,
+          [
+            batch.user_id,
+            JSON.stringify({
+              itemIds,
+              endFrame: settings.endFrameMode,
+              repurposeCount: settings.variantCount,
+              outputDriveFolderId: settings.outputDriveFolderId,
+              customPrompt: batch.custom_prompt,
+            }),
+            itemIds.length,
+          ],
+        )
+        if (!row) throw new Error('Queue insert returned no row')
+
+        // Start now instead of waiting up to a minute for cron — same
+        // claim-then-kick pattern queue/submit uses for every job type.
+        const secret = process.env.CRON_SECRET
+        if (secret) {
+          const claimed = await one<{ id: string }>(
+            `UPDATE generation_queue SET status='processing', started_at=now(), attempts=attempts+1
+              WHERE id=$1 AND status='pending' RETURNING id`,
+            [row.id],
+          ).catch(() => null)
+          if (claimed) {
+            fetch(`${internalBaseUrl()}/api/queue/process/${row.id}`, {
+              method: 'POST',
+              headers: { 'x-cron-secret': secret },
+            }).catch(err => console.error('[telegram/webhook] fire copy_paste_v2 worker:', err))
+          }
+        }
+
+        if (chatId) {
+          await sendText(
+            chatId,
+            `🎬 Replicating ${itemIds.length} reel${itemIds.length === 1 ? '' : 's'}. You will get the Drive folder here when it finishes.`,
+          )
+        }
+      } catch (err) {
+        console.error('[telegram/webhook] cpgo failed:', err)
+        // Restore so Confirm can be tapped again instead of losing the batch.
+        await setClassifiedItemIds(batch.id, itemIds)
+        if (chatId) {
+          await sendText(chatId, '❌ Could not start replication. Try Confirm again.')
         }
       }
       return NextResponse.json({ ok: true })

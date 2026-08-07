@@ -14,7 +14,7 @@ import {
 } from '@/lib/instagram-scrape'
 import { enqueueDiscoveryReels, type EnqueueReelInput } from './enqueue'
 import { parseReelUrlList } from './parse-reel-url'
-import { scheduleAutoClassify, scheduleClassifyOnly } from './auto-classify'
+import { scheduleAutoClassify } from './auto-classify'
 import { isPlayableVideoUrl } from './video-url'
 
 export const MAX_URLS = 30
@@ -67,19 +67,12 @@ export async function enqueueReelUrlsForUser(opts: {
   sourceUsername?: string | null
   referenceImageUrl?: string | null
   /**
-   * Queue the replication once analysis finishes. The dashboard leaves this
-   * to the Replicate button; a caller with no UI has to ask for it.
+   * Called once background classification finishes, with the ids that
+   * succeeded. Replication itself is queued separately, synchronously,
+   * wherever the caller decides to act on this (e.g. a confirm button) —
+   * see scheduleAutoClassify for why it does not happen automatically here.
    */
-  autoReplicate?: boolean
-  /** Pin the clip's end with a matching second keyframe. Default 'auto'. */
-  endFrame?: 'auto' | 'always' | 'off'
-  /** Fan each finished video out into N repurposed variants. 0/undefined = off. */
-  repurposeCount?: number
-  /** Where repurpose variants land. Empty = the computed archive tree. */
-  outputDriveFolderId?: string | null
-  /** Appended to the end of every item's rendered prompt. */
-  customPrompt?: string | null
-  onReplicateQueued?: (r: { jobId: string | null; classified: number; failed: number }) => Promise<void>
+  onClassified?: (r: { classifiedIds: string[]; failed: number }) => Promise<void>
 }): Promise<EnqueueUrlsResult> {
   const { userId, rawText } = opts
 
@@ -303,18 +296,7 @@ export async function enqueueReelUrlsForUser(opts: {
   }
 
   const result = await enqueueDiscoveryReels(userId, username, reels, { referenceImageUrl })
-  if (opts.autoReplicate) {
-    scheduleAutoClassify(userId, result.ids, {
-      thenReplicate: true,
-      endFrame: opts.endFrame,
-      repurposeCount: opts.repurposeCount,
-      outputDriveFolderId: opts.outputDriveFolderId,
-      customPrompt: opts.customPrompt,
-      onQueued: opts.onReplicateQueued,
-    })
-  } else {
-    scheduleClassifyOnly(userId, result.ids)
-  }
+  scheduleAutoClassify(userId, result.ids, { onClassified: opts.onClassified })
 
   return {
     ids: result.ids,
