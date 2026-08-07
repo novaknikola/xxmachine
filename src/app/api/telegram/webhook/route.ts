@@ -506,6 +506,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, status: 'approved' })
   } catch (err) {
     console.error('[telegram/webhook]', err)
-    return NextResponse.json({ error: String(err) }, { status: 500 })
+    // Always ack with 200: a non-2xx makes Telegram retry the same update
+    // repeatedly, which just re-triggers the same failure (e.g. replying to a
+    // chat that blocked the bot) instead of resolving it.
+    return NextResponse.json({ ok: false, error: String(err) })
   }
 }
