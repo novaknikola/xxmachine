@@ -99,31 +99,23 @@ export async function GET(req: NextRequest) {
   // copy_paste_v2 and copy_prompts_generate write progressAt after every batch.
   // No progress for 25 minutes means the worker died (deploy/crash), not that
   // it is still grinding — a large Seedream batch legitimately runs for hours.
-  await query(
-    `UPDATE generation_queue
-        SET status = 'pending', started_at = NULL, error = NULL
-      WHERE status = 'processing'
-        AND job_type IN ('copy_paste_v2', 'copy_prompts_generate', 'seedance_i2v', 'infinite_talk')
-        AND attempts < max_attempts
-        AND COALESCE(
-              NULLIF(output->>'progressAt', '')::timestamptz,
-              started_at
-            ) < now() - interval '25 minutes'`,
-  ).catch(err => console.error('[cron/tick] requeue stale copy_paste_v2 jobs:', err))
-
+  //
+  // This never auto-requeues: a dead worker can leave a paid WaveSpeed call
+  // in flight with no local record of it, and resubmitting blind risks paying
+  // for the same render twice. Mark it failed and let a person decide,
+  // after checking whether the original call actually billed.
   await query(
     `UPDATE generation_queue
         SET status = 'failed',
-            error = COALESCE(error, 'Job stalled — no progress after max attempts'),
+            error = COALESCE(error, 'Job stalled — no progress for 25 minutes. Check WaveSpeed usage before resubmitting; the original call may have already billed.'),
             finished_at = now()
       WHERE status = 'processing'
         AND job_type IN ('copy_paste_v2', 'copy_prompts_generate', 'seedance_i2v', 'infinite_talk')
-        AND attempts >= max_attempts
         AND COALESCE(
               NULLIF(output->>'progressAt', '')::timestamptz,
               started_at
             ) < now() - interval '25 minutes'`,
-  ).catch(err => console.error('[cron/tick] fail exhausted heartbeat jobs:', err))
+  ).catch(err => console.error('[cron/tick] fail stale heartbeat jobs:', err))
 
   // My Pod resume lease: worker heartbeats progressAt ~every 60s during Comfy/Python work.
   // If heartbeat stops (deploy/crash), requeue to pending and continue from done_items.
