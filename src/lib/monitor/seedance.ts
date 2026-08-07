@@ -24,7 +24,7 @@ export function buildSeedancePayload(input: SeedanceCallInput): Record<string, u
     reference_images: input.referenceImageUrls,
     prompt: input.prompt,
     aspect_ratio: input.aspectRatio === 'other' ? '9:16' : input.aspectRatio,
-    resolution: '720p',
+    resolution: '480p',
     generate_audio: true,
     enable_web_search: false,
   }
