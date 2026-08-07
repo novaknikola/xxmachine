@@ -178,24 +178,44 @@ export async function POST(req: NextRequest) {
         // Account-level, unlike awaiting_prompt (batch-scoped) — checked before
         // any command so a stray non-command message right after tapping the
         // button is never misread as reel links.
+        //
+        // This silently overwrote a real key with pasted reel links once: the
+        // button was tapped, then a later unrelated message (URLs, meant to
+        // start a batch) was the next thing sent and got captured as "the key"
+        // instead — no validation, deleted immediately, no visible trace of
+        // what actually got saved. Reel links and prose are unambiguously not
+        // an API key (spaces, newlines, a URL), so those are rejected outright
+        // rather than trusting whatever arrives next.
         if (rawText && !rawText.startsWith('/')) {
           const acct = await one<{ telegram_awaiting: string | null }>(
             `SELECT telegram_awaiting FROM users WHERE id = $1`, [userId],
           )
           if (acct?.telegram_awaiting === 'apikey') {
             const key = rawText.trim()
+            const looksWrong = key.length > 0 && (
+              /\s/.test(key) || /^https?:\/\//i.test(key) || key.length < 8 || key.length > 200
+            )
+            // Always disarm: a wrong paste means "try /menu again", not "keep
+            // listening" — an indefinitely-armed flag is exactly how this broke.
+            await query(`UPDATE users SET telegram_awaiting = NULL WHERE id = $1`, [userId])
+            if (looksWrong) {
+              await sendText(
+                chatId,
+                "❌ That doesn't look like an API key (it has spaces, a link, or an unusual length) — nothing was saved. Open the menu and try 🔑 WaveSpeed API key again.",
+              )
+              return NextResponse.json({ ok: true })
+            }
             await query(
               `INSERT INTO user_settings (user_id, wavespeed_api_key, updated_at)
                VALUES ($1, $2, now())
                ON CONFLICT (user_id) DO UPDATE SET wavespeed_api_key = $2, updated_at = now()`,
               [userId, encryptOrNull(key)],
             )
-            await query(`UPDATE users SET telegram_awaiting = NULL WHERE id = $1`, [userId])
             if (message.message_id) await deleteMessage(chatId, message.message_id)
             await sendText(
               chatId,
               key
-                ? '🔑 Saved. Your key was deleted from this chat and will be used for your own generations.'
+                ? `🔑 Saved (starts with <code>${escapeHtml(key.slice(0, 6))}</code>, ${key.length} chars). Your message was deleted and this key will be used for your own generations.`
                 : '🔑 Cleared — your account will use the platform default key again.',
             )
             return NextResponse.json({ ok: true })
