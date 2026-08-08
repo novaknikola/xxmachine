@@ -345,9 +345,16 @@ export async function replicateCopyPasteItem(
     }
     const lastImageUrl = wantEndFrame ? generatedEndImageUrl : null
     const referenceImageUrls = [generatedImageUrl, ...(lastImageUrl ? [lastImageUrl] : [])]
-    const finalPrompt = opts?.customPrompt?.trim()
-      ? `${renderedPrompt} ${opts.customPrompt.trim()}`
-      : renderedPrompt
+    // reference_images is documented as soft "style or character guidance" for
+    // this model, not a hard constraint — it has been observed keeping the
+    // original video's face/identity instead of the keyframe's. This is a
+    // cheap nudge toward actually using it; appended here (not in
+    // buildSeedancePayload) so sent_prompt still records exactly what was sent.
+    const finalPrompt = [
+      renderedPrompt,
+      opts?.customPrompt?.trim(),
+      'Always use the reference image provided.',
+    ].filter(Boolean).join(' ')
 
     await query(`UPDATE discovery_items SET replicate_status = 'video_generating' WHERE id = $1`, [itemId])
     const result = await generateSeedanceVideo({
