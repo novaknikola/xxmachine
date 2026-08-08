@@ -121,6 +121,7 @@ export default function PrivacyPage() {
 
             <Section title="10. Contact">
               <p>For privacy-related questions or data requests, contact the platform administrator through your account dashboard or via the contact information provided during onboarding.</p>
+              <p>XXmachine, 30 N Gould St Ste R, Sheridan, WY 82801 · +1 (254) 550-2084</p>
             </Section>
 
           </div>

@@ -373,6 +373,12 @@ function Footer() {
           </Link>
         </div>
       </div>
+
+      <div className="max-w-6xl mx-auto mt-4 text-center">
+        <p className="text-xs text-muted-foreground">
+          30 N Gould St Ste R, Sheridan, WY 82801 · +1 (254) 550-2084
+        </p>
+      </div>
     </footer>
   )
 }
