@@ -16,6 +16,7 @@ import {
 import { enqueueReelUrlsForUser, EnqueueUrlsError } from '@/lib/monitor/enqueue-from-urls'
 import {
   addUrlsToBatch,
+  finalizeBatchClassification,
   findUserByChat,
   getBatch,
   markBatch,
@@ -24,6 +25,7 @@ import {
   setAwaitingPrompt,
   setClassifiedItemIds,
   setCustomPrompt,
+  setItemIds,
   setPromptMessage,
   startBatchWithPhoto,
   type TelegramBatch,
@@ -558,30 +560,22 @@ export async function POST(req: NextRequest) {
           // Analysis runs in the background; replication itself is queued
           // synchronously once the Confirm button below is tapped — see
           // scheduleAutoClassify for why it is not queued from here directly.
-          onClassified: async ({ classifiedIds, failed }) => {
-            if (!chatId) return
-            if (!classifiedIds.length) {
-              await sendText(
-                chatId,
-                `⚠️ Analysis finished but nothing could be replicated${failed ? ` — ${failed} failed to analyse` : ''}.`,
-              ).catch(() => { /* the chat may have been closed */ })
-              return
-            }
-            await setClassifiedItemIds(batch.id, classifiedIds)
-            const sent = await sendText(
-              chatId,
-              `✅ Analyzed ${classifiedIds.length} reel${classifiedIds.length === 1 ? '' : 's'}${failed ? ` · ${failed} could not be analysed` : ''}. Confirm to start generating?`,
-            ).catch(() => null) as { message_id?: number } | null
-            if (sent?.message_id) {
-              await editMessageReplyMarkup(chatId, sent.message_id, {
-                inline_keyboard: [[
-                  { text: '▶️ Confirm Replicate', callback_data: `cpgo:${batch.id}` },
-                  { text: '✖️ Cancel', callback_data: `cpcancel:${batch.id}` },
-                ]],
-              }).catch(() => {})
-            }
+          //
+          // finalizeBatchClassification re-reads item status from the DB
+          // rather than trusting classifiedIds/failed from this callback
+          // directly, because this callback is itself the thing that has
+          // twice now silently failed to fire on a real batch even after
+          // every item finished classifying with no error — cron's "Stalled
+          // batch confirmations" sweep calls the exact same function as a
+          // safety net, and both need to agree from the same source of truth.
+          onClassified: async () => {
+            const fresh = await getBatch(batch.id)
+            if (fresh) await finalizeBatchClassification(fresh)
           },
         })
+        // Set synchronously, in this request — independent of whether the
+        // background classify continuation above ever reports back.
+        await setItemIds(batch.id, result.ids)
         if (chatId && cbMessage?.message_id) {
           const failed = result.resolveErrors.length
           await editMessageText(

@@ -307,6 +307,50 @@ export async function GET(req: NextRequest) {
     console.error('[cron/tick] orphan sweep error:', err)
   }
 
+  // ── Stalled batch confirmations ───────────────────────────────
+  //
+  // Same failure mode as the orphaned-analyses sweep above, one step later:
+  // scheduleAutoClassify's onClassified callback (which sends the "confirm
+  // replicate?" Telegram message) also runs inside that same after()
+  // continuation, and has now twice silently failed to fire on a real batch
+  // even though every item finished classifying with no error. item_ids is
+  // written synchronously at submit time (see setItemIds in telegram-batch.ts)
+  // specifically so this sweep has something to check independent of whether
+  // that callback ever ran.
+  let stalledBatchesFinalized = 0
+  try {
+    const stalled = await rows<{ id: string }>(
+      `SELECT tb.id FROM telegram_batches tb
+        WHERE tb.status = 'submitted'
+          AND coalesce(array_length(tb.classified_item_ids, 1), 0) = 0
+          AND coalesce(array_length(tb.item_ids, 1), 0) > 0
+          AND tb.updated_at < now() - interval '90 seconds'
+          AND NOT EXISTS (
+            SELECT 1 FROM discovery_items di
+             WHERE di.id = ANY(tb.item_ids)
+               AND di.replicate_status IN ('none', 'pending_classify', 'analyzing')
+          )
+        ORDER BY tb.updated_at
+        LIMIT 5`,
+    )
+    if (stalled.length) {
+      const { getBatch, finalizeBatchClassification } = await import('@/lib/monitor/telegram-batch')
+      for (const s of stalled) {
+        try {
+          const batch = await getBatch(s.id)
+          if (batch) {
+            await finalizeBatchClassification(batch)
+            stalledBatchesFinalized++
+          }
+        } catch (err) {
+          console.error('[cron/tick] stalled batch finalize', s.id, err instanceof Error ? err.message : err)
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[cron/tick] stalled batch sweep error:', err)
+  }
+
   // ── Google Drive auto-archive uploads ─────────────────────────
   let driveArchive: Awaited<ReturnType<typeof processDriveExports>> | { error: string } = {
     processed: 0,
@@ -327,6 +371,7 @@ export async function GET(req: NextRequest) {
     stats: statsResult,
     queue: { started: queueStarted, comfyuiStarted: comfyStarted, podHealthChecked },
     orphanedClassified,
+    stalledBatchesFinalized,
     monitor: monitorScans,
     driveArchive,
   })

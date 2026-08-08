@@ -6,9 +6,9 @@
  * messages. One batch per chat is `collecting`; a new photo closes the previous
  * one and starts fresh, which is what "I meant this photo instead" looks like.
  */
-import { one, query } from '@/lib/db'
+import { one, query, rows } from '@/lib/db'
+import { downloadTelegramFile, editMessageReplyMarkup, sendText } from '@/lib/telegram'
 import { uploadBuffer } from '@/lib/supabase-storage'
-import { downloadTelegramFile } from '@/lib/telegram'
 import { parseReelUrlList } from './parse-reel-url'
 import { MAX_URLS } from './enqueue-from-urls'
 
@@ -25,6 +25,8 @@ export interface TelegramBatch {
   prompt_asked: boolean
   /** Items classified and awaiting the "confirm replicate?" tap — empty once confirmed. */
   classified_item_ids: string[]
+  /** Every item created for this batch, set synchronously at submit time — see finalizeBatchClassification. */
+  item_ids: string[]
 }
 
 export async function findUserByChat(chatId: number | string): Promise<string | null> {
@@ -203,4 +205,55 @@ export async function setClassifiedItemIds(batchId: string, ids: string[]): Prom
     `UPDATE telegram_batches SET classified_item_ids = $2::uuid[], updated_at = now() WHERE id = $1`,
     [batchId, ids],
   )
+}
+
+/** Every item created for this batch — set once, right after submit, independent of whether classification ever reports back. */
+export async function setItemIds(batchId: string, ids: string[]): Promise<void> {
+  await query(
+    `UPDATE telegram_batches SET item_ids = $2::uuid[], updated_at = now() WHERE id = $1`,
+    [batchId, ids],
+  )
+}
+
+/**
+ * Sends the "confirm replicate?" (or "nothing could be replicated") message
+ * and, on success, records which items are ready — the one place this logic
+ * lives, called both right after classification finishes and by cron's
+ * safety-net sweep for batches where that first call never happened.
+ *
+ * Re-reads status from discovery_items rather than trusting a caller-passed
+ * list, so it gives the same answer regardless of which of the two ever
+ * actually calls it.
+ */
+export async function finalizeBatchClassification(batch: TelegramBatch): Promise<void> {
+  if (!batch.item_ids.length) return
+
+  const items = await rows<{ id: string; replicate_status: string }>(
+    `SELECT id, replicate_status FROM discovery_items WHERE id = ANY($1::uuid[])`,
+    [batch.item_ids],
+  )
+  const classifiedIds = items.filter(i => i.replicate_status === 'classified').map(i => i.id)
+  const failed = items.length - classifiedIds.length
+
+  if (!classifiedIds.length) {
+    await sendText(
+      batch.chat_id,
+      `⚠️ Analysis finished but nothing could be replicated${failed ? ` — ${failed} failed to analyse` : ''}.`,
+    ).catch(() => { /* the chat may have been closed */ })
+    return
+  }
+
+  await setClassifiedItemIds(batch.id, classifiedIds)
+  const sent = await sendText(
+    batch.chat_id,
+    `✅ Analyzed ${classifiedIds.length} reel${classifiedIds.length === 1 ? '' : 's'}${failed ? ` · ${failed} could not be analysed` : ''}. Confirm to start generating?`,
+  ).catch(() => null) as { message_id?: number } | null
+  if (sent?.message_id) {
+    await editMessageReplyMarkup(batch.chat_id, sent.message_id, {
+      inline_keyboard: [[
+        { text: '▶️ Confirm Replicate', callback_data: `cpgo:${batch.id}` },
+        { text: '✖️ Cancel', callback_data: `cpcancel:${batch.id}` },
+      ]],
+    }).catch(() => {})
+  }
 }
