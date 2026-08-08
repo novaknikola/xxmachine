@@ -207,6 +207,30 @@ export async function setClassifiedItemIds(batchId: string, ids: string[]): Prom
   )
 }
 
+/**
+ * Atomically claims and clears classified_item_ids, returning the ids that
+ * were there — or null if there was nothing left to claim.
+ *
+ * A plain read-then-write (read classified_item_ids, then separately clear
+ * it) lets two concurrent Confirm taps — a genuine double-tap, or Telegram
+ * redelivering the same callback_query — both pass the "is there anything to
+ * confirm" check before either write lands, and both queue the same paid
+ * copy_paste_v2 job. The UPDATE...WHERE...RETURNING here is the check: only
+ * one concurrent caller can ever see a non-null result, so this must run
+ * first, before any other await (including Telegram API calls), to keep the
+ * race window at a single DB round trip.
+ */
+export async function claimClassifiedItemIds(batchId: string): Promise<string[] | null> {
+  const row = await one<{ classified_item_ids: string[] }>(
+    `UPDATE telegram_batches
+        SET classified_item_ids = '{}', updated_at = now()
+      WHERE id = $1 AND coalesce(array_length(classified_item_ids, 1), 0) > 0
+      RETURNING classified_item_ids`,
+    [batchId],
+  )
+  return row?.classified_item_ids ?? null
+}
+
 /** Every item created for this batch — set once, right after submit, independent of whether classification ever reports back. */
 export async function setItemIds(batchId: string, ids: string[]): Promise<void> {
   await query(

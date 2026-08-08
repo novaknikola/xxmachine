@@ -16,6 +16,7 @@ import {
 import { enqueueReelUrlsForUser, EnqueueUrlsError } from '@/lib/monitor/enqueue-from-urls'
 import {
   addUrlsToBatch,
+  claimClassifiedItemIds,
   finalizeBatchClassification,
   findUserByChat,
   getBatch,
@@ -618,14 +619,21 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true })
       }
 
+      // Claimed atomically, before any Telegram round trip — a concurrent
+      // duplicate tap (double-tap or a redelivered callback_query) that loses
+      // the claim is told there's nothing to confirm instead of queuing the
+      // same paid job twice. See claimClassifiedItemIds for why this has to
+      // come before answerCallbackQuery/editMessageReplyMarkup, not after.
+      const itemIds = await claimClassifiedItemIds(batch.id)
+      if (!itemIds) {
+        await answerCallbackQuery(callbackId, 'Nothing to confirm — already handled or expired')
+        return NextResponse.json({ ok: true })
+      }
+
       await answerCallbackQuery(callbackId, 'Starting…')
       if (chatId && cbMessage?.message_id) {
         await editMessageReplyMarkup(chatId, cbMessage.message_id, {})
       }
-
-      const itemIds = batch.classified_item_ids
-      // Cleared immediately so a double tap can never queue the same items twice.
-      await setClassifiedItemIds(batch.id, [])
 
       try {
         const settings = await getRepurposeSettings(batch.user_id)
