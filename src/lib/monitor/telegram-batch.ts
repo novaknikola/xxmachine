@@ -224,6 +224,15 @@ export async function setItemIds(batchId: string, ids: string[]): Promise<void> 
  * Re-reads status from discovery_items rather than trusting a caller-passed
  * list, so it gives the same answer regardless of which of the two ever
  * actually calls it.
+ *
+ * Clears item_ids up front, before sending anything — this is the one-shot
+ * guard that keeps cron's sweep from matching the same batch again. Without
+ * it, a batch whose items never reached 'classified' (nothing to replicate,
+ * or — worse — items that moved past 'classified' into 'done' after the user
+ * already confirmed and it replicated successfully) would match the sweep's
+ * WHERE clause forever, re-sending "nothing could be replicated" every tick
+ * indefinitely. Confirmed happening in production: a batch that had already
+ * finished replicating got this message resent once a minute for an hour.
  */
 export async function finalizeBatchClassification(batch: TelegramBatch): Promise<void> {
   if (!batch.item_ids.length) return
@@ -234,6 +243,8 @@ export async function finalizeBatchClassification(batch: TelegramBatch): Promise
   )
   const classifiedIds = items.filter(i => i.replicate_status === 'classified').map(i => i.id)
   const failed = items.length - classifiedIds.length
+
+  await query(`UPDATE telegram_batches SET item_ids = '{}', updated_at = now() WHERE id = $1`, [batch.id])
 
   if (!classifiedIds.length) {
     await sendText(
