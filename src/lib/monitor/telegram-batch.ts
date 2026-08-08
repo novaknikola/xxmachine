@@ -221,11 +221,23 @@ export async function setClassifiedItemIds(batchId: string, ids: string[]): Prom
  * race window at a single DB round trip.
  */
 export async function claimClassifiedItemIds(batchId: string): Promise<string[] | null> {
+  // RETURNING on a plain UPDATE reflects the row AFTER the SET, so a bare
+  // `SET classified_item_ids = '{}' ... RETURNING classified_item_ids` always
+  // returns '{}' — the very value it just wrote, not the ids being claimed.
+  // The FOR UPDATE subquery reads (and locks) the pre-clear value so it can
+  // still be returned, while keeping the whole thing one atomic statement: a
+  // second concurrent call blocks on the lock until the first commits, then
+  // finds the row already cleared and its own WHERE no longer matches.
   const row = await one<{ classified_item_ids: string[] }>(
-    `UPDATE telegram_batches
+    `UPDATE telegram_batches AS tb
         SET classified_item_ids = '{}', updated_at = now()
-      WHERE id = $1 AND coalesce(array_length(classified_item_ids, 1), 0) > 0
-      RETURNING classified_item_ids`,
+       FROM (
+         SELECT id, classified_item_ids FROM telegram_batches
+          WHERE id = $1 AND coalesce(array_length(classified_item_ids, 1), 0) > 0
+          FOR UPDATE
+       ) AS prev
+      WHERE tb.id = prev.id
+      RETURNING prev.classified_item_ids`,
     [batchId],
   )
   return row?.classified_item_ids ?? null
