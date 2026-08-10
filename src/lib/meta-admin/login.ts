@@ -18,40 +18,27 @@ export interface MetaAdminCreds {
  * real run.
  */
 export async function loginToMeta(page: Page, creds: MetaAdminCreds): Promise<void> {
-  await page.goto('https://developers.facebook.com/', { waitUntil: 'networkidle', timeout: 30000 })
-  await debugScreenshot(page, '01-landing')
+  // developers.facebook.com's own landing page is public — it has no email
+  // field and doesn't redirect to /login even when logged out, so its
+  // presence/absence can't tell us the login state. Go straight to
+  // Facebook's actual login URL instead: if the persistent profile already
+  // has a valid session, this redirects to the logged-in home on its own;
+  // otherwise the form is right there.
+  await page.goto('https://www.facebook.com/login.php', { waitUntil: 'networkidle', timeout: 30000 })
+  await debugScreenshot(page, '01-login-page')
 
-  // Already logged in from a previous run (persistent profile) — nothing to do.
-  if (!page.url().includes('login')) {
-    const loginForm = await page.$('input[name="email"], input#email')
-    if (!loginForm) {
-      await debugScreenshot(page, '02-already-logged-in')
-      return
-    }
-  }
-
-  const emailInput = await page.waitForSelector(
-    'input[name="email"], input#email',
-    { timeout: 15000 },
-  ).catch(() => null)
-
+  const emailInput = await page.$('input[name="email"], input#email')
   if (!emailInput) {
-    // Might have landed on a "log in with Facebook" interstitial first.
-    const loginLink = await page.$('a:has-text("Log In"), a[href*="login"]')
-    if (loginLink) {
-      await loginLink.click()
-      await page.waitForTimeout(2000)
-    }
+    await debugScreenshot(page, '02-already-logged-in')
+  } else {
+    await page.fill('input[name="email"], input#email', creds.login)
+    await page.fill('input[name="pass"], input#pass', creds.password)
+    await debugScreenshot(page, '03-filled-login')
+
+    await page.click('button[name="login"], button[data-testid="royal_login_button"], button[type="submit"]')
+    await page.waitForTimeout(4000)
+    await debugScreenshot(page, '04-after-submit')
   }
-
-  await page.waitForSelector('input[name="email"], input#email', { timeout: 15000 })
-  await page.fill('input[name="email"], input#email', creds.login)
-  await page.fill('input[name="pass"], input#pass', creds.password)
-  await debugScreenshot(page, '03-filled-login')
-
-  await page.click('button[name="login"], button[data-testid="royal_login_button"], button[type="submit"]')
-  await page.waitForTimeout(4000)
-  await debugScreenshot(page, '04-after-submit')
 
   const url = page.url()
   if (url.includes('checkpoint') || url.includes('two_step') || url.includes('two_factor')) {
@@ -85,10 +72,19 @@ export async function loginToMeta(page: Page, creds: MetaAdminCreds): Promise<vo
     }
   }
 
+  const postLoginUrl = page.url()
+  if (postLoginUrl.includes('login.php') || postLoginUrl.includes('checkpoint')) {
+    throw new Error(`Login did not complete — still on ${postLoginUrl}. See the last screenshot.`)
+  }
+
+  // developers.facebook.com never redirects to a login URL on its own (it's
+  // a public page either way), so verify by checking for the "Login" link
+  // it shows in the top-right corner when logged out.
   await page.goto('https://developers.facebook.com/', { waitUntil: 'networkidle', timeout: 30000 })
   await debugScreenshot(page, '09-final-state')
 
-  if (page.url().includes('login') || page.url().includes('checkpoint')) {
-    throw new Error(`Login did not complete — still on ${page.url()}. See screenshot 09-final-state`)
+  const loggedOutLink = await page.$('a:has-text("Login")')
+  if (loggedOutLink) {
+    throw new Error('Reached developers.facebook.com but it still shows a "Login" link — session did not carry over. See screenshot 09-final-state')
   }
 }
