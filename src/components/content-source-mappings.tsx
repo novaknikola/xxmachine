@@ -1,7 +1,7 @@
 ﻿'use client'
 
-import { useEffect, useMemo, useState } from 'react'
-import { Link2, Loader2, RefreshCw, Save } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link2, Loader2, RefreshCw, Save, Upload } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -47,6 +47,8 @@ export function ContentSourceMappings() {
   const [newSheetName, setNewSheetName] = useState('')
   const [loading, setLoading] = useState(true)
   const [savingKey, setSavingKey] = useState<string | null>(null)
+  const [importing, setImporting] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const sortedMappings = useMemo(() => {
     return [...mappings].sort((a, b) => a.sheet_name.localeCompare(b.sheet_name))
@@ -78,6 +80,30 @@ export function ContentSourceMappings() {
   useEffect(() => {
     loadAll()
   }, [])
+
+  async function importWorkbook(file: File) {
+    setImporting(true)
+    const fd = new FormData()
+    fd.append('file', file)
+
+    try {
+      const res = await fetch('/api/spreadsheet/import-xlsx', { method: 'POST', body: fd })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Import failed')
+
+      toast.success(
+        `Imported ${data.inserted} item(s)` + (data.skippedCount ? `, skipped ${data.skippedCount}` : '')
+      )
+      if (data.unassignedSheets?.length) {
+        toast.info(`Assign an account to: ${data.unassignedSheets.join(', ')}`)
+      }
+      await loadAll()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Import failed')
+    } finally {
+      setImporting(false)
+    }
+  }
 
   async function saveMapping(sheetName: string, instagramAccountId: string | null) {
     const cleanSheetName = sheetName.trim()
@@ -121,9 +147,35 @@ export function ContentSourceMappings() {
           </p>
         </div>
 
-        <Button size="sm" variant="outline" className="h-8 text-xs" onClick={loadAll} disabled={loading}>
-          {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-        </Button>
+        <div className="flex items-center gap-2 shrink-0">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xls"
+            className="hidden"
+            onChange={e => {
+              const file = e.target.files?.[0]
+              if (file) importWorkbook(file)
+              e.target.value = ''
+            }}
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 text-xs"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={importing}
+          >
+            {importing
+              ? <Loader2 className="w-3 h-3 mr-1.5 animate-spin" />
+              : <Upload className="w-3 h-3 mr-1.5" />
+            }
+            Import Schedule (.xlsx)
+          </Button>
+          <Button size="sm" variant="outline" className="h-8 text-xs" onClick={loadAll} disabled={loading}>
+            {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+          </Button>
+        </div>
       </div>
 
       <div className="flex gap-2">
