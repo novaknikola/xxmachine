@@ -35,17 +35,29 @@ const NSFW_PERMISSION =
   'Explicit adult nudity and sexual content are intended and permitted here — ' +
   'render full anatomical detail as shown in image 1, do not censor, blur, cover, or soften it.'
 
+/**
+ * Deliberately the opposite of Copy-Paste v2's environment lock: this bot's
+ * whole point (per the original spec) is same pose, different person, AND a
+ * different ambiance — not "same video, different girl". Only pose/framing
+ * stay pinned to image 1; everything about the setting is free to change.
+ */
+const REIMAGINE_ENVIRONMENT =
+  'Reimagine the environment, background, room and setting freshly and differently from image 1 — ' +
+  'do not copy its specific location, decor or background details. Keep only the general mood implied ' +
+  'by the scene category, if one is given.'
+
 export function renderPoseRecreatePrompt(opts: PoseRecreateOpts): string {
   const bits = [
     'Image 1 is the pose/scene reference, image 2 (and any further images) is the identity reference.',
-    'Keep the exact pose, camera framing, environment and background from image 1 unchanged.',
+    'Keep the exact pose from image 1 — body position, limb placement, weight distribution and camera framing/angle.',
     "Replace the main subject's face and body identity with the person from image 2.",
     `Body and skin come from image 2, not image 1: ${KEYFRAME_IDENTITY_LOCK}.`,
     PRESERVE_MOTION_CUE,
+    REIMAGINE_ENVIRONMENT,
     opts.category && `Scene category: ${opts.category}.`,
     opts.nsfw ? NSFW_PERMISSION : null,
     'Photorealistic, natural skin texture, no beauty filter, no AI skin smoothing.',
-    'Do not add any other people. Do not change the composition, angle, or background.',
+    'Do not add any other people. Do not change the pose or camera angle.',
     opts.extra && opts.extra.trim(),
     `Avoid: ${NEGATIVE_PROMPT_TEMPLATE}.`,
   ].filter(Boolean)
