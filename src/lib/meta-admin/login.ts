@@ -75,6 +75,20 @@ export async function loginToMeta(page: Page, creds: MetaAdminCreds): Promise<vo
     await debugScreenshot(page, '04-after-submit')
   }
 
+  // Diagnostic dump — every guess about how the captcha is rendered has
+  // been wrong twice in a row, so log the actual DOM facts instead of
+  // guessing a third time.
+  console.log('[meta-admin-login] DEBUG url:', page.url())
+  const frames = page.frames()
+  console.log('[meta-admin-login] DEBUG frame count:', frames.length)
+  for (const f of frames) {
+    console.log('[meta-admin-login] DEBUG frame url:', f.url())
+  }
+  const iframeEls = await page.$$eval('iframe', els => els.map(e => ({ src: e.getAttribute('src'), title: e.getAttribute('title') })))
+  console.log('[meta-admin-login] DEBUG iframe elements:', JSON.stringify(iframeEls))
+  const bodyText = await page.evaluate(() => document.body.innerText.slice(0, 500))
+  console.log('[meta-admin-login] DEBUG body text:', bodyText)
+
   if (await isBlocked(page)) {
     console.log('[meta-admin-login] Challenge screen reached (captcha/2FA/verification) — connect via VNC and solve it live. Waiting up to 5 minutes...')
     const resolved = await waitForManualResolution(page, 5 * 60 * 1000)
