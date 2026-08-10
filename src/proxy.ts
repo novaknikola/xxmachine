@@ -28,6 +28,9 @@ const PUBLIC_API_PREFIXES = [
   // the door with a 401 and the bot has never worked — including the
   // approve/reject buttons on scheduled posts.
   '/api/telegram/webhook',
+  // Same class of bug, same fix — the pose-recreate bot's own webhook, secured
+  // the same way (?secret=CRON_SECRET checked inside the route).
+  '/api/telegram-recreate/webhook',
 ]
 
 export function proxy(req: NextRequest) {

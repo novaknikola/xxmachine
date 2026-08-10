@@ -75,17 +75,11 @@ async function pollAndDeliver(jobId: string, chatId: number, characterName: stri
 }
 
 export async function POST(req: NextRequest) {
-  console.error('[telegram-recreate/webhook] POST handler entered, url=' + req.url)
   if (!CRON_SECRET) {
     console.error('[telegram-recreate/webhook] CRON_SECRET is not set — refusing to run')
     return NextResponse.json({ error: 'CRON_SECRET is not configured' }, { status: 503 })
   }
-  const got = req.nextUrl.searchParams.get('secret')
-  if (got !== CRON_SECRET) {
-    console.error(
-      `[telegram-recreate/webhook] secret mismatch — got len=${got?.length ?? 0} prefix=${got?.slice(0, 6)} ` +
-      `expected len=${CRON_SECRET.length} prefix=${CRON_SECRET.slice(0, 6)} rawUrl=${req.nextUrl.pathname}${req.nextUrl.search}`,
-    )
+  if (req.nextUrl.searchParams.get('secret') !== CRON_SECRET) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
