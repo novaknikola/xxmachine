@@ -5,6 +5,7 @@ import { runDueProfileScans } from '@/lib/monitor/process-item'
 import { runDailyAutoSchedule } from '@/lib/instagram/auto-schedule'
 import { processDriveExports } from '@/lib/drive-archive/process'
 import { internalBaseUrl } from '@/lib/internal-url'
+import { syncPoseLibraryFromPinterest } from '@/lib/pose-recreate-sync'
 
 const CRON_SECRET = process.env.CRON_SECRET
 const QUEUE_CONCURRENCY = 2
@@ -69,6 +70,15 @@ export async function GET(req: NextRequest) {
     autoSchedule = await runDailyAutoSchedule()
   } catch (err) {
     console.error('[cron/tick] auto-schedule error:', err)
+  }
+
+  // Pose-recreate bot: boards titled "[format] ..." auto re-sync (throttled
+  // internally to every 30min per board) and any new pins flow straight into
+  // pose_library — no manual import step.
+  try {
+    await syncPoseLibraryFromPinterest()
+  } catch (err) {
+    console.error('[cron/tick] pose-recreate Pinterest sync error:', err)
   }
 
   // Expire subscriptions that have passed their expiry date
