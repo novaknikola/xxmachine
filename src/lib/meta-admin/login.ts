@@ -1,6 +1,4 @@
 import type { Page } from 'playwright-core'
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { authenticator } = require('otplib')
 import { debugScreenshot } from './browser'
 
 export interface MetaAdminCreds {
@@ -10,12 +8,27 @@ export interface MetaAdminCreds {
 }
 
 /**
- * Logs into developers.facebook.com. Selectors here are best-effort from
- * Facebook's long-stable classic login form — this has NOT been verified
- * against a live session yet, so it takes a screenshot after every step and
- * is written to fail loudly with the screenshot path rather than silently
- * clicking the wrong thing. Expect to iterate on selectors after the first
- * real run.
+ * Facebook's login challenges (captcha, 2FA, "confirm it's you") are too
+ * varied to reliably auto-solve, and captcha specifically must not be
+ * auto-solved at all. Instead of guessing selectors for whatever appears,
+ * this just waits — a human watches the same Xvfb display over VNC and
+ * clicks/types through it live, then this notices the URL moved on.
+ */
+async function waitForManualResolution(page: Page, timeoutMs: number): Promise<boolean> {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    await page.waitForTimeout(3000)
+    const url = page.url()
+    if (!url.includes('login.php') && !url.includes('checkpoint')) return true
+  }
+  return false
+}
+
+/**
+ * Logs into developers.facebook.com via facebook.com/login.php. The email/
+ * password fill and login-button click are automated and verified working;
+ * anything past that (captcha, 2FA, "confirm it's you") is handed off to a
+ * human over VNC rather than guessed at — see waitForManualResolution above.
  */
 export async function loginToMeta(page: Page, creds: MetaAdminCreds): Promise<void> {
   // developers.facebook.com's own landing page is public — it has no email
@@ -45,40 +58,14 @@ export async function loginToMeta(page: Page, creds: MetaAdminCreds): Promise<vo
   }
 
   const url = page.url()
-  if (url.includes('checkpoint') || url.includes('two_step') || url.includes('two_factor')) {
-    if (!creds.totpSecret) {
-      throw new Error('2FA checkpoint reached but no TOTP secret provided — see screenshot 04-after-submit')
+  if (url.includes('login.php') || url.includes('checkpoint')) {
+    console.log('[meta-admin-login] Challenge screen reached (captcha/2FA/verification) — connect via VNC and solve it live. Waiting up to 5 minutes...')
+    const resolved = await waitForManualResolution(page, 5 * 60 * 1000)
+    if (!resolved) {
+      await debugScreenshot(page, '05-still-blocked-after-wait')
+      throw new Error('Still on a login/checkpoint page after 5 minutes — see screenshot 05-still-blocked-after-wait')
     }
-    const code = authenticator.generate(creds.totpSecret)
-    const codeInput = await page.waitForSelector(
-      'input[name="approvals_code"], input[aria-label*="code" i], input[autocomplete="one-time-code"]',
-      { timeout: 15000 },
-    ).catch(() => null)
-    if (!codeInput) {
-      await debugScreenshot(page, '05-no-2fa-input-found')
-      throw new Error('Reached a checkpoint but could not find the 2FA code input — see screenshot 05-no-2fa-input-found')
-    }
-    await codeInput.fill(code)
-    await debugScreenshot(page, '06-filled-2fa')
-    await page.click(
-      'button[id="checkpointSubmitButton"], button:has-text("Continue"), div[aria-label="Continue"]',
-    )
-    await page.waitForTimeout(4000)
-    await debugScreenshot(page, '07-after-2fa-submit')
-
-    // "Save browser" / "trust this device" interstitial — try to dismiss
-    // either way so future runs need 2FA less often.
-    const saveBrowserBtn = await page.$('button:has-text("Continue"), div[aria-label="Continue"]')
-    if (saveBrowserBtn) {
-      await saveBrowserBtn.click()
-      await page.waitForTimeout(2000)
-      await debugScreenshot(page, '08-after-save-browser')
-    }
-  }
-
-  const postLoginUrl = page.url()
-  if (postLoginUrl.includes('login.php') || postLoginUrl.includes('checkpoint')) {
-    throw new Error(`Login did not complete — still on ${postLoginUrl}. See the last screenshot.`)
+    await debugScreenshot(page, '06-after-manual-resolution')
   }
 
   // developers.facebook.com never redirects to a login URL on its own (it's
