@@ -8,8 +8,10 @@
  *
  * --board matches pinterest_boards.title case-insensitively (exact match).
  * FORMAT is one of: posts, stories, carousels, fanvue_sfw, fanvue_nsfw, reels.
- * Skips pins whose image_url_hd is already in pose_library for this user, so
- * re-running after adding more pins to the same board only imports the new ones.
+ * Skips pins already in pose_library for this user UNDER THE SAME FORMAT, so
+ * the same board can be imported again with a different --format to add
+ * those poses to a second pool (a photo can suit both Post and Carousel),
+ * while re-running with the same format only picks up newly-added pins.
  */
 import { resolve } from 'node:path'
 import { config as loadEnv } from 'dotenv'
@@ -67,8 +69,8 @@ async function main() {
   let skipped = 0
   for (const pin of pins) {
     const existing = await one<{ id: string }>(
-      `SELECT id FROM pose_library WHERE user_id = $1 AND image_url = $2`,
-      [user.id, pin.image_url_hd],
+      `SELECT id FROM pose_library WHERE user_id = $1 AND image_url = $2 AND content_format = $3`,
+      [user.id, pin.image_url_hd, format],
     )
     if (existing) {
       skipped++
