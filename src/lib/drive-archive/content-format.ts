@@ -47,5 +47,6 @@ export function normalizeDriveStage(raw: unknown): DriveArchiveStage {
 /** Suggested aspect ratio when the user picks a format. */
 export function suggestedDimensionForFormat(format: ContentFormat): string {
   if (format === 'carousels') return '4:5'
+  if (format === 'posts') return '3:4'
   return '9:16'
 }
