@@ -63,6 +63,17 @@ async function waitForManualResolution(page: Page, timeoutMs: number): Promise<b
  * human over VNC rather than guessed at — see waitForManualResolution above.
  */
 export async function loginToMeta(page: Page, creds: MetaAdminCreds): Promise<void> {
+  // Check first whether the persistent profile is already authenticated —
+  // e.g. a human logged in directly via VNC, or a previous run's session is
+  // still valid. Skipping straight to login.php unconditionally used to
+  // resubmit the login form even when already logged in, which risked
+  // tripping a fresh captcha/verification cycle for no reason.
+  await page.goto('https://developers.facebook.com/', { waitUntil: 'networkidle', timeout: 30000 })
+  if (!(await page.$('a:has-text("Login")'))) {
+    await debugScreenshot(page, '00-already-logged-in')
+    return
+  }
+
   // developers.facebook.com's own landing page is public — it has no email
   // field and doesn't redirect to /login even when logged out, so its
   // presence/absence can't tell us the login state. Go straight to
