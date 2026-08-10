@@ -1,16 +1,22 @@
 /**
  * Prompt builder for the pose-recreate bot (@contentreplicatorbot). Same
- * reference-lock mechanism Copy-Paste v2 uses on scraped reel frames
- * (renderKeyframeEditPrompt in monitor/copy-paste-spec.ts), applied to a
- * stored pose_library image instead of an analyzed video frame — there is no
- * extracted scene spec here, just a still image and a category tag.
+ * pose/environment reference-lock mechanism Copy-Paste v2 uses on scraped
+ * reel frames (renderKeyframeEditPrompt in monitor/copy-paste-spec.ts),
+ * applied to a stored pose_library image instead of an analyzed video frame.
  *
- * Reuses KEYFRAME_IDENTITY_LOCK and NEGATIVE_PROMPT_TEMPLATE by import rather
- * than copying them: NEGATIVE_PROMPT_TEMPLATE in particular carries the
- * age-safety clause ("no young girl, no teenager, no child") that must stay a
- * single source of truth, not drift into a second copy.
+ * Reuses NEGATIVE_PROMPT_TEMPLATE by import rather than copying it: it
+ * carries the age-safety clause ("no young girl, no teenager, no child")
+ * that must stay a single source of truth, not drift into a second copy.
+ *
+ * Deliberately does NOT reuse KEYFRAME_IDENTITY_LOCK — that constant tells
+ * the model to copy body/skin/anatomy 1:1 from the reference photo, which is
+ * correct for Copy-Paste (same character across every video) but produced
+ * outputs the user flagged as reproducing the real reference photo's body
+ * and intimate details too literally here. BODY_STYLE_ONLY below keeps face
+ * identity consistent but lets the model generate its own body instead of
+ * cloning the reference's.
  */
-import { KEYFRAME_IDENTITY_LOCK, NEGATIVE_PROMPT_TEMPLATE } from './monitor/copy-paste-spec'
+import { NEGATIVE_PROMPT_TEMPLATE } from './monitor/copy-paste-spec'
 
 export interface PoseRecreateOpts {
   /** Free-text tag on the pose_library row, e.g. "gym", "beach selfie". */
@@ -46,12 +52,18 @@ const REIMAGINE_ENVIRONMENT =
   'do not copy its specific location, decor or background details. Keep only the general mood implied ' +
   'by the scene category, if one is given.'
 
+const BODY_STYLE_ONLY =
+  'Take facial identity and likeness from image 2 — keep the face recognizable and consistent with image 2. ' +
+  'Do NOT copy image 2\'s exact body proportions, skin texture, skin markings, or anatomical/intimate details ' +
+  '1:1 — generate your own natural body, consistent only with a similar general body type, rather than ' +
+  "reproducing the specific real body shown in image 2."
+
 export function renderPoseRecreatePrompt(opts: PoseRecreateOpts): string {
   const bits = [
     'Image 1 is the pose/scene reference, image 2 (and any further images) is the identity reference.',
     'Keep the exact pose from image 1 — body position, limb placement, weight distribution and camera framing/angle.',
     "Replace the main subject's face and body identity with the person from image 2.",
-    `Body and skin come from image 2, not image 1: ${KEYFRAME_IDENTITY_LOCK}.`,
+    BODY_STYLE_ONLY,
     PRESERVE_MOTION_CUE,
     REIMAGINE_ENVIRONMENT,
     opts.category && `Scene category: ${opts.category}.`,
