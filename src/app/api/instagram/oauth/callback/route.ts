@@ -44,6 +44,10 @@ export async function GET(req: NextRequest) {
       throw new Error(tokenData.error_message ?? tokenData.error?.message ?? 'Token exchange failed')
     }
     const shortLivedToken: string = tokenPayload.access_token
+    console.log(
+      '[instagram/oauth/callback] Step A success, non-token fields:',
+      JSON.stringify({ ...tokenPayload, access_token: '<redacted>' })
+    )
 
     // Step B: Exchange for long-lived token (60 days). GET per Meta's docs — confirmed
     // this endpoint responds correctly (proper OAuthException) to GET/POST alike when
