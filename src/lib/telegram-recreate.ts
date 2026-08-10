@@ -72,7 +72,39 @@ export async function answerCallbackQuery(callbackQueryId: string, text?: string
   return call('answerCallbackQuery', { callback_query_id: callbackQueryId, text })
 }
 
-/** Short codes kept under Telegram's 64-byte callback_data limit alongside a UUID. */
+/**
+ * Fetch a photo the user sent to THIS bot. Telegram doesn't hand out the file
+ * itself with the message — file_id has to be exchanged for a path via
+ * getFile, and that download link expires in ~1h, so the bytes are fetched
+ * now and re-hosted. Mirrors lib/telegram.ts's downloadTelegramFile, kept as
+ * its own copy here because it's keyed to BOT_TOKEN for this bot specifically.
+ */
+export async function downloadTelegramFile(fileId: string): Promise<{
+  buffer: ArrayBuffer
+  contentType: string
+  extension: string
+}> {
+  const file = await call('getFile', { file_id: fileId }) as { file_path?: string }
+  if (!file?.file_path) throw new Error('Telegram getFile returned no path')
+
+  const res = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`)
+  if (!res.ok) throw new Error(`Telegram file download failed (${res.status})`)
+
+  const extension = file.file_path.split('.').pop()?.toLowerCase() ?? 'jpg'
+  return {
+    buffer: await res.arrayBuffer(),
+    contentType: res.headers.get('content-type') ?? 'image/jpeg',
+    extension: /^(jpe?g|png|webp)$/.test(extension) ? extension : 'jpg',
+  }
+}
+
+/**
+ * Short codes kept under Telegram's 64-byte callback_data limit. 'reels' is
+ * deliberately not offered here yet — this pipeline only produces a still
+ * image (Seedream Edit), and a Reel button that silently hands back a photo
+ * would be misleading. content_format still accepts 'reels' in pose_library
+ * so import can start now; the generation step catches up later.
+ */
 export const FORMAT_CODES = {
   p: 'posts', s: 'stories', c: 'carousels', fs: 'fanvue_sfw', fn: 'fanvue_nsfw',
 } as const
@@ -90,26 +122,5 @@ export function recreateMenuKeyboard() {
       [{ text: FORMAT_LABELS.c, callback_data: 'rc:fmt:c' }],
       [{ text: FORMAT_LABELS.fs, callback_data: 'rc:fmt:fs' }, { text: FORMAT_LABELS.fn, callback_data: 'rc:fmt:fn' }],
     ],
-  }
-}
-
-export function characterPickerKeyboard(
-  fmt: FormatCode,
-  characters: { id: string; name: string }[],
-) {
-  return {
-    inline_keyboard: [
-      ...characters.map(c => [{ text: `👤 ${c.name}`, callback_data: `rc:char:${fmt}:${c.id}` }]),
-      [{ text: '✖️ Cancel', callback_data: 'rc:cancel' }],
-    ],
-  }
-}
-
-export function confirmKeyboard(fmt: FormatCode, characterId: string) {
-  return {
-    inline_keyboard: [[
-      { text: '▶️ Generate', callback_data: `rc:go:${fmt}:${characterId}` },
-      { text: '✖️ Cancel', callback_data: 'rc:cancel' },
-    ]],
   }
 }

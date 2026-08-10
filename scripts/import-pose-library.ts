@@ -1,7 +1,11 @@
 /**
  * Bulk-import pose reference images into pose_library.
  *
- *   npx tsx scripts/import-pose-library.ts <folder> [--category NAME] [--nsfw] [--user EMAIL]
+ *   npx tsx scripts/import-pose-library.ts <folder> --format FORMAT [--category NAME] [--nsfw] [--user EMAIL]
+ *
+ * FORMAT is one of: posts, stories, carousels, fanvue_sfw, fanvue_nsfw, reels
+ * (reels accepted for storage even though /recreate doesn't generate video yet).
+ * fanvue_nsfw implies --nsfw automatically.
  *
  * Every image file directly inside <folder> becomes one pose_library row.
  * --user defaults to the only account this project has used so far
@@ -13,24 +17,31 @@ import { config as loadEnv } from 'dotenv'
 loadEnv({ path: resolve(process.cwd(), '.env.local') })
 
 const IMAGE_EXT = /\.(jpe?g|png|webp)$/i
+const VALID_FORMATS = ['posts', 'stories', 'carousels', 'fanvue_sfw', 'fanvue_nsfw', 'reels']
 
 function parseArgs(argv: string[]) {
   const folder = argv[0]
+  let format: string | null = null
   let category: string | null = null
   let nsfw = false
   let userEmail = 'novakovicbbrs@gmail.com'
   for (let i = 1; i < argv.length; i++) {
-    if (argv[i] === '--category') category = argv[++i] ?? null
+    if (argv[i] === '--format') format = argv[++i] ?? null
+    else if (argv[i] === '--category') category = argv[++i] ?? null
     else if (argv[i] === '--nsfw') nsfw = true
     else if (argv[i] === '--user') userEmail = argv[++i] ?? userEmail
   }
-  return { folder, category, nsfw, userEmail }
+  if (format === 'fanvue_nsfw') nsfw = true
+  return { folder, format, category, nsfw, userEmail }
 }
 
 async function main() {
-  const { folder, category, nsfw, userEmail } = parseArgs(process.argv.slice(2))
-  if (!folder) {
-    console.error('usage: npx tsx scripts/import-pose-library.ts <folder> [--category NAME] [--nsfw] [--user EMAIL]')
+  const { folder, format, category, nsfw, userEmail } = parseArgs(process.argv.slice(2))
+  if (!folder || !format || !VALID_FORMATS.includes(format)) {
+    console.error(
+      'usage: npx tsx scripts/import-pose-library.ts <folder> --format FORMAT [--category NAME] [--nsfw] [--user EMAIL]\n' +
+      `FORMAT must be one of: ${VALID_FORMATS.join(', ')}`,
+    )
     process.exit(1)
   }
 
@@ -43,7 +54,7 @@ async function main() {
   const files = readdirSync(resolve(folder)).filter(f => IMAGE_EXT.test(f))
   if (!files.length) throw new Error(`No image files directly in ${folder}`)
 
-  console.log(`Importing ${files.length} pose(s) for user ${userEmail} (nsfw=${nsfw}, category=${category ?? 'none'})…`)
+  console.log(`Importing ${files.length} pose(s) for user ${userEmail} (format=${format}, nsfw=${nsfw}, category=${category ?? 'none'})…`)
 
   let ok = 0
   for (const file of files) {
@@ -55,8 +66,8 @@ async function main() {
       const url = await uploadBuffer(buf, path, contentType)
 
       await query(
-        `INSERT INTO pose_library (user_id, image_url, category, nsfw) VALUES ($1, $2, $3, $4)`,
-        [user.id, url, category, nsfw],
+        `INSERT INTO pose_library (user_id, image_url, category, nsfw, content_format) VALUES ($1, $2, $3, $4, $5)`,
+        [user.id, url, category, nsfw, format],
       )
       ok++
       console.log(`  ✓ ${file}`)
