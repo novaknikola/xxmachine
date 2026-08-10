@@ -269,7 +269,7 @@ export async function POST(req: NextRequest) {
           `INSERT INTO telegram_recreate_pending (chat_id, format)
            VALUES ($1, $2)
            ON CONFLICT (chat_id) DO UPDATE SET format = $2, created_at = now()`,
-          [chatId, FORMAT_CODES[fmt]],
+          [chatId, fmt],
         )
         if (messageId) {
           await editMessageText(chatId, messageId, `${FORMAT_LABELS[fmt]}\n📸 Send a reference photo of your character now.`)
