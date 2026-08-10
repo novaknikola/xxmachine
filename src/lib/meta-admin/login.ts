@@ -8,20 +8,34 @@ export interface MetaAdminCreds {
 }
 
 /**
+ * Content-based, not URL-based: a live run hit a reCAPTCHA whose URL
+ * contained neither "login.php" nor "checkpoint", so a URL-substring check
+ * silently skipped straight past it. Checking for the actual blocking
+ * elements (email field still present, or a captcha) is what the URL
+ * pattern was only ever a proxy for.
+ */
+async function isBlocked(page: Page): Promise<boolean> {
+  const emailField = await page.$('input[name="email"], input#email')
+  if (emailField) return true
+  const captcha = await page.$('iframe[title*="recaptcha" i], text=/I.?m not a robot/i')
+  if (captcha) return true
+  return false
+}
+
+/**
  * Facebook's login challenges (captcha, 2FA, "confirm it's you") are too
  * varied to reliably auto-solve, and captcha specifically must not be
  * auto-solved at all. Instead of guessing selectors for whatever appears,
  * this just waits — a human watches the same Xvfb display over VNC and
- * clicks/types through it live, then this notices the URL moved on.
+ * clicks/types through it live, then this notices the block clear.
  */
 async function waitForManualResolution(page: Page, timeoutMs: number): Promise<boolean> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
+    if (!(await isBlocked(page))) return true
     await page.waitForTimeout(3000)
-    const url = page.url()
-    if (!url.includes('login.php') && !url.includes('checkpoint')) return true
   }
-  return false
+  return !(await isBlocked(page))
 }
 
 /**
@@ -57,13 +71,12 @@ export async function loginToMeta(page: Page, creds: MetaAdminCreds): Promise<vo
     await debugScreenshot(page, '04-after-submit')
   }
 
-  const url = page.url()
-  if (url.includes('login.php') || url.includes('checkpoint')) {
+  if (await isBlocked(page)) {
     console.log('[meta-admin-login] Challenge screen reached (captcha/2FA/verification) — connect via VNC and solve it live. Waiting up to 5 minutes...')
     const resolved = await waitForManualResolution(page, 5 * 60 * 1000)
     if (!resolved) {
       await debugScreenshot(page, '05-still-blocked-after-wait')
-      throw new Error('Still on a login/checkpoint page after 5 minutes — see screenshot 05-still-blocked-after-wait')
+      throw new Error('Still blocked after 5 minutes — see screenshot 05-still-blocked-after-wait')
     }
     await debugScreenshot(page, '06-after-manual-resolution')
   }
