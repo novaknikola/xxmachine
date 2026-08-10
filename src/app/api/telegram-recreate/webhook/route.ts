@@ -3,7 +3,7 @@ import { one, query, rows } from '@/lib/db'
 import { internalBaseUrl } from '@/lib/internal-url'
 import {
   sendText, sendPhoto, answerCallbackQuery, editMessageReplyMarkup, editMessageText,
-  downloadTelegramFile, recreateMenuKeyboard,
+  downloadTelegramFile, recreateMenuKeyboard, countKeyboard, promptChoiceKeyboard,
   FORMAT_CODES, FORMAT_LABELS, type FormatCode,
 } from '@/lib/telegram-recreate'
 import { renderPoseRecreatePrompt } from '@/lib/pose-recreate'
@@ -17,12 +17,16 @@ import type { CopyPromptsJobInput } from '@/app/api/queue/submit/route'
  * column (users.telegram_recreate_chat_id) — the existing Copy-Paste webhook
  * (api/telegram/webhook) is never imported or modified by this file.
  *
- * Same UX principle as Copy-Paste v2 ("IGreplicator"): you send an ad-hoc
- * reference photo, not pick a saved character — see
+ * Same UX principle as Copy-Paste v2 ("IGreplicator"): ad-hoc reference photo
+ * + bulk count + optional extra prompt — see
  * [[project-xxmachine-copy-paste-v2]]. Submits into the EXISTING
  * copy_prompts_generate job type unchanged (item 1 image is the scene/pose
  * reference, the job-level referenceImageUrls are the identity) — no new job
  * type, no edit to queue/process/[id]/route.ts.
+ *
+ * Flow: /recreate -> pick format -> send photo -> pick count -> skip/add
+ * prompt -> generate. telegram_recreate_pending carries state between these
+ * steps (chat_id keyed) since each is a separate Telegram update.
  */
 const CRON_SECRET = process.env.CRON_SECRET
 
@@ -40,6 +44,20 @@ async function findUserId(chatId: number): Promise<string | null> {
     [chatId],
   )
   return row?.id ?? null
+}
+
+interface PendingRow {
+  format: string
+  photo_url: string | null
+  count: number | null
+  awaiting_prompt: boolean
+}
+
+async function getPending(chatId: number): Promise<PendingRow | null> {
+  return one<PendingRow>(
+    `SELECT format, photo_url, count, awaiting_prompt FROM telegram_recreate_pending WHERE chat_id = $1`,
+    [chatId],
+  )
 }
 
 async function clearPending(chatId: number): Promise<void> {
@@ -81,17 +99,18 @@ async function pollAndDeliver(jobId: string, chatId: number, label: string): Pro
   await sendText(chatId, '⏳ Still running after a few minutes — it will land here whenever it finishes.')
 }
 
-/** Runs after a reference photo lands for a chat with a pending format choice. */
+/** Runs once format + photo + count (+ optional extra prompt) are all known. */
 async function generateFromReference(opts: {
   userId: string
   chatId: number
   fmt: FormatCode
   referenceImageUrl: string
+  wantCount: number
+  extra: string | null
 }): Promise<void> {
-  const { userId, chatId, fmt, referenceImageUrl } = opts
+  const { userId, chatId, fmt, referenceImageUrl, wantCount, extra } = opts
   const contentFormat = FORMAT_CODES[fmt]
   const nsfw = fmt === 'fn'
-  const wantCount = fmt === 'c' ? 4 : 1
 
   const poses = await rows<{ id: string; image_url: string; category: string | null }>(
     `SELECT id, image_url, category FROM pose_library
@@ -105,12 +124,13 @@ async function generateFromReference(opts: {
   }
 
   const label = `adhoc-${new Date().toISOString().slice(0, 10)}-${Math.random().toString(36).slice(2, 6)}`
-  await sendText(chatId, `🎨 Generating ${poses.length} image${poses.length === 1 ? '' : 's'}…`)
+  const note = poses.length < wantCount ? ` (only ${poses.length} pose${poses.length === 1 ? '' : 's'} available)` : ''
+  await sendText(chatId, `🎨 Generating ${poses.length} image${poses.length === 1 ? '' : 's'}${note}…`)
 
   const items: CopyPromptsJobInput['items'] = poses.map(p => ({
     promptId: p.id,
     referenceImageUrls: [p.image_url],
-    prompt: renderPoseRecreatePrompt({ category: p.category, nsfw }),
+    prompt: renderPoseRecreatePrompt({ category: p.category, nsfw, extra }),
   }))
 
   const input: CopyPromptsJobInput = {
@@ -215,26 +235,47 @@ export async function POST(req: NextRequest) {
       const userId = await findUserId(chatId)
       if (!userId) return NextResponse.json({ ok: true })
 
-      const pending = await one<{ format: string }>(
-        `SELECT format FROM telegram_recreate_pending WHERE chat_id = $1`,
-        [chatId],
-      )
+      const pending = await getPending(chatId)
       if (!pending) {
         await sendText(chatId, 'Send /recreate first, pick a format, then send the photo.')
         return NextResponse.json({ ok: true })
       }
-      const fmt = pending.format as FormatCode
-      await clearPending(chatId)
 
       try {
         const largest = message.photo[message.photo.length - 1]
         const { buffer, contentType, extension } = await downloadTelegramFile(largest.file_id)
         const path = `pose-recreate-refs/${userId}/${Date.now()}.${extension}`
         const referenceImageUrl = await uploadBuffer(buffer, path, contentType)
-        await generateFromReference({ userId, chatId, fmt, referenceImageUrl })
+        await query(
+          `UPDATE telegram_recreate_pending SET photo_url = $1 WHERE chat_id = $2`,
+          [referenceImageUrl, chatId],
+        )
+        await sendText(chatId, 'How many to generate?', countKeyboard())
       } catch (err) {
         console.error('[telegram-recreate/webhook] reference upload failed:', err)
         await sendText(chatId, '❌ Could not process that photo — try again.')
+      }
+      return NextResponse.json({ ok: true })
+    }
+
+    // ── plain text reply — only meaningful while awaiting an extra prompt ──
+    if (message?.text && !message.text.startsWith('/')) {
+      const chatId = message.chat?.id as number | undefined
+      if (!chatId) return NextResponse.json({ ok: true })
+      const pending = await getPending(chatId)
+      if (pending?.awaiting_prompt && pending.photo_url && pending.count) {
+        const fmt = pending.format as FormatCode
+        const photoUrl = pending.photo_url
+        const wantCount = pending.count
+        await clearPending(chatId)
+        await generateFromReference({
+          userId: (await findUserId(chatId))!,
+          chatId,
+          fmt,
+          referenceImageUrl: photoUrl,
+          wantCount,
+          extra: message.text as string,
+        })
       }
       return NextResponse.json({ ok: true })
     }
@@ -268,13 +309,55 @@ export async function POST(req: NextRequest) {
         await query(
           `INSERT INTO telegram_recreate_pending (chat_id, format)
            VALUES ($1, $2)
-           ON CONFLICT (chat_id) DO UPDATE SET format = $2, created_at = now()`,
+           ON CONFLICT (chat_id) DO UPDATE SET format = $2, photo_url = NULL, count = NULL, awaiting_prompt = false, created_at = now()`,
           [chatId, fmt],
         )
         if (messageId) {
           await editMessageText(chatId, messageId, `${FORMAT_LABELS[fmt]}\n📸 Send a reference photo of your character now.`)
           await editMessageReplyMarkup(chatId, messageId, { inline_keyboard: [[{ text: '✖️ Cancel', callback_data: 'rc:cancel' }]] })
         }
+        return NextResponse.json({ ok: true })
+      }
+
+      if (action === 'cnt') {
+        const n = parseInt(parts[2], 10)
+        const pending = await getPending(chatId)
+        if (!pending?.photo_url || !Number.isFinite(n)) {
+          await answerCallbackQuery(cb.id, 'Send /recreate again')
+          return NextResponse.json({ ok: true })
+        }
+        await query(`UPDATE telegram_recreate_pending SET count = $1 WHERE chat_id = $2`, [n, chatId])
+        await answerCallbackQuery(cb.id)
+        if (messageId) {
+          await editMessageText(chatId, messageId, `${n}×. Want to add anything to the prompt? (style, wardrobe, anything extra)`)
+          await editMessageReplyMarkup(chatId, messageId, promptChoiceKeyboard())
+        }
+        return NextResponse.json({ ok: true })
+      }
+
+      if (action === 'pskip' || action === 'padd') {
+        const pending = await getPending(chatId)
+        if (!pending?.photo_url || !pending.count) {
+          await answerCallbackQuery(cb.id, 'Send /recreate again')
+          return NextResponse.json({ ok: true })
+        }
+
+        if (action === 'padd') {
+          await query(`UPDATE telegram_recreate_pending SET awaiting_prompt = true WHERE chat_id = $1`, [chatId])
+          await answerCallbackQuery(cb.id)
+          if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
+          await sendText(chatId, '✍️ Type the extra prompt text now.')
+          return NextResponse.json({ ok: true })
+        }
+
+        // pskip
+        const fmt = pending.format as FormatCode
+        const photoUrl = pending.photo_url
+        const wantCount = pending.count
+        await clearPending(chatId)
+        await answerCallbackQuery(cb.id, 'Starting…')
+        if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
+        await generateFromReference({ userId, chatId, fmt, referenceImageUrl: photoUrl, wantCount, extra: null })
         return NextResponse.json({ ok: true })
       }
     }

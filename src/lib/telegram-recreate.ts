@@ -124,3 +124,35 @@ export function recreateMenuKeyboard() {
     ],
   }
 }
+
+/**
+ * Per-image cost — WaveSpeed's own Seedream Edit pricing ($0.045 base +
+ * $0.003/extra image at 1k), same figure Copy-Paste v2's cost-estimate.ts
+ * already uses (confirmed live against WaveSpeed's model page 2026-08-02).
+ * Two images in (pose + reference) = one "extra" image beyond the base.
+ */
+export const PER_IMAGE_COST_USD = 0.048
+
+export const COUNT_CHOICES = [1, 5, 10, 20] as const
+
+/** Asked right after the reference photo lands — how many poses to draw at once. */
+export function countKeyboard() {
+  const btn = (n: number) => ({ text: `${n} ($${(n * PER_IMAGE_COST_USD).toFixed(2)})`, callback_data: `rc:cnt:${n}` })
+  return {
+    inline_keyboard: [
+      [btn(COUNT_CHOICES[0]), btn(COUNT_CHOICES[1])],
+      [btn(COUNT_CHOICES[2]), btn(COUNT_CHOICES[3])],
+      [{ text: '✖️ Cancel', callback_data: 'rc:cancel' }],
+    ],
+  }
+}
+
+/** Asked once the count is picked — same Skip/Add text choice Copy-Paste offers per batch. */
+export function promptChoiceKeyboard() {
+  return {
+    inline_keyboard: [[
+      { text: '⏭ Skip', callback_data: 'rc:pskip' },
+      { text: '✍️ Add prompt', callback_data: 'rc:padd' },
+    ]],
+  }
+}
