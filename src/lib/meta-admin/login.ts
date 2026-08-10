@@ -17,10 +17,12 @@ export interface MetaAdminCreds {
 async function isBlocked(page: Page): Promise<boolean> {
   const emailField = await page.$('input[name="email"], input#email')
   if (emailField) return true
-  const captchaFrame = await page.$('iframe[title*="recaptcha" i]')
+  // The "I'm not a robot" text lives inside Google's cross-origin recaptcha
+  // iframe — page.getByText() only searches the main frame and never finds
+  // it there. The iframe's src (not title) is what's reliably checkable
+  // from outside it.
+  const captchaFrame = await page.$('iframe[src*="recaptcha"]')
   if (captchaFrame) return true
-  const captchaText = await page.getByText(/I.?m not a robot/i).count()
-  if (captchaText > 0) return true
   return false
 }
 
