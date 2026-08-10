@@ -28,8 +28,15 @@ async function isBlocked(page: Page): Promise<boolean> {
   if (emailField) return true
   const hasCaptchaFrame = page.frames().some(f => f.url().includes('recaptcha'))
   if (hasCaptchaFrame) return true
-  const confirmText = await page.getByText(/confirm it.?s you|Verify with Google/i).count().catch(() => 0)
-  if (confirmText > 0) return true
+  // The "confirm it's you via Google" prompt reappeared on the next run even
+  // after this exact text check was added — a screenshot at that moment
+  // proved it was still showing, which means (same lesson as the captcha)
+  // it's rendered inside an iframe too. page.getByText() only searches the
+  // main frame, so check every frame's own body text instead.
+  for (const frame of page.frames()) {
+    const text = await frame.evaluate(() => document.body?.innerText ?? '').catch(() => '')
+    if (/confirm it.?s you|verify with google/i.test(text)) return true
+  }
   return false
 }
 
