@@ -17,8 +17,10 @@ export interface MetaAdminCreds {
 async function isBlocked(page: Page): Promise<boolean> {
   const emailField = await page.$('input[name="email"], input#email')
   if (emailField) return true
-  const captcha = await page.$('iframe[title*="recaptcha" i], text=/I.?m not a robot/i')
-  if (captcha) return true
+  const captchaFrame = await page.$('iframe[title*="recaptcha" i]')
+  if (captchaFrame) return true
+  const captchaText = await page.getByText(/I.?m not a robot/i).count()
+  if (captchaText > 0) return true
   return false
 }
 
