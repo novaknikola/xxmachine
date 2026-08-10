@@ -57,6 +57,10 @@ next-env.d.ts
 tmp-*.mjs
 tmp-*.js
 
+# Local source images for import-pose-library.ts — never committed, especially
+# once nsfw/ has anything in it.
+/pose-import
+
 # Scraped prompt corpora (~50 MB) — source data for the DB importers, not
 # something the app reads at runtime.
 /prompts

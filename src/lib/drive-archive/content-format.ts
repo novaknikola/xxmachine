@@ -4,14 +4,18 @@
  * AI model is encoded in the filename, not a path segment.
  */
 
-export type ContentFormat = 'stories' | 'carousels' | 'reels'
+// 'posts' / 'fanvue_sfw' / 'fanvue_nsfw' added for the pose-recreate bot —
+// NOT added to CONTENT_FORMATS below, so the existing bulk-generate dashboard
+// picker is unaffected. Drive routing only; the generation call itself never
+// looks at this value (see [[project-xxmachine-copy-paste-v2]] discussion).
+export type ContentFormat = 'stories' | 'carousels' | 'reels' | 'posts' | 'fanvue_sfw' | 'fanvue_nsfw'
 
 export type DriveArchiveStage = 'ready' | 'raw'
 
 /** Legacy kinds still accepted from older queued exports / discovery. */
 export type DriveArchiveKind = ContentFormat | 'images' | 'videos'
 
-export const CONTENT_FORMATS: { id: ContentFormat; label: string; hint: string }[] = [
+export const CONTENT_FORMATS: { id: 'stories' | 'carousels' | 'reels'; label: string; hint: string }[] = [
   { id: 'stories', label: 'Story', hint: '9:16 stills for IG/TikTok stories' },
   { id: 'carousels', label: 'Carousel', hint: 'Multi-image posts' },
   { id: 'reels', label: 'Video / Reel', hint: 'Keyframe or clip destined for reels' },
@@ -22,6 +26,9 @@ export function driveFormatFolderName(kind: DriveArchiveKind | string): string {
   const s = String(kind ?? '').trim().toLowerCase()
   if (s === 'carousel' || s === 'carousels') return 'carousel'
   if (s === 'video' || s === 'reel' || s === 'reels' || s === 'videos') return 'video'
+  if (s === 'post' || s === 'posts') return 'Post'
+  if (s === 'fanvue_sfw') return 'Fanvue SFW'
+  if (s === 'fanvue_nsfw') return 'Fanvue NSFW'
   return 'stories'
 }
 

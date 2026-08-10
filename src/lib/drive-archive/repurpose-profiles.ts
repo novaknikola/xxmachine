@@ -1,6 +1,14 @@
 import type { ContentFormat } from './content-format'
 
 /**
+ * Video-repurpose dedupe/distinct profiles only ever covered the original
+ * three publish destinations — 'posts' / 'fanvue_sfw' / 'fanvue_nsfw' (added
+ * for the pose-recreate bot) have no repurpose concept, so this stays
+ * narrower than the full ContentFormat union rather than growing fake entries.
+ */
+type RepurposeFormat = 'stories' | 'carousels' | 'reels'
+
+/**
  * `dedupe` — the same shot re-posted across accounts. Changes must defeat
  * perceptual hashing while staying invisible to a viewer.
  *
@@ -38,7 +46,7 @@ export interface ImageRepurposeProfile {
 }
 
 /** Soft uniqueness — strong enough for platform re-upload, invisible to a viewer. */
-const DEDUPE: Record<ContentFormat, ImageRepurposeProfile> = {
+const DEDUPE: Record<RepurposeFormat, ImageRepurposeProfile> = {
   stories: {
     count: 1,
     cropPct: { min: 0.04, max: 0.12 },
@@ -88,7 +96,7 @@ const DEDUPE: Record<ContentFormat, ImageRepurposeProfile> = {
  * Carousels stay tamer than the rest: slides sit side by side, so a wild grade on
  * one of them breaks the set.
  */
-const DISTINCT: Record<ContentFormat, ImageRepurposeProfile> = {
+const DISTINCT: Record<RepurposeFormat, ImageRepurposeProfile> = {
   stories: {
     count: 3,
     cropPct: { min: 0.10, max: 0.28 },
@@ -141,7 +149,7 @@ const DISTINCT: Record<ContentFormat, ImageRepurposeProfile> = {
 
 export const REPURPOSE_PROFILES: Record<
   RepurposeStrength,
-  Record<ContentFormat, ImageRepurposeProfile>
+  Record<RepurposeFormat, ImageRepurposeProfile>
 > = { dedupe: DEDUPE, distinct: DISTINCT }
 
 export function profileForFormat(
@@ -149,5 +157,5 @@ export function profileForFormat(
   strength: RepurposeStrength = 'dedupe',
 ): ImageRepurposeProfile {
   const set = REPURPOSE_PROFILES[strength] ?? DEDUPE
-  return set[format] ?? set.stories
+  return set[format as RepurposeFormat] ?? set.stories
 }
