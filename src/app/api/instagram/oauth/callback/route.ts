@@ -45,13 +45,13 @@ export async function GET(req: NextRequest) {
     }
     const shortLivedToken: string = tokenPayload.access_token
 
-    // Step B: Exchange for long-lived token (60 days).
-    // Meta's docs still show this as GET, but the live API now rejects GET here
-    // with "Unsupported request - method type: get" (same shift hit the sibling
-    // refresh_access_token endpoint industry-wide) — POST is what actually works.
+    // Step B: Exchange for long-lived token (60 days). GET per Meta's docs — confirmed
+    // this endpoint responds correctly (proper OAuthException) to GET/POST alike when
+    // given a garbage token, so the "Unsupported request - method type" error our real
+    // token triggers is not a verb issue. It's the app/account's Instagram product
+    // config — see console.error below and check the Meta App Dashboard.
     const llRes = await fetch(
-      `https://graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret=${encodeURIComponent(appSecret)}&access_token=${encodeURIComponent(shortLivedToken)}`,
-      { method: 'POST' }
+      `https://graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret=${encodeURIComponent(appSecret)}&access_token=${encodeURIComponent(shortLivedToken)}`
     )
     const llData = await llRes.json()
     const llPayload = llData.data?.[0] ?? llData
