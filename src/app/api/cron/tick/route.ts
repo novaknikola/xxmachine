@@ -5,7 +5,7 @@ import { runDueProfileScans } from '@/lib/monitor/process-item'
 import { runDailyAutoSchedule } from '@/lib/instagram/auto-schedule'
 import { processDriveExports } from '@/lib/drive-archive/process'
 import { internalBaseUrl } from '@/lib/internal-url'
-import { syncPoseLibraryFromPinterest } from '@/lib/pose-recreate-sync'
+import { syncPoseLibraryFromPinterest, reapStaleAdhocJobs } from '@/lib/pose-recreate-sync'
 
 const CRON_SECRET = process.env.CRON_SECRET
 const QUEUE_CONCURRENCY = 2
@@ -79,6 +79,15 @@ export async function GET(req: NextRequest) {
     await syncPoseLibraryFromPinterest()
   } catch (err) {
     console.error('[cron/tick] pose-recreate Pinterest sync error:', err)
+  }
+
+  // Pose-recreate bot: cancel + notify its own jobs within ~12min of a stale
+  // heartbeat, well before the generic 60min sweep below (which never
+  // notifies anyone) would ever catch them.
+  try {
+    await reapStaleAdhocJobs()
+  } catch (err) {
+    console.error('[cron/tick] pose-recreate stale-job reap error:', err)
   }
 
   // Expire subscriptions that have passed their expiry date

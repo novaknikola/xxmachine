@@ -97,3 +97,60 @@ export async function syncPoseLibraryFromPinterest(): Promise<{
 
   return { boardsChecked: boards.length, boardsSynced, posesAdded }
 }
+
+/**
+ * cron/tick already has a generic 60-minute stale-heartbeat sweep for
+ * copy_prompts_generate (and other job types) — correct as a last resort,
+ * but 60 minutes is a bad user experience for someone waiting in Telegram,
+ * and crucially that sweep never notifies anyone. This runs a much shorter
+ * check (matching the in-process pollAndDeliver threshold in the webhook
+ * route) scoped only to pose-recreate's own jobs — identified by
+ * folderName starting with "adhoc-", the label generateFromReference always
+ * uses — and pushes a Telegram message either way, which covers the exact
+ * gap that caused today's incident: the submitting process (and its
+ * in-memory pollAndDeliver loop) died in a deploy, so nothing was left to
+ * notice or report it.
+ */
+const ADHOC_STALE_MS = 12 * 60 * 1000
+
+export async function reapStaleAdhocJobs(): Promise<void> {
+  // Interval is a compile-time constant, not a query param — parameterizing
+  // an INTERVAL cast is needlessly fragile (numeric-vs-text concatenation
+  // across pg driver versions) for a value that never changes at runtime.
+  const stale = await rows<{
+    id: string
+    user_id: string
+    output: { copyPromptsRows?: { images: string[] }[] } | null
+  }>(
+    `SELECT id, user_id, output FROM generation_queue
+      WHERE status = 'processing'
+        AND job_type = 'copy_prompts_generate'
+        AND input->>'folderName' LIKE 'adhoc-%'
+        AND COALESCE(NULLIF(output->>'progressAt', '')::timestamptz, started_at)
+              < now() - interval '12 minutes'`,
+  )
+
+  for (const job of stale) {
+    const cancelled = await query(
+      `UPDATE generation_queue SET status='failed', error=$1, finished_at=now() WHERE id=$2 AND status='processing'`,
+      [`Auto-cancelled — no progress for ${Math.round(ADHOC_STALE_MS / 60000)}+ minutes (worker likely died mid-run, e.g. a deploy)`, job.id],
+    )
+    if (!cancelled.rowCount) continue // pollAndDeliver's own in-process check already won this race
+
+    const user = await one<{ telegram_recreate_chat_id: number | null }>(
+      `SELECT telegram_recreate_chat_id FROM users WHERE id = $1`,
+      [job.user_id],
+    )
+    if (!user?.telegram_recreate_chat_id) continue
+
+    const { sendText, sendMediaGroup } = await import('@/lib/telegram-recreate')
+    const chatId = user.telegram_recreate_chat_id
+    const images = (job.output?.copyPromptsRows ?? []).flatMap(r => r.images ?? [])
+    if (images.length) {
+      for (let g = 0; g < images.length; g += 10) {
+        await sendMediaGroup(chatId, images.slice(g, g + 10), `⚠️ Partial result (${images.length}) before it stalled`).catch(() => {})
+      }
+    }
+    await sendText(chatId, '❌ Generation stalled with no progress — cancelled automatically. Try again.').catch(() => {})
+  }
+}
