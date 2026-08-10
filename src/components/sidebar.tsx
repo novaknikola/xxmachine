@@ -68,6 +68,7 @@ const NAV_ITEMS: NavItem[] = [
     icon: Share2,
     module: 'socials',
     children: [
+      { href: '/socials', label: 'Instagram Accounts', icon: Users },
       { href: '/discovery', label: 'Discovery', icon: Telescope },
       { href: '/discovery?tab=downloader', label: 'IG Downloader', icon: Telescope },
       { href: '/analytics', label: 'Analytics', icon: BarChart2 },
