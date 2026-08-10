@@ -19,10 +19,17 @@ export interface MetaAdminCreds {
 async function isBlocked(page: Page): Promise<boolean> {
   const url = page.url()
   if (url.includes('login.php') || url.includes('checkpoint') || url.includes('two_step_verification')) return true
+  // After the captcha, Facebook added a further "confirm it's you via your
+  // linked Google account" step — a new, distinct block each time so far,
+  // which is why this checks for a Google OAuth redirect too, not just the
+  // Facebook-side prompt for it.
+  if (url.includes('accounts.google.com')) return true
   const emailField = await page.$('input[name="email"], input#email')
   if (emailField) return true
   const hasCaptchaFrame = page.frames().some(f => f.url().includes('recaptcha'))
   if (hasCaptchaFrame) return true
+  const confirmText = await page.getByText(/confirm it.?s you|Verify with Google/i).count().catch(() => 0)
+  if (confirmText > 0) return true
   return false
 }
 
