@@ -1,0 +1,70 @@
+import fs from 'fs'
+import path from 'path'
+import { one } from '@/lib/db'
+import { getCharacterBrowserConfig, launchWithConfig } from '@/lib/browser-launcher'
+import { autoLoginInstagram, authorizeMetaOAuth } from '@/lib/ig-auto-login'
+
+const DEBUG_DIR = '/root/ig-oauth-debug'
+
+async function debugScreenshot(page: import('playwright-core').Page, accountId: string, name: string): Promise<void> {
+  fs.mkdirSync(DEBUG_DIR, { recursive: true })
+  await page.screenshot({ path: path.join(DEBUG_DIR, `${accountId}-${Date.now()}-${name}.png`), fullPage: true }).catch(() => {})
+}
+
+function buildOAuthUrl(accountId: string): string {
+  const appId = process.env.INSTAGRAM_APP_ID
+  const redirectUri = process.env.INSTAGRAM_REDIRECT_URI
+  if (!appId || !redirectUri) throw new Error('INSTAGRAM_APP_ID / INSTAGRAM_REDIRECT_URI not set')
+
+  const params = new URLSearchParams({
+    client_id: appId,
+    redirect_uri: redirectUri,
+    scope: 'instagram_business_basic,instagram_business_content_publish,instagram_business_manage_insights',
+    response_type: 'code',
+    force_reauth: 'true',
+    state: accountId,
+  })
+  return `https://www.instagram.com/oauth/authorize?${params.toString()}`
+}
+
+/**
+ * Logs into Instagram as the account (saved credentials) and clicks through
+ * the OAuth authorize screen, landing on our own callback URL which does the
+ * actual token exchange/DB write (unchanged, same route the manual "Connect
+ * API/Graph" button already uses). authorizeMetaOAuth()'s button selectors
+ * are pre-existing but were never exercised (confirmed dead code before this
+ * session's Xvfb fix) — this takes screenshots at each step so a live test
+ * run is diagnosable if they're wrong, same as the meta-admin login work.
+ */
+export async function connectAccountViaOAuth(accountId: string): Promise<{ username: string }> {
+  const acc = await one<{ ig_username: string | null; ig_password: string | null; ig_totp_secret: string | null }>(
+    `SELECT ig_username, ig_password, ig_totp_secret FROM instagram_accounts WHERE id=$1`,
+    [accountId],
+  )
+  if (!acc?.ig_username || !acc.ig_password) throw new Error('Account has no ig_username/ig_password saved')
+
+  const config = await getCharacterBrowserConfig(accountId)
+  const { context, page } = await launchWithConfig(config)
+
+  try {
+    await autoLoginInstagram(page, {
+      username: acc.ig_username,
+      password: acc.ig_password,
+      totpSecret: acc.ig_totp_secret,
+    })
+    await debugScreenshot(page, accountId, '01-ig-logged-in')
+
+    const oauthUrl = buildOAuthUrl(accountId)
+    await authorizeMetaOAuth(page, oauthUrl)
+    await debugScreenshot(page, accountId, '02-after-authorize')
+
+    // authorizeMetaOAuth navigates+clicks but doesn't wait for our callback's
+    // own redirect chain (token exchange -> back to /socials) to finish.
+    await page.waitForTimeout(5000)
+    await debugScreenshot(page, accountId, '03-final-state')
+
+    return { username: acc.ig_username }
+  } finally {
+    await context.close()
+  }
+}
