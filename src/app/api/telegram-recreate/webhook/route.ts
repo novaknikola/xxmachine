@@ -75,6 +75,7 @@ async function pollAndDeliver(jobId: string, chatId: number, characterName: stri
 }
 
 export async function POST(req: NextRequest) {
+  console.error('[telegram-recreate/webhook] POST handler entered, url=' + req.url)
   if (!CRON_SECRET) {
     console.error('[telegram-recreate/webhook] CRON_SECRET is not set — refusing to run')
     return NextResponse.json({ error: 'CRON_SECRET is not configured' }, { status: 503 })
