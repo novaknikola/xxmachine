@@ -14,20 +14,37 @@ export async function GET() {
 connected: boolean
 graph_connected: boolean
 browser_connected: boolean
+assigned_sheet_name: string | null
+published_count: number
+pending_count: number
+failed_count: number
     }>(
-      
-  `SELECT id, name, ig_username,
-          (ig_access_token IS NOT NULL OR ig_session IS NOT NULL) AS connected,
-          (ig_access_token IS NOT NULL AND ig_user_id IS NOT NULL) AS graph_connected,
-          (ig_session IS NOT NULL) AS browser_connected,
-          ig_token_expires_at AS token_expires_at,
-          proxy_url,
-          google_drive_folder_id,
-          (ig_password IS NOT NULL) AS has_password
-   FROM instagram_accounts
-   ORDER BY name`
+
+  `SELECT a.id, a.name, a.ig_username,
+          (a.ig_access_token IS NOT NULL OR a.ig_session IS NOT NULL) AS connected,
+          (a.ig_access_token IS NOT NULL AND a.ig_user_id IS NOT NULL) AS graph_connected,
+          (a.ig_session IS NOT NULL) AS browser_connected,
+          a.ig_token_expires_at AS token_expires_at,
+          a.proxy_url,
+          a.google_drive_folder_id,
+          (a.ig_password IS NOT NULL) AS has_password,
+          (SELECT m.sheet_name FROM content_source_mappings m
+           WHERE m.instagram_account_id = a.id ORDER BY m.sheet_name LIMIT 1) AS assigned_sheet_name,
+          COALESCE(q.published_count, 0) AS published_count,
+          COALESCE(q.pending_count, 0) AS pending_count,
+          COALESCE(q.failed_count, 0) AS failed_count
+   FROM instagram_accounts a
+   LEFT JOIN (
+     SELECT account_id,
+            COUNT(*) FILTER (WHERE status = 'done') AS published_count,
+            COUNT(*) FILTER (WHERE status = 'pending') AS pending_count,
+            COUNT(*) FILTER (WHERE status = 'failed') AS failed_count
+     FROM instagram_queue
+     GROUP BY account_id
+   ) q ON q.account_id = a.id
+   ORDER BY a.name`
 )
-      
+
     return NextResponse.json(accounts)
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 })
@@ -51,15 +68,18 @@ export async function POST(req: NextRequest) {
 
 export async function PATCH(req: NextRequest) {
   try {
-    const { id, name, proxyUrl, driveFolderId } = await req.json()
+    const { id, name, proxyUrl, driveFolderId, igUsername, igPassword, igTotpSecret } = await req.json()
     if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 })
     await one(
       `UPDATE instagram_accounts SET
         name = COALESCE($1, name),
         proxy_url = COALESCE($2, proxy_url),
-        google_drive_folder_id = COALESCE($3, google_drive_folder_id)
-       WHERE id=$4`,
-      [name ?? null, proxyUrl ?? null, driveFolderId ?? null, id]
+        google_drive_folder_id = COALESCE($3, google_drive_folder_id),
+        ig_username = COALESCE($4, ig_username),
+        ig_password = COALESCE($5, ig_password),
+        ig_totp_secret = COALESCE($6, ig_totp_secret)
+       WHERE id=$7`,
+      [name ?? null, proxyUrl ?? null, driveFolderId ?? null, igUsername ?? null, igPassword ?? null, igTotpSecret ?? null, id]
     )
     return NextResponse.json({ ok: true })
   } catch (err) {

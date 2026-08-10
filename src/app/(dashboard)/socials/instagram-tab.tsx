@@ -39,6 +39,8 @@ import {
   Link2,
   AlertTriangle,
   ChevronDown,
+  Pencil,
+  Save,
 } from 'lucide-react'
 
 const CSV_EXAMPLE = [
@@ -69,6 +71,10 @@ browser_connected?: boolean
   google_drive_folder_id: string | null
   token_expires_at: string | null
   has_password: boolean
+  assigned_sheet_name?: string | null
+  published_count?: number
+  pending_count?: number
+  failed_count?: number
 }
 
 interface QueueItem {
@@ -122,7 +128,6 @@ export function InstagramTab() {
   const [loadingQueue, setLoadingQueue] = useState(false)
   const [loadingDrive, setLoadingDrive] = useState(false)
   const [publishing, setPublishing] = useState<string | null>(null)
-  const [connecting, setConnecting] = useState(false)
   const [refreshingToken, setRefreshingToken] = useState(false)
   const [driveFolderInput, setDriveFolderInput] = useState('')
   const [categories, setCategories] = useState<string[]>([])
@@ -139,6 +144,10 @@ export function InstagramTab() {
   const [addForm, setAddForm] = useState({ name: '', username: '', password: '', totp: '', proxy: '' })
   const [addingAccount, setAddingAccount] = useState(false)
   const [openBrowserRunning, setOpenBrowserRunning] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editForm, setEditForm] = useState({ name: '', username: '', password: '', totp: '', proxy: '' })
+  const [savingEdit, setSavingEdit] = useState(false)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
   const [importing, setImporting] = useState(false)
   const csvRef = useRef<HTMLInputElement>(null)
 
@@ -198,67 +207,6 @@ export function InstagramTab() {
   if (!id) return
   window.location.href = `/api/instagram/oauth?accountId=${id}`
 }
-  async function connectWithInstagram() {
-    if (!accountId) return
-    const acc = accounts.find(a => a.id === accountId)
-
-    if (acc?.has_password) {
-      // Private API — no OAuth needed
-      setConnecting(true)
-      try {
-        const res = await fetch('/api/instagram/connect', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ accountId }),
-        })
-        const data = await res.json()
-        if (!res.ok) throw new Error(data.error)
-        toast.success(`Connected @${data.username}`)
-        loadAccounts()
-      } catch (e: unknown) {
-        toast.error(e instanceof Error ? e.message : 'Connect failed')
-      } finally {
-        setConnecting(false)
-      }
-      return
-    }
-
-    // No password — trigger browser connect for this single account
-    setConnecting(true)
-    toast.info('Opening Chrome browser... log in to Instagram, then close the window.', { duration: 10000 })
-    try {
-      const res = await fetch('/api/instagram/bulk-browser-connect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountIds: [accountId] }),
-      })
-      if (!res.body) throw new Error('No stream')
-      const reader = res.body.getReader()
-      const dec = new TextDecoder()
-      let buf = ''
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buf += dec.decode(value, { stream: true })
-        const events = buf.split('\n\n')
-        buf = events.pop() ?? ''
-        for (const ev of events) {
-          const line = ev.replace(/^data: /, '').trim()
-          if (!line) continue
-          try {
-            const msg = JSON.parse(line)
-            if (msg.type === 'connected') { toast.success('Connected!'); loadAccounts() }
-            else if (msg.type === 'error') toast.error(msg.message ?? 'Browser connect failed')
-          } catch {}
-        }
-      }
-    } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : 'Browser connect failed')
-    } finally {
-      setConnecting(false)
-    }
-  }
-
   async function refreshToken() {
     if (!accountId) return
     setRefreshingToken(true)
@@ -550,6 +498,56 @@ export function InstagramTab() {
     } finally { setImporting(false) }
   }
 
+  function startEdit(acc: IgAccount) {
+    setEditingId(acc.id)
+    setEditForm({ name: acc.name, username: acc.ig_username ?? '', password: '', totp: '', proxy: acc.proxy_url ?? '' })
+  }
+
+  async function saveEdit() {
+    if (!editingId) return
+    setSavingEdit(true)
+    try {
+      const res = await fetch('/api/instagram/accounts', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: editingId,
+          name: editForm.name.trim() || null,
+          igUsername: editForm.username.trim() || null,
+          igPassword: editForm.password || null,
+          igTotpSecret: editForm.totp.trim() || null,
+          proxyUrl: editForm.proxy.trim() || null,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      toast.success('Account updated')
+      setEditingId(null)
+      loadAccounts()
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Failed to update account')
+    } finally { setSavingEdit(false) }
+  }
+
+  async function deleteAccount(acc: IgAccount) {
+    if (!confirm(`Delete account "${prettyAccountName(acc.ig_username ?? acc.name)}"? This cannot be undone.`)) return
+    setDeletingId(acc.id)
+    try {
+      const res = await fetch('/api/instagram/accounts', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: acc.id }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      toast.success('Account deleted')
+      if (accountId === acc.id) setAccountId('')
+      loadAccounts()
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Failed to delete account')
+    } finally { setDeletingId(null) }
+  }
+
   const pending = queue.filter(q => q.status === 'pending')
   const done = queue.filter(q => q.status === 'done')
   const failed = queue.filter(q => q.status === 'failed')
@@ -645,17 +643,11 @@ export function InstagramTab() {
   <Link2 className="w-4 h-4 mr-2" />
   {acc?.graph_connected ? 'Reconnect API / Graph' : 'Connect API / Graph'}
 </Button>
-                    <Button
-                      variant="outline"
-                      className="w-full border-pink-500/30 text-pink-400 hover:bg-pink-500/10 hover:border-pink-500/50"
-                      onClick={connectWithInstagram}
-                      disabled={!accountId || connecting}
-                    >
-                      {connecting
-                        ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Connecting...</>
-                        : <><Link2 className="w-4 h-4 mr-2" />{acc?.connected ? 'Reconnect' : acc?.has_password ? 'Connect (Private API)' : 'Open Browser & Log In'}</>
-                      }
-                    </Button>
+                    {!acc?.graph_connected && (
+                      <p className="text-[10px] text-muted-foreground text-center">
+                        Private API / Browser login: use the Bulk Connect tab
+                      </p>
+                    )}
                     {acc?.connected && (
                       <Button
                         size="sm"
@@ -1122,47 +1114,107 @@ export function InstagramTab() {
               {accounts.map(acc => {
                 const selected = selectedIds.has(acc.id)
                 const status = bulkStatus[acc.id]
+                const isEditing = editingId === acc.id
                 return (
                   <div key={acc.id}
-                    className={`flex items-center gap-3 p-3 rounded-xl border transition-colors ${selected ? 'border-primary/50 bg-primary/5' : 'border-border bg-card'}`}>
-                    {acc.connected
-                      ? <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0" />
-                      : <input type="checkbox" checked={selected} onChange={() => toggleSelect(acc.id)}
+                    className={`p-3 rounded-xl border transition-colors ${selected ? 'border-primary/50 bg-primary/5' : 'border-border bg-card'}`}>
+                    {isEditing ? (
+                      <div className="space-y-2">
+                        <div className="grid grid-cols-2 gap-2">
+                          <Input placeholder="Display name" value={editForm.name}
+                            onChange={e => setEditForm(p => ({ ...p, name: e.target.value }))}
+                            className="h-8 text-xs" />
+                          <Input placeholder="Instagram username" value={editForm.username}
+                            onChange={e => setEditForm(p => ({ ...p, username: e.target.value }))}
+                            className="h-8 text-xs font-mono" />
+                          <Input type="password" placeholder="New password (leave blank to keep)" value={editForm.password}
+                            onChange={e => setEditForm(p => ({ ...p, password: e.target.value }))}
+                            className="h-8 text-xs" />
+                          <Input placeholder="2FA secret" value={editForm.totp}
+                            onChange={e => setEditForm(p => ({ ...p, totp: e.target.value }))}
+                            className="h-8 text-xs font-mono" />
+                          <Input placeholder="Proxy URL" value={editForm.proxy}
+                            onChange={e => setEditForm(p => ({ ...p, proxy: e.target.value }))}
+                            className="h-8 text-xs font-mono col-span-2" />
+                        </div>
+                        <div className="flex gap-2">
+                          <Button size="sm" className="h-7 text-xs flex-1" disabled={savingEdit} onClick={saveEdit}>
+                            {savingEdit ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <Save className="w-3 h-3 mr-1" />}
+                            Save
+                          </Button>
+                          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setEditingId(null)}>
+                            Cancel
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-3">
+                        <input type="checkbox" checked={selected} onChange={() => toggleSelect(acc.id)}
                           className="w-4 h-4 shrink-0 accent-pink-500" disabled={bulkRunning} />
-                    }
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <p className="text-sm font-medium">{prettyAccountName(acc.ig_username ?? acc.name)}</p>
-                        {acc.ig_username && <span className="text-xs text-pink-400">@{acc.ig_username}</span>}
-                        {acc.graph_connected && <span className="text-[10px] bg-green-500/15 text-green-400 rounded px-1">api</span>}
-{acc.browser_connected && <span className="text-[10px] bg-blue-500/15 text-blue-400 rounded px-1">browser</span>}
-                        {acc.google_drive_folder_id && <span className="text-[10px] bg-yellow-500/15 text-yellow-400 rounded px-1">drive</span>}
-                      </div>
-                      <div className="flex items-center gap-3 mt-0.5">
-                        {acc.proxy_url
-                          ? <span className="text-xs text-muted-foreground font-mono flex items-center gap-1">
-                              <Wifi className="w-2.5 h-2.5" />{acc.proxy_url.replace(/^https?:\/\/[^@]+@/, '')}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="text-sm font-medium">{prettyAccountName(acc.ig_username ?? acc.name)}</p>
+                            {acc.ig_username && <span className="text-xs text-pink-400">@{acc.ig_username}</span>}
+                            {acc.graph_connected && <span className="text-[10px] bg-green-500/15 text-green-400 rounded px-1">api</span>}
+                            {acc.browser_connected && <span className="text-[10px] bg-blue-500/15 text-blue-400 rounded px-1">browser</span>}
+                            {acc.google_drive_folder_id && <span className="text-[10px] bg-yellow-500/15 text-yellow-400 rounded px-1">drive</span>}
+                          </div>
+                          <div className="flex items-center gap-3 mt-0.5 flex-wrap">
+                            {acc.proxy_url
+                              ? <span className="text-xs text-muted-foreground font-mono flex items-center gap-1">
+                                  <Wifi className="w-2.5 h-2.5" />{acc.proxy_url.replace(/^https?:\/\/[^@]+@/, '')}
+                                </span>
+                              : <span className="text-xs text-muted-foreground flex items-center gap-1">
+                                  <WifiOff className="w-2.5 h-2.5" />No proxy
+                                </span>
+                            }
+                            <span className="text-xs text-muted-foreground">
+                              {acc.assigned_sheet_name ? `Sheet: ${acc.assigned_sheet_name}` : 'No sheet assigned'}
                             </span>
-                          : <span className="text-xs text-muted-foreground flex items-center gap-1">
-                              <WifiOff className="w-2.5 h-2.5" />No proxy
-                            </span>
-                        }
+                          </div>
+                          <div className="flex items-center gap-3 mt-1 text-[11px]">
+                            <span className="text-green-400">{acc.published_count ?? 0} published</span>
+                            <span className="text-muted-foreground">{acc.pending_count ?? 0} pending</span>
+                            {!!acc.failed_count && <span className="text-destructive">{acc.failed_count} failed</span>}
+                          </div>
+                          {status && status !== 'idle' && (
+                            <p className={`text-xs mt-0.5 flex items-center gap-1 ${status === 'error' ? 'text-destructive' : status === 'connected' ? 'text-green-400' : 'text-yellow-400'}`}>
+                              {(status === 'connecting' || status === 'login') && <Loader2 className="w-3 h-3 animate-spin" />}
+                              {status === 'connected' && <CheckCircle2 className="w-3 h-3" />}
+                              {status === 'error' && <XCircle className="w-3 h-3" />}
+                              {status === 'connecting' && 'Connecting...'}
+                              {status === 'login' && 'Logging in...'}
+                              {status === 'connected' && 'Connected'}
+                              {status === 'error' && (bulkMessages[acc.id] ?? 'Error')}
+                            </p>
+                          )}
+                        </div>
+                        <Badge variant="secondary" className={`text-xs shrink-0 ${acc.connected ? 'text-green-400' : 'text-muted-foreground'}`}>
+                          {acc.connected ? 'Connected' : 'Not connected'}
+                        </Badge>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <Button size="icon-sm" variant="ghost" className="h-7 w-7"
+                            title="Reconnect API / Graph"
+                            onClick={() => connectWithInstagramApi(acc.id)}>
+                            <Link2 className="w-3.5 h-3.5 text-green-400" />
+                          </Button>
+                          <Button size="icon-sm" variant="ghost" className="h-7 w-7"
+                            title="Edit account"
+                            onClick={() => startEdit(acc)}>
+                            <Pencil className="w-3.5 h-3.5" />
+                          </Button>
+                          <Button size="icon-sm" variant="ghost" className="h-7 w-7"
+                            title="Delete account"
+                            disabled={deletingId === acc.id}
+                            onClick={() => deleteAccount(acc)}>
+                            {deletingId === acc.id
+                              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              : <Trash2 className="w-3.5 h-3.5 text-destructive" />
+                            }
+                          </Button>
+                        </div>
                       </div>
-                      {status && status !== 'idle' && (
-                        <p className={`text-xs mt-0.5 flex items-center gap-1 ${status === 'error' ? 'text-destructive' : status === 'connected' ? 'text-green-400' : 'text-yellow-400'}`}>
-                          {(status === 'connecting' || status === 'login') && <Loader2 className="w-3 h-3 animate-spin" />}
-                          {status === 'connected' && <CheckCircle2 className="w-3 h-3" />}
-                          {status === 'error' && <XCircle className="w-3 h-3" />}
-                          {status === 'connecting' && 'Connecting...'}
-                          {status === 'login' && 'Logging in...'}
-                          {status === 'connected' && 'Connected'}
-                          {status === 'error' && (bulkMessages[acc.id] ?? 'Error')}
-                        </p>
-                      )}
-                    </div>
-                    <Badge variant="secondary" className={`text-xs shrink-0 ${acc.connected ? 'text-green-400' : 'text-muted-foreground'}`}>
-                      {acc.connected ? 'Connected' : 'Not connected'}
-                    </Badge>
+                    )}
                   </div>
                 )
               })}
