@@ -31,6 +31,22 @@ const PRESERVE_MOTION_CUE =
   'do not straighten the pose, do not settle the subject into a neutral standing position.'
 
 /**
+ * Stronger pose-lock, added after the user reported pose sometimes drifting
+ * alongside the (intentionally free) environment change. Nothing here
+ * changes the mechanism — Seedream has no structural pose constraint
+ * (no ControlNet/skeleton input), so this is prompt wording only and isn't
+ * guaranteed to fully eliminate drift, just reduce it.
+ */
+const POSE_LOCK_STRICT =
+  'The pose is a fixed skeleton traced directly from image 1: identical body position, identical joint and limb angles, ' +
+  'identical head tilt, identical hand and foot placement, identical camera framing and angle. ' +
+  'Do not reinterpret, adjust, soften or naturalize the pose in any way, even if it looks unfamiliar on the new body from image 2.'
+
+/** Placed right after REIMAGINE_ENVIRONMENT so the model cannot read "change everything" as including the pose. */
+const ENVIRONMENT_CHANGE_SCOPE =
+  'This change applies ONLY to the environment/background — it must NOT affect the pose in any way, which stays exactly as specified above.'
+
+/**
  * NSFW does not change the identity-lock mechanics — only whether the model
  * is told explicit nudity/sexual content is the intended, permitted result
  * rather than something to soften. Silent softening (an output that quietly
@@ -62,14 +78,17 @@ export function renderPoseRecreatePrompt(opts: PoseRecreateOpts): string {
   const bits = [
     'Image 1 is the pose/scene reference, image 2 (and any further images) is the identity reference.',
     'Keep the exact pose from image 1 — body position, limb placement, weight distribution and camera framing/angle.',
+    POSE_LOCK_STRICT,
     "Replace the main subject's face and body identity with the person from image 2.",
     BODY_STYLE_ONLY,
     PRESERVE_MOTION_CUE,
     REIMAGINE_ENVIRONMENT,
+    ENVIRONMENT_CHANGE_SCOPE,
     opts.category && `Scene category: ${opts.category}.`,
     opts.nsfw ? NSFW_PERMISSION : null,
     'Photorealistic, natural skin texture, no beauty filter, no AI skin smoothing.',
-    'Do not add any other people. Do not change the pose or camera angle.',
+    'Do not add any other people.',
+    'Final reminder, the single most important constraint: do not change the pose, body position, joint angles, or camera angle in any way.',
     opts.extra && opts.extra.trim(),
     `Avoid: ${NEGATIVE_PROMPT_TEMPLATE}.`,
   ].filter(Boolean)
