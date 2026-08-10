@@ -35,7 +35,11 @@ export async function loginToMeta(page: Page, creds: MetaAdminCreds): Promise<vo
     await page.fill('input[name="pass"], input#pass', creds.password)
     await debugScreenshot(page, '03-filled-login')
 
-    await page.click('button[name="login"], button[data-testid="royal_login_button"], button[type="submit"]')
+    // Facebook's login button is a custom-rendered element with no stable
+    // name/type attribute — role+accessible-name is far more resilient than
+    // guessing CSS here. The page footer also has a plain "Log in" link, so
+    // scope to role=button specifically to avoid matching that instead.
+    await page.getByRole('button', { name: 'Log in', exact: true }).click()
     await page.waitForTimeout(4000)
     await debugScreenshot(page, '04-after-submit')
   }
