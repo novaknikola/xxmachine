@@ -82,7 +82,7 @@ interface QueueItem {
   id: string
   drive_file_id: string | null
   filename: string
-  status: 'pending' | 'publishing' | 'done' | 'failed'
+  status: 'pending' | 'pending_approval' | 'publishing' | 'done' | 'failed'
   caption: string
   category: string | null
   scheduled_at: string | null
@@ -105,10 +105,11 @@ interface BulkStatus {
 
 function StatusBadge({ status }: { status: QueueItem['status'] }) {
   const map = {
-    pending:    { label: 'Scheduled', color: 'secondary' as const, icon: Clock },
-    publishing: { label: 'Publishing...', color: 'default' as const, icon: Loader2 },
-    done:       { label: 'Published', color: 'secondary' as const, icon: CheckCircle2 },
-    failed:     { label: 'Failed', color: 'destructive' as const, icon: XCircle },
+    pending:          { label: 'Scheduled', color: 'secondary' as const, icon: Clock },
+    pending_approval: { label: 'Awaiting approval', color: 'secondary' as const, icon: AlertTriangle },
+    publishing:       { label: 'Publishing...', color: 'default' as const, icon: Loader2 },
+    done:             { label: 'Published', color: 'secondary' as const, icon: CheckCircle2 },
+    failed:           { label: 'Failed', color: 'destructive' as const, icon: XCircle },
   }
   const { label, color, icon: Icon } = map[status]
   return (
