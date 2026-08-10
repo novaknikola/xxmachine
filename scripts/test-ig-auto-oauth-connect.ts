@@ -2,6 +2,9 @@
 // flow. Run manually on the VPS (needs the real app's DB, so run from the
 // deployed checkout, not locally):
 //   DISPLAY=:99 npx tsx scripts/test-ig-auto-oauth-connect.ts <accountId>
+import dotenv from 'dotenv'
+dotenv.config({ path: '.env.local' })
+
 import { connectAccountViaOAuth } from '../src/lib/instagram/auto-oauth-connect'
 
 async function main() {
