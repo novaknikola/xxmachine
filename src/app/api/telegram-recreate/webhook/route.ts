@@ -4,7 +4,7 @@ import { internalBaseUrl } from '@/lib/internal-url'
 import {
   sendText, sendPhoto, sendMediaGroup, answerCallbackQuery, editMessageReplyMarkup, editMessageText,
   downloadTelegramFile, recreateMenuKeyboard, countKeyboard, promptChoiceKeyboard,
-  FORMAT_CODES, FORMAT_LABELS, type FormatCode,
+  FORMAT_CODES, FORMAT_LABELS, CAROUSEL_VARIANT_COUNT, type FormatCode,
 } from '@/lib/telegram-recreate'
 import { renderPoseRecreatePrompt } from '@/lib/pose-recreate'
 import { suggestedDimensionForFormat, type ContentFormat } from '@/lib/drive-archive/content-format'
@@ -214,7 +214,13 @@ async function generateFromReference(opts: {
 
   const label = `adhoc-${new Date().toISOString().slice(0, 10)}-${Math.random().toString(36).slice(2, 6)}`
   const note = poses.length < wantCount ? ` (only ${poses.length} pose${poses.length === 1 ? '' : 's'} available)` : ''
-  await sendText(chatId, `🎨 Generating ${poses.length} image${poses.length === 1 ? '' : 's'}${note}…`)
+  // Carousel: each pose also earns CAROUSEL_VARIANT_COUNT extra angle/crop
+  // slides via copy_prompts_generate's own carousel.enabled mechanism (the
+  // same resolveCarouselVariantPrompts path bulk_carousel uses) — so the
+  // real slide count is higher than the pose count for this format.
+  const isCarousel = contentFormat === 'carousels'
+  const totalSlides = poses.length * (isCarousel ? 1 + CAROUSEL_VARIANT_COUNT : 1)
+  await sendText(chatId, `🎨 Generating ${totalSlides} image${totalSlides === 1 ? '' : 's'} from ${poses.length} pose${poses.length === 1 ? '' : 's'}${note}…`)
 
   const items: CopyPromptsJobInput['items'] = poses.map(p => ({
     promptId: p.id,
@@ -229,6 +235,7 @@ async function generateFromReference(opts: {
     dimension: suggestedDimensionForFormat(contentFormat),
     folderName: label,
     contentFormat,
+    ...(isCarousel ? { carousel: { enabled: true, count: CAROUSEL_VARIANT_COUNT as 1 | 2 | 3 | 4 } } : {}),
   }
 
   const row = await one<{ id: string }>(
@@ -339,7 +346,8 @@ export async function POST(req: NextRequest) {
           `UPDATE telegram_recreate_pending SET photo_url = $1 WHERE chat_id = $2`,
           [referenceImageUrl, chatId],
         )
-        await sendText(chatId, 'How many to generate?', countKeyboard())
+        const slidesPerPose = pending.format === 'c' ? 1 + CAROUSEL_VARIANT_COUNT : 1
+        await sendText(chatId, 'How many to generate?', countKeyboard(slidesPerPose))
       } catch (err) {
         console.error('[telegram-recreate/webhook] reference upload failed:', err)
         await sendText(chatId, '❌ Could not process that photo — try again.')

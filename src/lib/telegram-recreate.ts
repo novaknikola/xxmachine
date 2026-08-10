@@ -155,9 +155,25 @@ export const PER_IMAGE_COST_USD = 0.048
 
 export const COUNT_CHOICES = [1, 5, 10, 20] as const
 
-/** Asked right after the reference photo lands — how many poses to draw at once. */
-export function countKeyboard() {
-  const btn = (n: number) => ({ text: `${n} ($${(n * PER_IMAGE_COST_USD).toFixed(2)})`, callback_data: `rc:cnt:${n}` })
+/**
+ * Carousel: each drawn pose also gets this many extra variant slides (same
+ * shot, different angle/crop — Seedream Edit on the base output, the
+ * existing resolveCarouselVariantPrompts mechanism copy_prompts_generate
+ * already runs when carousel.enabled is set). Chosen over independent poses
+ * per slide per the user's explicit call — see conversation.
+ */
+export const CAROUSEL_VARIANT_COUNT = 2
+
+/**
+ * Asked right after the reference photo lands — how many poses to draw at
+ * once. slidesPerPose > 1 (carousel: each pose also gets N variant slides)
+ * multiplies the shown price so the button never understates real cost.
+ */
+export function countKeyboard(slidesPerPose = 1) {
+  const btn = (n: number) => ({
+    text: `${n} ($${(n * slidesPerPose * PER_IMAGE_COST_USD).toFixed(2)})`,
+    callback_data: `rc:cnt:${n}`,
+  })
   return {
     inline_keyboard: [
       [btn(COUNT_CHOICES[0]), btn(COUNT_CHOICES[1])],
