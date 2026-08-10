@@ -36,29 +36,38 @@ export async function GET(req: NextRequest) {
       }),
     })
     const tokenData = await tokenRes.json()
-    if (!tokenRes.ok || !tokenData.access_token) {
+    // Instagram wraps this in { data: [{ access_token, user_id, permissions }] } for
+    // Business Login apps, but returns a flat object for plain Instagram Login apps.
+    const tokenPayload = tokenData.data?.[0] ?? tokenData
+    if (!tokenRes.ok || !tokenPayload.access_token) {
+      console.error('[instagram/oauth/callback] Step A raw response:', JSON.stringify(tokenData))
       throw new Error(tokenData.error_message ?? tokenData.error?.message ?? 'Token exchange failed')
     }
-    const shortLivedToken: string = tokenData.access_token
+    const shortLivedToken: string = tokenPayload.access_token
 
     // Step B: Exchange for long-lived token (60 days)
     const llRes = await fetch(
       `https://graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret=${appSecret}&access_token=${shortLivedToken}`
     )
     const llData = await llRes.json()
-    if (!llRes.ok || !llData.access_token) {
+    const llPayload = llData.data?.[0] ?? llData
+    if (!llRes.ok || !llPayload.access_token) {
+      console.error('[instagram/oauth/callback] Step B raw response:', JSON.stringify(llData))
       throw new Error(llData.error?.message ?? 'Long-lived token exchange failed')
     }
-    const longLivedToken: string = llData.access_token
-    const expiresIn: number = llData.expires_in ?? 5184000
+    const longLivedToken: string = llPayload.access_token
+    const expiresIn: number = llPayload.expires_in ?? 5184000
     const expiresAt = new Date(Date.now() + expiresIn * 1000)
 
-    // Step C: Get user info
+    // Step C: Get user info — must be versioned; unversioned graph.instagram.com/me
+    // does not resolve on this product and returns a generic method error.
     const meRes = await fetch(
-      `https://graph.instagram.com/me?fields=id,username&access_token=${longLivedToken}`
+      `https://graph.instagram.com/v22.0/me?fields=user_id,username&access_token=${longLivedToken}`
     )
     const meData = await meRes.json()
-    if (!meRes.ok) {
+    const mePayload = meData.data?.[0] ?? meData
+    if (!meRes.ok || !mePayload.user_id) {
+      console.error('[instagram/oauth/callback] Step C raw response:', JSON.stringify(meData))
       throw new Error(meData.error?.message ?? 'Failed to fetch user info')
     }
 
@@ -67,7 +76,7 @@ export async function GET(req: NextRequest) {
       `UPDATE instagram_accounts
        SET ig_user_id=$1, ig_access_token=$2, ig_token_expires_at=$3, ig_username=COALESCE($4, ig_username)
        WHERE id=$5`,
-      [meData.id, longLivedToken, expiresAt.toISOString(), meData.username ?? null, accountId]
+      [mePayload.user_id, longLivedToken, expiresAt.toISOString(), mePayload.username ?? null, accountId]
     )
 
     return NextResponse.redirect(`${base}/socials?instagram_connected=1`)
