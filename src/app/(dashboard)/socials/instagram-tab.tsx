@@ -1,6 +1,7 @@
 'use client'
 
 import { ContentSourceMappings } from '@/components/content-source-mappings'
+import { InstagramPendingApproval } from '@/components/instagram-pending-approval'
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Button } from '@/components/ui/button'
@@ -944,6 +945,7 @@ export function InstagramTab() {
 
       {/* Right panel */}
 <div className="flex-1 overflow-y-auto p-6 space-y-6">
+  <InstagramPendingApproval />
   <ContentSourceMappings />
 
   {tab === 'queue' && (

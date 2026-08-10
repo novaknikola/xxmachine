@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { rows, one, query } from '@/lib/db'
 import { fetchAllStats } from '@/lib/stats'
 import { runDueProfileScans } from '@/lib/monitor/process-item'
+import { runDailyAutoSchedule } from '@/lib/instagram/auto-schedule'
 import { processDriveExports } from '@/lib/drive-archive/process'
 import { internalBaseUrl } from '@/lib/internal-url'
 
@@ -58,6 +59,16 @@ export async function GET(req: NextRequest) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
     }).catch(() => {})
+  }
+
+  // Instagram daily auto-schedule — draws unqueued Drive videos per connected
+  // account, inserts as 'pending_approval' (never picked up by the reel query
+  // above until a human approves it in the UI).
+  let autoSchedule: Awaited<ReturnType<typeof runDailyAutoSchedule>> = { ran: false, created: 0 }
+  try {
+    autoSchedule = await runDailyAutoSchedule()
+  } catch (err) {
+    console.error('[cron/tick] auto-schedule error:', err)
   }
 
   // Expire subscriptions that have passed their expiry date
@@ -374,5 +385,6 @@ export async function GET(req: NextRequest) {
     stalledBatchesFinalized,
     monitor: monitorScans,
     driveArchive,
+    autoSchedule,
   })
 }
