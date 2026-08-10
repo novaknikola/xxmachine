@@ -100,10 +100,26 @@ async function findDriveFolderLink(userId: string, label: string, contentFormat:
 }
 
 /**
+ * A single Seedream Edit call has its own 10-minute AbortSignal
+ * (wavespeed.ts), so a healthy batch can legitimately go quiet for a while
+ * mid-item — 12 minutes with zero movement in the heartbeat is past that
+ * with margin, which is what actually happened to the job that prompted
+ * this: 2/5 done, then genuinely nothing for 17+ minutes with no error ever
+ * logged (a known pre-existing quirk: the internal "kick" fetch can hit
+ * undici's ~5min HeadersTimeoutError while the job keeps running server-side
+ * regardless — see /api/queue/submit's own logs for the same pattern on
+ * other jobs). Distinguishing "still working" from "actually stuck" this way
+ * beats both a short fixed cutoff (abandons slow-but-healthy jobs) and no
+ * cutoff at all (a truly dead job would hang the user forever).
+ */
+const STALE_AFTER_MS = 12 * 60 * 1000
+const POLL_INTERVAL_MS = 10_000
+const HARD_CAP_MS = 45 * 60 * 1000
+
+/**
  * Fire-and-forget — Telegram gets its 200 back immediately, this keeps
  * running in the background (same process, pm2-hosted, not serverless) and
- * pushes the result whenever the job actually finishes. Seedream Edit
- * measured ~50s in testing; capped at 40×5s = ~3.3min.
+ * pushes the result whenever the job actually finishes, stalls, or fails.
  */
 async function pollAndDeliver(
   jobId: string,
@@ -112,13 +128,16 @@ async function pollAndDeliver(
   label: string,
   contentFormat: ContentFormat,
 ): Promise<void> {
-  for (let i = 0; i < 40; i++) {
-    await sleep(5000)
+  const deadline = Date.now() + HARD_CAP_MS
+
+  while (Date.now() < deadline) {
+    await sleep(POLL_INTERVAL_MS)
     const row = await one<{
       status: string
-      output: { copyPromptsRows?: { images: string[] }[] } | null
+      started_at: string
+      output: { copyPromptsRows?: { images: string[] }[]; progressAt?: string } | null
       error: string | null
-    }>(`SELECT status, output, error FROM generation_queue WHERE id = $1`, [jobId])
+    }>(`SELECT status, started_at, output, error FROM generation_queue WHERE id = $1`, [jobId])
     if (!row) return
 
     if (row.status === 'done') {
@@ -138,12 +157,30 @@ async function pollAndDeliver(
       if (folderUrl) await sendText(chatId, `📁 <a href="${folderUrl}">Drive folder</a>`)
       return
     }
+
     if (row.status === 'failed') {
       await sendText(chatId, `❌ Generation failed: ${escapeHtml((row.error ?? 'unknown error').slice(0, 300))}`)
       return
     }
+
+    // Still processing/pending — only give up if the heartbeat has gone
+    // stale, not just because time has passed.
+    const lastActivity = row.output?.progressAt ? new Date(row.output.progressAt).getTime() : new Date(row.started_at).getTime()
+    if (Date.now() - lastActivity > STALE_AFTER_MS) {
+      const cancelled = await query(
+        `UPDATE generation_queue SET status='failed', error=$1, finished_at=now() WHERE id=$2 AND status='processing'`,
+        [`Auto-cancelled — no progress for ${Math.round(STALE_AFTER_MS / 60000)}+ minutes`, jobId],
+      )
+      if ((cancelled.rowCount ?? 0) > 0) {
+        await sendText(chatId, '❌ Generation stalled with no progress — cancelled automatically. Try again.')
+        return
+      }
+      // Someone/something else already moved it past 'processing' between our
+      // read and this UPDATE — fall through and let the next loop iteration
+      // see whatever it actually became (done/failed).
+    }
   }
-  await sendText(chatId, '⏳ Still running after a few minutes — it will land here whenever it finishes.')
+  await sendText(chatId, '⏳ Still running after 45 minutes — check back later, it will land here if it finishes.')
 }
 
 /** Runs once format + photo + count (+ optional extra prompt) are all known. */
