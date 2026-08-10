@@ -8,21 +8,21 @@ export interface MetaAdminCreds {
 }
 
 /**
- * Content-based, not URL-based: a live run hit a reCAPTCHA whose URL
- * contained neither "login.php" nor "checkpoint", so a URL-substring check
- * silently skipped straight past it. Checking for the actual blocking
- * elements (email field still present, or a captcha) is what the URL
- * pattern was only ever a proxy for.
+ * Diagnosed live (2026-08-10): the challenge URL was
+ * facebook.com/two_step_verification/authentication/... — no "login.php" or
+ * "checkpoint" substring, so a URL-only check missed it. The recaptcha
+ * itself is nested two iframes deep (fbsbx.com/captcha/recaptcha/iframe →
+ * google.com/recaptcha/enterprise/anchor) and mounted in a way plain DOM
+ * queries (page.$$eval('iframe', ...)) don't reach — page.frames() is what
+ * actually found both frames in testing, so that's the reliable check here.
  */
 async function isBlocked(page: Page): Promise<boolean> {
+  const url = page.url()
+  if (url.includes('login.php') || url.includes('checkpoint') || url.includes('two_step_verification')) return true
   const emailField = await page.$('input[name="email"], input#email')
   if (emailField) return true
-  // The "I'm not a robot" text lives inside Google's cross-origin recaptcha
-  // iframe — page.getByText() only searches the main frame and never finds
-  // it there. The iframe's src (not title) is what's reliably checkable
-  // from outside it.
-  const captchaFrame = await page.$('iframe[src*="recaptcha"]')
-  if (captchaFrame) return true
+  const hasCaptchaFrame = page.frames().some(f => f.url().includes('recaptcha'))
+  if (hasCaptchaFrame) return true
   return false
 }
 
@@ -74,20 +74,6 @@ export async function loginToMeta(page: Page, creds: MetaAdminCreds): Promise<vo
     await page.waitForTimeout(4000)
     await debugScreenshot(page, '04-after-submit')
   }
-
-  // Diagnostic dump — every guess about how the captcha is rendered has
-  // been wrong twice in a row, so log the actual DOM facts instead of
-  // guessing a third time.
-  console.log('[meta-admin-login] DEBUG url:', page.url())
-  const frames = page.frames()
-  console.log('[meta-admin-login] DEBUG frame count:', frames.length)
-  for (const f of frames) {
-    console.log('[meta-admin-login] DEBUG frame url:', f.url())
-  }
-  const iframeEls = await page.$$eval('iframe', els => els.map(e => ({ src: e.getAttribute('src'), title: e.getAttribute('title') })))
-  console.log('[meta-admin-login] DEBUG iframe elements:', JSON.stringify(iframeEls))
-  const bodyText = await page.evaluate(() => document.body.innerText.slice(0, 500))
-  console.log('[meta-admin-login] DEBUG body text:', bodyText)
 
   if (await isBlocked(page)) {
     console.log('[meta-admin-login] Challenge screen reached (captcha/2FA/verification) — connect via VNC and solve it live. Waiting up to 5 minutes...')
