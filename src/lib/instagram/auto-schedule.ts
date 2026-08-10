@@ -6,7 +6,7 @@ interface DriveFile {
   name: string
 }
 
-interface ScheduleWindow {
+export interface ScheduleWindow {
   label: string
   startHour: number
   endHour: number
@@ -14,13 +14,13 @@ interface ScheduleWindow {
 
 // Morning / afternoon / evening, roughly 6h apart, randomized within each window
 // so posts don't all land at the exact same minute every day.
-const WINDOWS: ScheduleWindow[] = [
+export const WINDOWS: ScheduleWindow[] = [
   { label: 'morning', startHour: 8, endHour: 11 },
   { label: 'afternoon', startHour: 14, endHour: 17 },
   { label: 'evening', startHour: 19, endHour: 22 },
 ]
 
-function randomTimeInWindow(day: Date, window: ScheduleWindow): Date {
+export function randomTimeInWindow(day: Date, window: ScheduleWindow): Date {
   const start = new Date(day)
   start.setHours(window.startHour, 0, 0, 0)
   const end = new Date(day)
