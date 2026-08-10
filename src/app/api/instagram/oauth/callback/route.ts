@@ -45,9 +45,13 @@ export async function GET(req: NextRequest) {
     }
     const shortLivedToken: string = tokenPayload.access_token
 
-    // Step B: Exchange for long-lived token (60 days)
+    // Step B: Exchange for long-lived token (60 days).
+    // Meta's docs still show this as GET, but the live API now rejects GET here
+    // with "Unsupported request - method type: get" (same shift hit the sibling
+    // refresh_access_token endpoint industry-wide) — POST is what actually works.
     const llRes = await fetch(
-      `https://graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret=${appSecret}&access_token=${shortLivedToken}`
+      `https://graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret=${encodeURIComponent(appSecret)}&access_token=${encodeURIComponent(shortLivedToken)}`,
+      { method: 'POST' }
     )
     const llData = await llRes.json()
     const llPayload = llData.data?.[0] ?? llData
@@ -62,7 +66,7 @@ export async function GET(req: NextRequest) {
     // Step C: Get user info — must be versioned; unversioned graph.instagram.com/me
     // does not resolve on this product and returns a generic method error.
     const meRes = await fetch(
-      `https://graph.instagram.com/v22.0/me?fields=user_id,username&access_token=${longLivedToken}`
+      `https://graph.instagram.com/v22.0/me?fields=user_id,username&access_token=${encodeURIComponent(longLivedToken)}`
     )
     const meData = await meRes.json()
     const mePayload = meData.data?.[0] ?? meData
