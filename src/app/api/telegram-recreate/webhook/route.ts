@@ -6,10 +6,12 @@ import {
   downloadTelegramFile, recreateMenuKeyboard, countKeyboard, promptChoiceKeyboard,
   FORMAT_CODES, FORMAT_LABELS, CAROUSEL_VARIANT_COUNT, type FormatCode,
 } from '@/lib/telegram-recreate'
-import { renderPoseRecreatePrompt } from '@/lib/pose-recreate'
+import { renderPoseRecreatePrompt, renderCarouselVariantPrompt, CAROUSEL_POSE_VARIANTS } from '@/lib/pose-recreate'
 import { suggestedDimensionForFormat, type ContentFormat } from '@/lib/drive-archive/content-format'
 import { sanitizeDriveKey } from '@/lib/drive-archive/paths'
-import { uploadBuffer } from '@/lib/supabase-storage'
+import { uploadBuffer, uploadImageFromUrl } from '@/lib/supabase-storage'
+import { editImage } from '@/lib/wavespeed'
+import { getUserApiKey } from '@/lib/user-config'
 import type { CopyPromptsJobInput } from '@/app/api/queue/submit/route'
 
 /**
@@ -116,6 +118,73 @@ const STALE_AFTER_MS = 12 * 60 * 1000
 const POLL_INTERVAL_MS = 10_000
 const HARD_CAP_MS = 45 * 60 * 1000
 
+/** N random, non-repeating picks from CAROUSEL_POSE_VARIANTS. */
+function pickVariantPoses(n: number): string[] {
+  const pool = [...CAROUSEL_POSE_VARIANTS]
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[pool[i], pool[j]] = [pool[j], pool[i]]
+  }
+  return pool.slice(0, n)
+}
+
+/**
+ * Carousel: for each already-generated base image, make CAROUSEL_VARIANT_COUNT
+ * direct pose-only edits. Deliberately bypasses copy_prompts_generate's own
+ * carousel.enabled mechanism — see renderCarouselVariantPrompt's doc comment
+ * for why (that path re-sends the original pose+identity references
+ * alongside the base image, which left the model unsure which image to
+ * follow; pose barely changed, environment drifted instead). Runs entirely
+ * outside generation_queue, after the base job is already 'done'.
+ */
+async function expandCarouselVariants(userId: string, label: string, baseImages: string[]): Promise<string[]> {
+  const apiKey = await getUserApiKey(userId, 'wavespeed_api_key').catch(() => '')
+  if (!apiKey) return baseImages
+
+  const { enqueueDriveArchive } = await import('@/lib/drive-archive/enqueue')
+  const all: string[] = []
+
+  for (let bi = 0; bi < baseImages.length; bi++) {
+    const base = baseImages[bi]
+    all.push(base)
+    const poses = pickVariantPoses(CAROUSEL_VARIANT_COUNT)
+    const results = await Promise.allSettled(
+      poses.map(pose =>
+        editImage({
+          imageUrls: [base],
+          prompt: renderCarouselVariantPrompt(pose),
+          resolution: '1k',
+          apiKey,
+          signal: AbortSignal.timeout(600_000),
+        }),
+      ),
+    )
+    for (let vi = 0; vi < results.length; vi++) {
+      const r = results[vi]
+      if (r.status !== 'fulfilled' || !r.value.length) {
+        console.error(`[telegram-recreate/webhook] carousel variant ${bi}:${vi} failed:`, r.status === 'rejected' ? r.reason : 'no output')
+        continue
+      }
+      try {
+        const stored = await uploadImageFromUrl(r.value[0], `queue/adhoc-carousel/${userId}/${bi}_${vi}_${Date.now()}.jpg`)
+        all.push(stored)
+        await enqueueDriveArchive({
+          userId,
+          sourceType: 'queue_job',
+          sourceId: `adhoc-carousel:${label}:${bi}:${vi}`,
+          urls: [stored],
+          characterKey: label,
+          kind: 'carousels',
+          stage: 'ready',
+        }).catch(err => console.error('[telegram-recreate/webhook] carousel variant archive failed:', err))
+      } catch (err) {
+        console.error(`[telegram-recreate/webhook] carousel variant ${bi}:${vi} upload failed:`, err)
+      }
+    }
+  }
+  return all
+}
+
 /**
  * Fire-and-forget — Telegram gets its 200 back immediately, this keeps
  * running in the background (same process, pm2-hosted, not serverless) and
@@ -141,7 +210,16 @@ async function pollAndDeliver(
     if (!row) return
 
     if (row.status === 'done') {
-      const images = (row.output?.copyPromptsRows ?? []).flatMap(r => r.images ?? [])
+      let images = (row.output?.copyPromptsRows ?? []).flatMap(r => r.images ?? [])
+
+      if (contentFormat === 'carousels' && images.length) {
+        await sendText(chatId, `🎠 Base images done — generating pose variants for each…`)
+        images = await expandCarouselVariants(userId, label, images).catch(err => {
+          console.error('[telegram-recreate/webhook] carousel variant expansion failed:', err)
+          return images
+        })
+      }
+
       if (images.length === 1) {
         await sendPhoto(chatId, images[0], `✅ ${escapeHtml(label)}`).catch(() => {})
       } else if (images.length > 1) {
@@ -214,13 +292,13 @@ async function generateFromReference(opts: {
 
   const label = `adhoc-${new Date().toISOString().slice(0, 10)}-${Math.random().toString(36).slice(2, 6)}`
   const note = poses.length < wantCount ? ` (only ${poses.length} pose${poses.length === 1 ? '' : 's'} available)` : ''
-  // Carousel: each pose also earns CAROUSEL_VARIANT_COUNT extra angle/crop
-  // slides via copy_prompts_generate's own carousel.enabled mechanism (the
-  // same resolveCarouselVariantPrompts path bulk_carousel uses) — so the
-  // real slide count is higher than the pose count for this format.
+  // Carousel: pose-variant expansion happens after the base job completes
+  // (expandCarouselVariants, called from pollAndDeliver) — not through
+  // copy_prompts_generate's own carousel.enabled here, see that function's
+  // doc comment for why.
   const isCarousel = contentFormat === 'carousels'
   const totalSlides = poses.length * (isCarousel ? 1 + CAROUSEL_VARIANT_COUNT : 1)
-  await sendText(chatId, `🎨 Generating ${totalSlides} image${totalSlides === 1 ? '' : 's'} from ${poses.length} pose${poses.length === 1 ? '' : 's'}${note}…`)
+  await sendText(chatId, `🎨 Generating ${poses.length} base image${poses.length === 1 ? '' : 's'}${isCarousel ? ` (${totalSlides} total with pose variants)` : ''}${note}…`)
 
   const items: CopyPromptsJobInput['items'] = poses.map(p => ({
     promptId: p.id,
@@ -235,7 +313,6 @@ async function generateFromReference(opts: {
     dimension: suggestedDimensionForFormat(contentFormat),
     folderName: label,
     contentFormat,
-    ...(isCarousel ? { carousel: { enabled: true, count: CAROUSEL_VARIANT_COUNT as 1 | 2 | 3 | 4 } } : {}),
   }
 
   const row = await one<{ id: string }>(

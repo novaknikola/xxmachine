@@ -74,6 +74,35 @@ const BODY_STYLE_ONLY =
   '1:1 — generate your own natural body, consistent only with a similar general body type, rather than ' +
   "reproducing the specific real body shown in image 2."
 
+/**
+ * Carousel variant slides — direct pose-only edits of the already-generated
+ * base image, NOT the shared copy_prompts_generate carousel.enabled
+ * mechanism. That mechanism re-sends the original pose reference AND
+ * identity reference alongside the base image, which left the model
+ * uncertain which image to follow — observed result: pose barely changed,
+ * environment drifted instead. Per the user's explicit direction: keep it
+ * simple, one image in, one plain "change her pose to X" instruction.
+ */
+export const CAROUSEL_POSE_VARIANTS = [
+  'a playful, flirty pose — teasing smile, one hand touching her hair, hip popped to the side',
+  'caught mid-laugh — head tilted back slightly, genuine candid laugh, relaxed shoulders',
+  'a confident power pose — hands on hips, chin up, direct intense gaze',
+  'a silly, crazy expression — tongue out, exaggerated playful energy, dynamic goofy pose',
+  'a relaxed, lazy pose — leaning back, half-lidded eyes, casual slouched posture',
+  'caught mid-motion — turning or stepping, hair and clothing in motion, energetic',
+  'leaning in close and intimate — soft inviting gaze toward camera',
+  'a bold, sassy pose — one eyebrow raised, smirking, hand on hip',
+] as const
+
+export function renderCarouselVariantPrompt(poseDescription: string): string {
+  return [
+    'Keep the exact same person, face, identity, outfit, background and environment as shown in this image —',
+    'do not change any of that.',
+    `Change ONLY her pose and body position to: ${poseDescription}.`,
+    'Photorealistic, natural skin texture, no beauty filter, no AI skin smoothing.',
+  ].join(' ')
+}
+
 export function renderPoseRecreatePrompt(opts: PoseRecreateOpts): string {
   const bits = [
     'Image 1 is the pose/scene reference, image 2 (and any further images) is the identity reference.',
