@@ -2,12 +2,13 @@ import { NextRequest, NextResponse } from 'next/server'
 import { one, query, rows } from '@/lib/db'
 import { internalBaseUrl } from '@/lib/internal-url'
 import {
-  sendText, sendPhoto, answerCallbackQuery, editMessageReplyMarkup, editMessageText,
+  sendText, sendPhoto, sendMediaGroup, answerCallbackQuery, editMessageReplyMarkup, editMessageText,
   downloadTelegramFile, recreateMenuKeyboard, countKeyboard, promptChoiceKeyboard,
   FORMAT_CODES, FORMAT_LABELS, type FormatCode,
 } from '@/lib/telegram-recreate'
 import { renderPoseRecreatePrompt } from '@/lib/pose-recreate'
-import { suggestedDimensionForFormat } from '@/lib/drive-archive/content-format'
+import { suggestedDimensionForFormat, type ContentFormat } from '@/lib/drive-archive/content-format'
+import { sanitizeDriveKey } from '@/lib/drive-archive/paths'
 import { uploadBuffer } from '@/lib/supabase-storage'
 import type { CopyPromptsJobInput } from '@/app/api/queue/submit/route'
 
@@ -65,12 +66,52 @@ async function clearPending(chatId: number): Promise<void> {
 }
 
 /**
+ * Same 'carousels' vs everything-else split archiveFolderPaths uses
+ * internally (drive-archive/resolve-folder.ts) — duplicated here rather than
+ * imported since that mapping isn't exported, and this is the only other
+ * place that needs to know which drive_folders.kind a contentFormat lands
+ * under to look the folder back up.
+ */
+function driveArchiveKind(contentFormat: ContentFormat): 'carousels' | 'stories' {
+  return contentFormat === 'carousels' ? 'carousels' : 'stories'
+}
+
+/**
+ * Drive archiving is async (a cron sweeps drive_exports), so the folder may
+ * not exist the instant generation finishes — poll briefly, same tolerance
+ * notifyReplicationDone documents ("a missing link is normal and simply
+ * omitted") but with a few retries first since here it usually does show up
+ * within seconds of a small batch finishing.
+ */
+async function findDriveFolderLink(userId: string, label: string, contentFormat: ContentFormat): Promise<string | null> {
+  const kind = driveArchiveKind(contentFormat)
+  const characterKey = sanitizeDriveKey(label)
+  for (let i = 0; i < 6; i++) {
+    const row = await one<{ folder_id: string }>(
+      `SELECT folder_id FROM drive_folders
+        WHERE user_id = $1 AND character_key = $2 AND kind = $3 AND date_key <> '_'
+        ORDER BY date_key DESC LIMIT 1`,
+      [userId, characterKey, kind],
+    )
+    if (row?.folder_id) return `https://drive.google.com/drive/folders/${row.folder_id}`
+    await sleep(3000)
+  }
+  return null
+}
+
+/**
  * Fire-and-forget — Telegram gets its 200 back immediately, this keeps
  * running in the background (same process, pm2-hosted, not serverless) and
  * pushes the result whenever the job actually finishes. Seedream Edit
  * measured ~50s in testing; capped at 40×5s = ~3.3min.
  */
-async function pollAndDeliver(jobId: string, chatId: number, label: string): Promise<void> {
+async function pollAndDeliver(
+  jobId: string,
+  chatId: number,
+  userId: string,
+  label: string,
+  contentFormat: ContentFormat,
+): Promise<void> {
   for (let i = 0; i < 40; i++) {
     await sleep(5000)
     const row = await one<{
@@ -82,13 +123,19 @@ async function pollAndDeliver(jobId: string, chatId: number, label: string): Pro
 
     if (row.status === 'done') {
       const images = (row.output?.copyPromptsRows ?? []).flatMap(r => r.images ?? [])
-      if (images.length) {
-        for (const url of images) {
-          await sendPhoto(chatId, url, `✅ ${escapeHtml(label)}`).catch(() => {})
+      if (images.length === 1) {
+        await sendPhoto(chatId, images[0], `✅ ${escapeHtml(label)}`).catch(() => {})
+      } else if (images.length > 1) {
+        // Telegram's sendMediaGroup caps at 10 items per call.
+        for (let g = 0; g < images.length; g += 10) {
+          await sendMediaGroup(chatId, images.slice(g, g + 10), `✅ ${escapeHtml(label)} (${images.length})`).catch(() => {})
         }
       } else {
         await sendText(chatId, '⚠️ Job finished but produced no image.')
       }
+
+      const folderUrl = await findDriveFolderLink(userId, label, contentFormat).catch(() => null)
+      if (folderUrl) await sendText(chatId, `📁 <a href="${folderUrl}">Drive folder</a>`)
       return
     }
     if (row.status === 'failed') {
@@ -172,7 +219,7 @@ async function generateFromReference(opts: {
     }).catch(err => console.error('[telegram-recreate/webhook] fire worker:', err))
   }
 
-  pollAndDeliver(row.id, chatId, label).catch(err => console.error('[telegram-recreate/webhook] poll:', err))
+  pollAndDeliver(row.id, chatId, userId, label, contentFormat).catch(err => console.error('[telegram-recreate/webhook] poll:', err))
 }
 
 export async function POST(req: NextRequest) {

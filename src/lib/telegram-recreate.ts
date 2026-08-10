@@ -46,6 +46,26 @@ export async function sendPhoto(
   })
 }
 
+/**
+ * One swipeable album instead of N separate messages — Telegram requires
+ * 2-10 items; callers fall back to sendPhoto for a single image. Caption only
+ * renders on the first item (Telegram's own rule, not ours).
+ */
+export async function sendMediaGroup(
+  chatId: string | number,
+  photoUrls: string[],
+  caption: string,
+) {
+  return call('sendMediaGroup', {
+    chat_id: chatId,
+    media: photoUrls.map((url, i) => ({
+      type: 'photo',
+      media: url,
+      ...(i === 0 ? { caption, parse_mode: 'HTML' } : {}),
+    })),
+  })
+}
+
 export async function editMessageReplyMarkup(
   chatId: string | number,
   messageId: number,
