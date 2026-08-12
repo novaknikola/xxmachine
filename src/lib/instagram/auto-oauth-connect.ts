@@ -58,6 +58,15 @@ export async function connectAccountViaOAuth(accountId: string): Promise<{ usern
       // a failure here leaves zero visual evidence of what Instagram
       // actually showed (confirmed live: the debug dir didn't even exist).
       await debugScreenshot(page, accountId, '00-login-failed')
+      // Two straight guesses (name attribute, then placeholder) both missed
+      // despite the field being clearly visible — dump the real input
+      // structure instead of guessing a third time.
+      const inputs = await page.$$eval('input', (els: HTMLInputElement[]) => els.map(e => ({
+        type: e.getAttribute('type'), name: e.getAttribute('name'),
+        placeholder: e.getAttribute('placeholder'), ariaLabel: e.getAttribute('aria-label'),
+        id: e.getAttribute('id'),
+      }))).catch(() => [])
+      console.log('[auto-oauth-connect] DEBUG inputs:', JSON.stringify(inputs, null, 2))
       throw err
     }
     await debugScreenshot(page, accountId, '01-ig-logged-in')
