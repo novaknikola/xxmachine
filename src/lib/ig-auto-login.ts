@@ -44,14 +44,16 @@ export async function autoLoginInstagram(page: Page, creds: IgCredentials): Prom
   await page.waitForTimeout(400 + Math.random() * 600)
   await page.keyboard.press('Enter')
 
-  // Confirmed live: the previous fixed 3s wait caught the page mid-request
-  // (screenshot showed the Log in button still spinning) over the added
-  // latency of a residential proxy, and the URL check below ran before
-  // Instagram's response ever arrived — a false "failed" read, not a real
-  // one. Wait for the network to actually settle instead of guessing a
-  // fixed delay, with a generous timeout for proxy latency.
-  await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {})
-  await page.waitForTimeout(2000)
+  // Confirmed live, twice: a fixed 3s wait AND a 20s networkidle wait both
+  // caught the page still mid-request (screenshot showed the Log in button
+  // still spinning past 20s) — this residential proxy is just slow enough
+  // that networkidle's "briefly no requests" heuristic never actually
+  // fires. Wait directly for the one thing that matters: navigation away
+  // from the login path, with a generous timeout for proxy latency. If it
+  // times out, the URL check below still runs and reports accurately
+  // instead of assuming success.
+  await page.waitForURL(u => !u.pathname.includes('/accounts/login'), { timeout: 40000 }).catch(() => {})
+  await page.waitForTimeout(1500)
 
   const url = page.url()
 
