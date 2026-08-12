@@ -115,13 +115,26 @@ export async function addInstagramTester(page: Page, appId: string, igUsername: 
   await page.waitForTimeout(2000)
   await debugScreenshot(page, `add-tester-${igUsername}-filled`)
 
-  // A suggestion/autocomplete result, if one renders, is the more specific
-  // and more likely-correct target to click — falls back to the Add button
-  // itself if nothing matching shows up.
-  const suggestion = await page.$(`text="${igUsername}"`)
-  if (suggestion) {
-    await suggestion.click()
+  // Exact text-match on igUsername doesn't work: Instagram's typeahead
+  // renders its own normalized display string (e.g. dots become underscores),
+  // which never equals the raw input. Confirmed live that the dropdown rows
+  // are `role="option"` divs whose `id` is the account's numeric IG user id
+  // — position (first = best match, same ranking Instagram itself shows) is
+  // the reliable signal, not text. Leaving the dropdown open by finding no
+  // match was the actual bug: the open list then intercepts the Add button
+  // click underneath it.
+  const suggestionRowId = await page.evaluate(() => {
+    const row = Array.from(document.querySelectorAll('div[role="option"][id]'))
+      .find(el => /^\d+$/.test(el.id))
+    return row ? row.id : null
+  })
+  if (suggestionRowId) {
+    await page.click(`[id="${suggestionRowId}"]`)
     await page.waitForTimeout(1000)
+  } else {
+    // No suggestion rendered — make sure no leftover dropdown is still open
+    // and intercepting the Add button.
+    await usernameField.press('Escape').catch(() => {})
   }
 
   const addBtn = await page.$('button:has-text("Add"):not(:has-text("People")), [role="button"]:has-text("Add"):not(:has-text("People"))')
