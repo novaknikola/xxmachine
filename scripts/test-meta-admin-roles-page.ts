@@ -5,7 +5,7 @@
 import fs from 'fs'
 import { launchMetaAdminBrowser } from '../src/lib/meta-admin/browser'
 import { loginToMeta } from '../src/lib/meta-admin/login'
-import { goToRolesPage, dumpButtons } from '../src/lib/meta-admin/testers'
+import { goToRolesPage, dumpButtons, clickAddPeopleAndDump } from '../src/lib/meta-admin/testers'
 
 const CREDS_PATH = '/root/meta-admin-creds.json'
 const APP_ID = '2904588276606941' // "Scheduler" — confirmed by the user as the real app
@@ -29,6 +29,7 @@ async function main() {
     console.log('✓ On Roles page:', page.url())
 
     await dumpButtons(page)
+    await clickAddPeopleAndDump(page)
   } catch (err) {
     console.error('✗ Failed:', err instanceof Error ? err.message : err)
     process.exitCode = 1
