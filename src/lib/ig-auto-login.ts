@@ -19,17 +19,26 @@ export interface IgCredentials {
  * already logged into instagram.com in the same browser/session, so this
  * same flow has to run twice for a fresh account).
  */
+// Confirmed live: the main site's login page (instagram.com/accounts/login/)
+// uses name="email"/name="pass" (Facebook's field names, post-unification),
+// but the OAuth authorize flow's own login
+// (accounts/login/?force_authentication&...&next=/oauth/authorize/third_party/)
+// is the older classic Instagram form with name="username"/name="password"
+// instead — different pages, different field names, same visual layout.
+const IDENTIFIER_SELECTOR = 'input[name="email"], input[name="username"]'
+const PASSWORD_SELECTOR = 'input[name="pass"], input[name="password"]'
+
 async function performLogin(page: Page, creds: IgCredentials): Promise<void> {
   // A fixed 500ms wait here raced the page's own render (confirmed live: a
   // screenshot taken ~5s after this check still showed the full login form
-  // rendering in, meaning the email-field check ran before React had
-  // mounted it, took the "nothing to do" branch, and the actual form was
-  // never touched). Poll for up to 8s instead of trusting one snapshot.
-  let emailFieldHandle = await page.$('input[name="email"]')
+  // rendering in, meaning the field check ran before React had mounted it,
+  // took the "nothing to do" branch, and the actual form was never
+  // touched). Poll for up to 8s instead of trusting one snapshot.
+  let emailFieldHandle = await page.$(IDENTIFIER_SELECTOR)
   const pollStart = Date.now()
   while (!emailFieldHandle && Date.now() - pollStart < 8000) {
     await page.waitForTimeout(500)
-    emailFieldHandle = await page.$('input[name="email"]')
+    emailFieldHandle = await page.$(IDENTIFIER_SELECTOR)
   }
 
   // A persistent profile that's already logged in doesn't show the email/
@@ -63,16 +72,16 @@ async function performLogin(page: Page, creds: IgCredentials): Promise<void> {
   // value instantly with no keystrokes, which is one of the more obvious
   // automation signals; typing character-by-character with human-scale
   // delays and a couple of "reading the page" pauses is the standard fix.
-  await page.waitForSelector('input[name="email"]', { timeout: 15000 })
+  await page.waitForSelector(IDENTIFIER_SELECTOR, { timeout: 15000 })
   await page.waitForTimeout(800 + Math.random() * 1200)
 
-  const emailField = page.locator('input[name="email"]')
+  const emailField = page.locator(IDENTIFIER_SELECTOR)
   await emailField.click()
   await emailField.type(creds.username, { delay: 90 + Math.random() * 70 })
 
   await page.waitForTimeout(300 + Math.random() * 500)
 
-  const passField = page.locator('input[name="pass"]')
+  const passField = page.locator(PASSWORD_SELECTOR)
   await passField.click()
   await passField.type(creds.password, { delay: 90 + Math.random() * 70 })
 
