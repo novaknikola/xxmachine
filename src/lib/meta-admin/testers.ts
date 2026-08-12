@@ -84,3 +84,49 @@ export async function clickInstagramTesterRadioAndDump(page: Page): Promise<void
   })))
   console.log('[meta-admin-testers] DEBUG inputs after selecting Instagram Tester:', JSON.stringify(inputs, null, 2))
 }
+
+const USERNAME_FIELD_SELECTOR = 'input[placeholder="Enter the username of the Instagram account you want to add"]'
+
+/**
+ * Adds an Instagram account as an Instagram Tester on the app. Built from
+ * live evidence, not guessed: Add People -> 5th role radio (Instagram
+ * Tester, confirmed by screenshot to reveal a dedicated username field
+ * distinct from the Facebook-identity search above it) -> type username ->
+ * Add. Unverified past the username field appearing — the actual submit
+ * (autocomplete/suggestion behavior, success confirmation) has not been
+ * exercised live yet.
+ */
+export async function addInstagramTester(page: Page, appId: string, igUsername: string): Promise<void> {
+  await goToRolesPage(page, appId)
+
+  const addPeopleBtn = await page.$('button:has-text("Add People"), [role="button"]:has-text("Add People")')
+  if (!addPeopleBtn) throw new Error('Add People button not found')
+  await addPeopleBtn.click()
+  await page.waitForTimeout(1500)
+
+  const radios = await page.$$('input[type="radio"]')
+  if (radios.length < 5) throw new Error(`Expected >=5 role radios, found ${radios.length}`)
+  await radios[4].click()
+  await page.waitForTimeout(1000)
+
+  const usernameField = await page.waitForSelector(USERNAME_FIELD_SELECTOR, { timeout: 10000 })
+  await usernameField.click()
+  await usernameField.type(igUsername, { delay: 80 + Math.random() * 60 })
+  await page.waitForTimeout(2000)
+  await debugScreenshot(page, `add-tester-${igUsername}-filled`)
+
+  // A suggestion/autocomplete result, if one renders, is the more specific
+  // and more likely-correct target to click — falls back to the Add button
+  // itself if nothing matching shows up.
+  const suggestion = await page.$(`text="${igUsername}"`)
+  if (suggestion) {
+    await suggestion.click()
+    await page.waitForTimeout(1000)
+  }
+
+  const addBtn = await page.$('button:has-text("Add"):not(:has-text("People")), [role="button"]:has-text("Add"):not(:has-text("People"))')
+  if (!addBtn) throw new Error('Add (submit) button not found after filling username')
+  await addBtn.click()
+  await page.waitForTimeout(2500)
+  await debugScreenshot(page, `add-tester-${igUsername}-after-submit`)
+}
