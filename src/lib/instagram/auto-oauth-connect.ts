@@ -73,6 +73,19 @@ export async function connectAccountViaOAuth(accountId: string): Promise<{ usern
     await authorizeMetaOAuth(page, oauthUrl, creds)
     await debugScreenshot(page, accountId, '02-after-authorize')
 
+    // The 02 screenshot has looked identical to the blank OAuth login form
+    // twice in a row despite performLogin() apparently running without
+    // error — dumping the real input structure here too instead of
+    // continuing to guess whether it's the same fields as the main login
+    // page or something subtly different.
+    const oauthInputs = await page.$$eval('input', (els: HTMLInputElement[]) => els.map(e => ({
+      type: e.getAttribute('type'), name: e.getAttribute('name'),
+      placeholder: e.getAttribute('placeholder'), ariaLabel: e.getAttribute('aria-label'),
+      id: e.getAttribute('id'),
+    }))).catch(() => [])
+    console.log('[auto-oauth-connect] DEBUG oauth-step inputs:', JSON.stringify(oauthInputs, null, 2))
+    console.log('[auto-oauth-connect] DEBUG oauth-step url:', page.url())
+
     // authorizeMetaOAuth navigates+clicks but doesn't wait for our callback's
     // own redirect chain (token exchange -> back to /socials) to finish.
     await page.waitForTimeout(5000)
