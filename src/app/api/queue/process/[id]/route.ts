@@ -10,6 +10,7 @@ import { promptForImage } from '@/lib/seedance-prompt'
 import { resolveKey } from '@/lib/user-keys'
 import { getUserApiKey } from '@/lib/user-config'
 import { processVideoVariant, getVideoDuration, getVideoDimensions } from '@/lib/video-ffmpeg'
+import { processImageVariant } from '@/lib/image-sharp'
 import { generateAssFile, buildManualSegments, buildStaticSegment, type CaptionSegment } from '@/lib/captions'
 import { transcribeVideoFile } from '@/lib/transcribe'
 import { extractOnScreenText } from '@/lib/ocr'
@@ -25,7 +26,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import type {
-  BulkImageJobItem, VideoRepurposeJobInput, VideoCaptionJobInput, VideoCaptionItem,
+  BulkImageJobItem, VideoRepurposeJobInput, ImageRepurposeJobInput, VideoCaptionJobInput, VideoCaptionItem,
   VideoTranscribeJobInput, VideoOcrJobInput, CaptionShuffleJobInput, CaptionGenerateJobInput, ComfyUIPodBulkJobInput,
   BulkCarouselJobInput, MyPodI2vJobInput, MyPodAnimateJobInput, MyPodTalkJobInput, CopyPasteJobInput,
   CopyPromptsJobInput, SeedanceI2VJobInput, InfiniteTalkJobInput,
@@ -109,6 +110,8 @@ interface CopyPromptsRow {
 const execFileAsync = promisify(execFile)
 const CRON_SECRET = process.env.CRON_SECRET
 const VIDEO_BATCH_SIZE = 3
+/** No GPU/browser contention server-side (that was the whole point of this move), so this can run higher than the old client-side WORKER_CONCURRENCY=4. */
+const IMAGE_REPURPOSE_BATCH_SIZE = 6
 const GENERATE_BATCH_SIZE = 20
 const EXAMPLE_SAMPLE_SIZE = 25
 const CAROUSEL_BATCH_SIZE = 2
@@ -432,6 +435,112 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           total: count,
           failed: finalUrls.filter(u => u.startsWith('error:')).length,
           videoName,
+          outputDriveFolderId,
+        }).catch(() => {})
+      }
+
+      return NextResponse.json({ ok: true, done: count })
+    }
+
+    // ── image_repurpose ────────────────────────────────────────────────────────
+    if (job.job_type === 'image_repurpose') {
+      const {
+        imageUrl, imageName, count, baseSeed, settings, driveFileId, outputDriveFolderId,
+      } = job.input as unknown as ImageRepurposeJobInput
+      let doneCount = job.done_items
+
+      // Resume: load existing output URLs from DB
+      const allOutputUrls: (string | null)[] = new Array(count).fill(null)
+      const existingUrls = job.output?.urls ?? []
+      for (let i = 0; i < Math.min(existingUrls.length, count); i++) {
+        allOutputUrls[i] = existingUrls[i]
+      }
+
+      // sharp works on buffers directly — no temp files needed, unlike the
+      // ffmpeg video path above.
+      let sourceBuffer: Buffer
+      if (driveFileId) {
+        sourceBuffer = await downloadDriveFile(driveFileId)
+      } else {
+        const imgRes = await fetch(imageUrl, { signal: AbortSignal.timeout(60_000) })
+        if (!imgRes.ok) throw new Error(`Failed to download source image: ${imgRes.status}`)
+        sourceBuffer = Buffer.from(await imgRes.arrayBuffer())
+      }
+
+      for (let batchStart = doneCount; batchStart < count; batchStart += IMAGE_REPURPOSE_BATCH_SIZE) {
+        // A Stop/Delete from the queue UI only flips the row; the worker has to
+        // notice it, or the button lies and paid work keeps running.
+        if (!(await jobStillRunning(id))) {
+          console.log(`[queue/process] image_repurpose ${id} stopped at ${doneCount}/${count}`)
+          return NextResponse.json({ ok: true, cancelled: true, done: doneCount })
+        }
+        const batchEnd = Math.min(batchStart + IMAGE_REPURPOSE_BATCH_SIZE, count)
+        const batchIndices = Array.from({ length: batchEnd - batchStart }, (_, i) => batchStart + i)
+
+        await Promise.all(batchIndices.map(async (variantIdx) => {
+          const seed = baseSeed + variantIdx * 1337
+          try {
+            const buf = await processImageVariant(sourceBuffer, seed, settings)
+            const url = await uploadBuffer(buf, `queue/${id}/${variantIdx + 1}.jpg`, 'image/jpeg')
+            allOutputUrls[variantIdx] = url
+
+            // Explicit destination folder. Its own try/catch: the variant is
+            // already rendered and stored, so a Drive hiccup must not mark it
+            // failed — it is logged and the run carries on.
+            if (outputDriveFolderId) {
+              const base = (imageName ?? 'image').replace(/\.[^.]+$/, '')
+              try {
+                await uploadToDriveFolderResilient(
+                  job.user_id,
+                  outputDriveFolderId,
+                  `${base}_${String(variantIdx + 1).padStart(3, '0')}.jpg`,
+                  buf,
+                  'image/jpeg',
+                )
+              } catch (err) {
+                console.error(
+                  `[queue/process] image_repurpose ${id} variant ${variantIdx + 1} Drive upload failed:`,
+                  err instanceof Error ? err.message : err,
+                )
+              }
+            }
+          } catch (err) {
+            console.error(
+              `[queue/process] image_repurpose ${id} variant ${variantIdx + 1} failed:`,
+              err instanceof Error ? err.message : err,
+            )
+            allOutputUrls[variantIdx] = `error:${err instanceof Error ? err.message : 'processing failed'}`
+          }
+        }))
+
+        doneCount = batchEnd
+        const progress = Math.round((doneCount / count) * 100)
+        const urls = allOutputUrls.filter(Boolean) as string[]
+
+        await query(
+          `UPDATE generation_queue
+              SET done_items=$1, progress=$2, output=jsonb_build_object('urls', $3::jsonb)
+            WHERE id=$4`,
+          [doneCount, progress, JSON.stringify(urls), id],
+        )
+      }
+
+      const finalUrls = allOutputUrls.filter(Boolean) as string[]
+      await query(
+        `UPDATE generation_queue
+            SET status='done', finished_at=now(), progress=100, done_items=$1,
+                output=jsonb_build_object('urls', $2::jsonb)
+          WHERE id=$3`,
+        [count, JSON.stringify(finalUrls), id],
+      )
+
+      {
+        const { notifyRepurposeDone } = await import('@/lib/monitor/notify')
+        await notifyRepurposeDone({
+          userId: job.user_id,
+          total: count,
+          failed: finalUrls.filter(u => u.startsWith('error:')).length,
+          videoName: imageName,
           outputDriveFolderId,
         }).catch(() => {})
       }

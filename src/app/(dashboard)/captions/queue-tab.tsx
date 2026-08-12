@@ -94,6 +94,7 @@ function JobCard({ job, onStop, onDelete, onDownload, downloading }: {
             <span className="text-sm font-medium">
               {job.job_type === 'bulk_image' ? 'Bulk Image Generation'
                 : job.job_type === 'video_repurpose' ? 'Video Repurpose'
+                : job.job_type === 'image_repurpose' ? 'Image Repurpose'
                 : job.job_type === 'video_caption' ? 'Caption Burn-in'
                 : job.job_type === 'video_transcribe' ? 'Bulk Transcribe'
                 : job.job_type === 'video_ocr' ? 'On-Screen Text OCR'
@@ -107,7 +108,7 @@ function JobCard({ job, onStop, onDelete, onDownload, downloading }: {
           </div>
           <p className="text-xs text-muted-foreground">
             {new Date(job.created_at).toLocaleString()}
-            {' · '}{`${job.total_items} ${job.job_type === 'bulk_image' ? 'images' : usesTexts ? 'captions' : usesCarousel ? 'carousels' : usesCopyPrompts ? 'prompts' : 'videos'}`}
+            {' · '}{`${job.total_items} ${job.job_type === 'bulk_image' || job.job_type === 'image_repurpose' ? 'images' : usesTexts ? 'captions' : usesCarousel ? 'carousels' : usesCopyPrompts ? 'prompts' : 'videos'}`}
             {dur && <> · {dur}</>}
             {job.attempts > 1 && <> · Attempt {job.attempts}</>}
           </p>

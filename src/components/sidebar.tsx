@@ -12,7 +12,6 @@ import {
   LogOut,
   ChevronRight,
   ChevronDown,
-  Clapperboard,
   History,
   BarChart2,
   Settings,
@@ -53,15 +52,8 @@ const NAV_ITEMS: NavItem[] = [
       { href: '/bulk?tab=carousel', label: 'Carousel', icon: ImageIcon },
     ],
   },
-  {
-    href: '/captions',
-    label: 'Video Studio',
-    icon: Clapperboard,
-    children: [
-      { href: '/captions?tab=captions', label: 'Add Captions', icon: Captions },
-      { href: '/repurpose', label: 'Variants', icon: RefreshCw },
-    ],
-  },
+  { href: '/captions?tab=captions', label: 'Captions', icon: Captions },
+  { href: '/repurpose', label: 'Repurpose', icon: RefreshCw },
   {
     href: '/socials',
     label: 'Social Media',

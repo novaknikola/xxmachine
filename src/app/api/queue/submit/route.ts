@@ -5,6 +5,7 @@ import { listDriveFiles, listDriveImages } from '@/lib/google-drive'
 import { getUserGoogleAccessToken } from '@/lib/drive-archive/user-google-auth'
 import { sanitizeArchiveLabel } from '@/lib/drive-archive/label'
 import type { VideoEffectOpts } from '@/lib/video-ffmpeg'
+import type { ReproduceSettings } from '@/app/(dashboard)/repurpose/reproduce-logic'
 import type { CaptionStyle, CaptionCustomStyle } from '@/lib/captions'
 import { dedupeCaptions } from '@/lib/caption-shuffle'
 import { SEEDREAM_MAX_IMAGES } from '@/lib/wavespeed'
@@ -172,6 +173,19 @@ export interface VideoRepurposeJobInput {
   outputDriveFolderId?: string | null
 }
 
+export interface ImageRepurposeJobInput {
+  /** Empty when the source is a Drive file — see driveFileId. */
+  imageUrl: string
+  imageName: string
+  count: number
+  baseSeed: number
+  settings: ReproduceSettings
+  /** Source lives in Drive rather than storage; downloaded with the platform token. */
+  driveFileId?: string | null
+  /** Optional — empty means results only land in the results grid (storage URLs), not Drive. */
+  outputDriveFolderId?: string | null
+}
+
 export interface VideoCaptionItem {
   videoUrl: string
   videoName: string
@@ -304,6 +318,10 @@ export type QueueSubmitBody =
   | {
       job_type: 'video_repurpose'
       input: VideoRepurposeJobInput & { inputDriveFolderId?: string | null }
+    }
+  | {
+      job_type: 'image_repurpose'
+      input: ImageRepurposeJobInput & { inputDriveFolderId?: string | null }
     }
   | { job_type: 'video_caption'; input: VideoCaptionJobInput }
   | { job_type: 'video_transcribe'; input: VideoTranscribeJobInput }
@@ -458,6 +476,83 @@ export async function POST(req: NextRequest) {
     }
 
     // `id` stays the response shape every existing caller reads.
+    return NextResponse.json({ id: ids[0], ids })
+  }
+
+  if (body.job_type === 'image_repurpose') {
+    const {
+      imageUrl, imageName, count, baseSeed, settings,
+      inputDriveFolderId, outputDriveFolderId,
+    } = body.input ?? {}
+    const inputFolder = String(inputDriveFolderId ?? '').trim()
+    const outputFolder = String(outputDriveFolderId ?? '').trim()
+
+    if (!inputFolder && (!imageUrl || typeof imageUrl !== 'string')) {
+      return NextResponse.json(
+        { error: 'imageUrl or inputDriveFolderId required' },
+        { status: 400 },
+      )
+    }
+    if (!count || count < 1 || count > 100) {
+      return NextResponse.json({ error: 'count must be 1–100' }, { status: 400 })
+    }
+    if (!settings) {
+      return NextResponse.json({ error: 'settings required' }, { status: 400 })
+    }
+    // Writing needs the user's own OAuth — the service account has no My Drive
+    // quota. Fail here rather than after the variants have been rendered.
+    if (outputFolder) {
+      const driveUploadOk = await requireUserDriveUploadToken(user.id)
+      if (driveUploadOk instanceof NextResponse) return driveUploadOk
+    }
+
+    // One source per job, exactly as the upload path already works — a folder
+    // is just a different way of naming the sources.
+    let sources: { imageUrl: string; imageName: string; driveFileId: string | null }[]
+    if (inputFolder) {
+      let files
+      try {
+        // Listed with the platform service account: input folders are typically
+        // *shared with* it, which user OAuth's drive.file scope cannot see.
+        files = await listDriveImages(inputFolder)
+      } catch (err) {
+        return NextResponse.json(
+          { error: `Could not read input Drive folder: ${err instanceof Error ? err.message : 'failed'}` },
+          { status: 400 },
+        )
+      }
+      if (!files.length) {
+        return NextResponse.json({ error: 'Input folder has no images' }, { status: 400 })
+      }
+      sources = files.map(f => ({ imageUrl: '', imageName: f.name, driveFileId: f.id }))
+    } else {
+      sources = [{
+        imageUrl: imageUrl as string,
+        imageName: imageName ?? 'image.jpg',
+        driveFileId: null,
+      }]
+    }
+
+    const ids: string[] = []
+    for (const src of sources) {
+      const input: ImageRepurposeJobInput = {
+        imageUrl: src.imageUrl,
+        imageName: src.imageName,
+        count,
+        baseSeed: baseSeed ?? Math.floor(Math.random() * 0xffffff),
+        settings,
+        driveFileId: src.driveFileId,
+        outputDriveFolderId: outputFolder || null,
+      }
+      const row = await one<{ id: string }>(
+        `INSERT INTO generation_queue (user_id, job_type, input, total_items)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id`,
+        [user.id, body.job_type, JSON.stringify(input), count],
+      )
+      ids.push(row!.id)
+    }
+
     return NextResponse.json({ id: ids[0], ids })
   }
 

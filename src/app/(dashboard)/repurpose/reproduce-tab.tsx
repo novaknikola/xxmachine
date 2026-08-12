@@ -1,13 +1,15 @@
 'use client'
 
 import { useState, useRef } from 'react'
+import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { toast } from 'sonner'
 import {
-  Play, Square, Loader2, Download, Trash2, FolderDown, Upload, X, RefreshCw,
+  Play, Square, Loader2, Download, Trash2, FolderDown, Upload, X, RefreshCw, ListTodo,
 } from 'lucide-react'
+import { uploadQueueInput } from '@/lib/upload-queue-input'
 import {
   DEFAULT_REPRODUCE,
   type ReproduceSettings, type ReproduceVariant, type EffectRange,
@@ -25,43 +27,16 @@ const EFFECTS = [
   { key: 'vignette',   label: 'Vignette',   unit: '%' },
 ] as const
 
-const WORKER_CONCURRENCY = 4
-
-function createWorker() {
-  return new Worker('/reproduce.worker.js')
-}
-
-async function processWithWorker(
-  worker: Worker,
-  file: File,
-  settings: ReproduceSettings,
-  seed: number,
-): Promise<string> {
-  return new Promise(async (resolve, reject) => {
-    const taskId = crypto.randomUUID()
-    const buf = await file.arrayBuffer()
-    const fileData = { buffer: buf, type: file.type || 'image/jpeg' }
-
-    worker.onmessage = (e) => {
-      if (e.data.taskId !== taskId) return
-      if (e.data.ok) {
-        const blob = new Blob([e.data.buffer], { type: e.data.type })
-        resolve(URL.createObjectURL(blob))
-      } else {
-        reject(new Error(e.data.error ?? 'Worker error'))
-      }
-    }
-    worker.onerror = (e) => reject(new Error(e.message))
-    worker.postMessage({ taskId, fileData, settings, seed }, [buf])
-  })
-}
-
 export function ReproduceTab() {
+  const router = useRouter()
   const [settings, setSettings] = useState<ReproduceSettings>(DEFAULT_REPRODUCE)
   const [sources, setSources] = useState<Array<{ id: string; file: File; url: string }>>([])
   const [variants, setVariants] = useState<ReproduceVariant[]>([])
   const [running, setRunning] = useState(false)
+  const [queueing, setQueueing] = useState(false)
   const [progress, setProgress] = useState({ done: 0, total: 0 })
+  const [inputFolderId, setInputFolderId] = useState('')
+  const [outputFolderId, setOutputFolderId] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
   const abortRef = useRef(false)
 
@@ -76,52 +51,147 @@ export function ReproduceTab() {
     setSettings(prev => ({ ...prev, [key]: { ...(prev[key] as object), ...patch } }))
   }
 
-  async function run() {
+  // Immediate mode: max 10 per source, blocking, results shown inline
+  async function runImmediate() {
     if (!sources.length) { toast.error('Upload at least one image'); return }
+    if (settings.count > 10) { toast.error('Immediate mode supports max 10 variants — use Queue for more'); return }
     abortRef.current = false
     const total = sources.length * settings.count
     setRunning(true)
     setProgress({ done: 0, total })
     setVariants([])
-
-    // Build task list
-    const tasks: Array<{ src: typeof sources[0]; seed: number }> = []
-    for (const src of sources) {
-      for (let i = 0; i < settings.count; i++) {
-        tasks.push({ src, seed: Math.floor(Math.random() * 0xffffffff) })
-      }
-    }
-
-    // Spawn workers
-    const workerCount = Math.min(WORKER_CONCURRENCY, tasks.length)
-    const workers = Array.from({ length: workerCount }, () => createWorker())
-    let taskIdx = 0
     let done = 0
-    const settingsSnapshot = { ...settings }
+    let succeeded = 0
 
-    async function workerLoop(worker: Worker) {
-      while (taskIdx < tasks.length) {
-        if (abortRef.current) break
-        const task = tasks[taskIdx++]
-        try {
-          const url = await processWithWorker(worker, task.src.file, settingsSnapshot, task.seed)
-          setVariants(prev => [...prev, {
-            id: crypto.randomUUID(), sourceId: task.src.id,
-            sourceName: task.src.file.name, url, seed: task.seed,
-          }])
-        } catch (err) {
-          toast.error(`Failed: ${err instanceof Error ? err.message : 'error'}`)
+    for (const src of sources) {
+      if (abortRef.current) break
+      const fd = new FormData()
+      fd.append('file', src.file)
+      fd.append('settings', JSON.stringify(settings))
+      fd.append('count', String(settings.count))
+      fd.append('seed', String(Math.floor(Math.random() * 0xffffff)))
+
+      try {
+        const res = await fetch('/api/image-reproduce', { method: 'POST', body: fd })
+        const contentType = res.headers.get('content-type') || ''
+        const data = contentType.includes('application/json')
+          ? await res.json()
+          : { error: (await res.text()).slice(0, 500) || `Non-JSON response (${res.status})` }
+
+        if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`)
+
+        const results = Array.isArray(data.results) ? data.results : []
+        if (results.length === 0) {
+          throw new Error(data.error ?? 'No image variations were generated.')
         }
-        done++
+
+        for (const r of results) {
+          setVariants(prev => [...prev, {
+            id: r.id, sourceId: src.id, sourceName: src.file.name,
+            url: `/api/image-reproduce?id=${r.id}`, seed: r.seed,
+          }])
+          done++
+          succeeded++
+          setProgress({ done, total })
+        }
+      } catch (err) {
+        toast.error(`${src.file.name}: ${err instanceof Error ? err.message : 'error'}`)
+        done += settings.count
         setProgress({ done, total })
       }
     }
 
-    await Promise.all(workers.map(w => workerLoop(w)))
-    workers.forEach(w => w.terminate())
-
     setRunning(false)
-    if (!abortRef.current) toast.success(`${done} variations ready`)
+    if (!abortRef.current && succeeded > 0) {
+      toast.success(`${succeeded} variations ready`)
+    } else if (!abortRef.current && succeeded === 0) {
+      toast.error('No variations were generated. Please check the errors above.')
+    }
+  }
+
+  // Queue mode: upload to storage, submit background job(s)
+  async function submitToQueue() {
+    const inputFolder = inputFolderId.trim()
+    if (!sources.length && !inputFolder) {
+      toast.error('Upload at least one image, or give an input Drive folder')
+      return
+    }
+    setQueueing(true)
+
+    // Drive folder mode: the server lists the folder and fans out one job per
+    // image, so there is nothing to upload from here.
+    if (inputFolder) {
+      try {
+        const res = await fetch('/api/queue/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            job_type: 'image_repurpose',
+            input: {
+              inputDriveFolderId: inputFolder,
+              outputDriveFolderId: outputFolderId.trim() || null,
+              count: settings.count,
+              baseSeed: Math.floor(Math.random() * 0xffffff),
+              settings,
+            },
+          }),
+        })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error((data as { error?: string }).error ?? 'Submit failed')
+        const n = (data as { ids?: string[] }).ids?.length ?? 1
+        toast.success(`${n} job${n > 1 ? 's' : ''} queued from Drive — processing in background`, {
+          action: { label: 'Open Queue', onClick: () => router.push('/captions?tab=queue') },
+          duration: 6000,
+        })
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Submit failed')
+      } finally {
+        setQueueing(false)
+      }
+      return
+    }
+
+    let submitted = 0
+
+    for (const src of sources) {
+      try {
+        toast.loading(`Uploading ${src.file.name}…`, { id: `upload-${src.id}` })
+        const { videoUrl: imageUrl, videoName: imageName } = await uploadQueueInput(src.file)
+        toast.dismiss(`upload-${src.id}`)
+
+        const res = await fetch('/api/queue/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            job_type: 'image_repurpose',
+            input: {
+              imageUrl, imageName,
+              count: settings.count,
+              baseSeed: Math.floor(Math.random() * 0xffffff),
+              settings,
+              outputDriveFolderId: outputFolderId.trim() || null,
+            },
+          }),
+        })
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}))
+          throw new Error((e as { error?: string }).error ?? 'Submit failed')
+        }
+        submitted++
+      } catch (err) {
+        toast.dismiss(`upload-${src.id}`)
+        toast.error(`${src.file.name}: ${err instanceof Error ? err.message : 'error'}`)
+      }
+    }
+
+    setQueueing(false)
+    if (submitted > 0) {
+      setSources([])
+      toast.success(`${submitted} job${submitted > 1 ? 's' : ''} queued — processing in background`, {
+        action: { label: 'Open Queue', onClick: () => router.push('/captions?tab=queue') },
+        duration: 6000,
+      })
+    }
   }
 
   async function downloadZip() {
@@ -133,7 +203,10 @@ export function ReproduceTab() {
       const name = v.sourceName.replace(/\.[^.]+$/, '')
       zip.file(`${name}_${String(i + 1).padStart(3, '0')}_s${v.seed}.jpg`, blob)
     }))
-    const content = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } })
+    // STORE, not DEFLATE — these are already-compressed JPEGs, so deflating
+    // them burns CPU for near-zero size gain (the original cause of a
+    // ~10-minute wait on large batches).
+    const content = await zip.generateAsync({ type: 'blob', compression: 'STORE' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(content)
     a.download = `reproduce_${new Date().toISOString().slice(0, 10)}.zip`
@@ -141,6 +214,9 @@ export function ReproduceTab() {
     URL.revokeObjectURL(a.href)
     toast.success('ZIP downloaded')
   }
+
+  const canRunImmediate = settings.count <= 10 && !running && !queueing && sources.length > 0
+  const totalVariants = sources.length * settings.count
 
   return (
     <div className="space-y-6">
@@ -183,12 +259,49 @@ export function ReproduceTab() {
                     )}
                   </div>
                   <div className="flex items-center justify-between">
-                    <p className="text-xs text-muted-foreground">{sources.length} image(s) · {sources.length * settings.count} total</p>
+                    <p className="text-xs text-muted-foreground">{sources.length} image(s) · {totalVariants} total</p>
                     <button className="text-xs text-muted-foreground hover:text-destructive transition-colors"
                       onClick={() => setSources([])}>Clear all</button>
                   </div>
                 </>
               )}
+            </CardContent>
+          </Card>
+
+          {/* Google Drive */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">Google Drive</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">
+                  Input folder ID <span className="opacity-60">(optional — images, flat)</span>
+                </label>
+                <input
+                  value={inputFolderId}
+                  onChange={e => setInputFolderId(e.target.value)}
+                  placeholder="folder ID from the Drive URL"
+                  className="w-full h-10 px-3 rounded-lg bg-secondary/50 border border-border text-sm font-mono focus:outline-none focus:border-primary/50"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  Set this and every image in the folder becomes its own job — uploads above are ignored.
+                </p>
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">
+                  Output folder ID <span className="opacity-60">(optional)</span>
+                </label>
+                <input
+                  value={outputFolderId}
+                  onChange={e => setOutputFolderId(e.target.value)}
+                  placeholder="folder ID from the Drive URL"
+                  className="w-full h-10 px-3 rounded-lg bg-secondary/50 border border-border text-sm font-mono focus:outline-none focus:border-primary/50"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  Leave empty to keep results in the grid below only. Queue mode only.
+                </p>
+              </div>
             </CardContent>
           </Card>
 
@@ -199,13 +312,14 @@ export function ReproduceTab() {
             </CardHeader>
             <CardContent>
               <div className="flex items-center gap-3">
-                <input type="range" min={1} max={20} value={settings.count}
+                <input type="range" min={1} max={100} value={settings.count}
                   onChange={e => setSettings(p => ({ ...p, count: Number(e.target.value) }))}
                   className="flex-1 accent-primary" />
-                <span className="text-sm font-mono w-6 text-center">{settings.count}</span>
+                <span className="text-sm font-mono w-8 text-center">{settings.count}</span>
               </div>
               <p className="text-xs text-muted-foreground mt-1.5">
-                Total: <strong className="text-foreground">{sources.length * settings.count}</strong> variations
+                Total: <strong className="text-foreground">{totalVariants}</strong> variations
+                {settings.count > 10 && <span className="text-amber-400/80"> · &gt;10 needs Queue</span>}
               </p>
             </CardContent>
           </Card>
@@ -263,12 +377,20 @@ export function ReproduceTab() {
 
           {/* Actions */}
           <div className="space-y-2">
-            {!running ? (
-              <Button className="w-full" onClick={run} disabled={!sources.length}>
-                <Play className="w-4 h-4 mr-2" />
-                Generate {sources.length * settings.count || ''} variations
-              </Button>
-            ) : (
+            {!running && !queueing ? (
+              <div className="flex gap-2">
+                <Button className="flex-1" onClick={runImmediate} disabled={!canRunImmediate}
+                  title={settings.count > 10 ? 'Max 10 for immediate run — use Queue' : undefined}>
+                  <Play className="w-4 h-4 mr-2" />
+                  Run {settings.count <= 10 ? totalVariants : '(≤10 only)'}
+                </Button>
+                <Button variant="secondary" className="flex-1" onClick={submitToQueue}
+                  disabled={!sources.length && !inputFolderId.trim()}>
+                  <ListTodo className="w-4 h-4 mr-2" />
+                  {inputFolderId.trim() ? `Queue folder ×${settings.count}` : `Queue ${totalVariants > 0 ? totalVariants : ''}`}
+                </Button>
+              </div>
+            ) : running ? (
               <div className="flex gap-2">
                 <Button className="flex-1" disabled>
                   <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -278,8 +400,13 @@ export function ReproduceTab() {
                   <Square className="w-4 h-4" />
                 </Button>
               </div>
+            ) : (
+              <Button className="w-full" disabled>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Uploading to queue…
+              </Button>
             )}
-            {variants.length > 0 && !running && (
+            {variants.length > 0 && !running && !queueing && (
               <Button variant="outline" className="w-full" onClick={downloadZip}>
                 <FolderDown className="w-4 h-4 mr-2" />Download ZIP ({variants.length})
               </Button>
@@ -308,7 +435,7 @@ export function ReproduceTab() {
             <div className="flex flex-col items-center justify-center h-64 text-muted-foreground">
               <RefreshCw className="w-10 h-10 mb-3 opacity-20" />
               <p className="text-sm">Upload photos and generate variations</p>
-              <p className="text-xs opacity-60 mt-1">All processing is local — no API calls, no cost</p>
+              <p className="text-xs opacity-60 mt-1">Run ≤10 inline · Queue any amount in the background, straight to Drive</p>
             </div>
           )}
           {variants.length > 0 && (
