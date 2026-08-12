@@ -274,19 +274,22 @@ async function generateFromReference(opts: {
   const contentFormat = FORMAT_CODES[fmt]
   const nsfw = fmt === 'fn'
 
+  // Draws from the WHOLE library (all content_format tags combined), not
+  // just the tag matching the picked format — content_format only controls
+  // output dimension/Drive folder/NSFW gating below, it was never a real
+  // constraint on which pose can serve which output (every pose goes through
+  // the same Seedream Edit regardless). Per the user's explicit ask: a
+  // "posts"-tagged pool of 36-40 was recycling constantly while ~1000
+  // untagged-for-this-format poses sat unused. nsfw stays a hard filter — the
+  // one axis that's a genuine safety boundary, not organizational.
   const poses = await rows<{ id: string; image_url: string; category: string | null }>(
-    // Pure random, not least-used-first -- used_count is bumped on every
-    // attempt (including stalled ones), and with a library sized in the tens
-    // that made selection an effectively sequential walk through the pool,
-    // so two characters generated back-to-back drew disjoint runs of the
-    // same order instead of independently random picks.
     `SELECT id, image_url, category FROM pose_library
-      WHERE user_id = $1 AND active = true AND content_format = $2 AND nsfw = $3
-      ORDER BY random() LIMIT $4`,
-    [userId, contentFormat, nsfw, wantCount],
+      WHERE user_id = $1 AND active = true AND nsfw = $2
+      ORDER BY random() LIMIT $3`,
+    [userId, nsfw, wantCount],
   )
   if (!poses.length) {
-    await sendText(chatId, `⚠️ No poses in the <b>${escapeHtml(FORMAT_LABELS[fmt])}</b> library yet — import some first.`)
+    await sendText(chatId, `⚠️ No ${nsfw ? 'NSFW' : 'SFW'} poses in the library yet — import some first.`)
     return
   }
 
