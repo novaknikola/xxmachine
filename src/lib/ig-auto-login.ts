@@ -195,6 +195,38 @@ export async function autoLoginInstagram(page: Page, creds: IgCredentials): Prom
 }
 
 /**
+ * Being added as an Instagram Tester on the Meta app dashboard (App roles ->
+ * Roles -> Add People, automated separately in testers.ts) is only half the
+ * gate — while the app is in Development mode, the account itself must also
+ * separately accept the tester invite inside its own Instagram settings.
+ * Confirmed live (2026-08-13): skipping this step lets the OAuth authorize
+ * flow complete (the account shows up "Active" under Apps and websites,
+ * having clicked Allow) but our server's code->token exchange then fails
+ * with a generic "Unsupported request - method type: get" — the same
+ * account-specific IGApiException documented from an earlier session,
+ * caused by the invite sitting unaccepted under Settings -> Apps and
+ * websites -> **Tester Invites** (a separate tab from Active/Expired/
+ * Removed). Best-effort: does nothing if there's no pending invite (already
+ * accepted, or app not in Development mode for this account) rather than
+ * treating that as an error.
+ */
+export async function acceptInstagramTesterInvite(page: Page): Promise<void> {
+  await page.goto('https://www.instagram.com/accounts/manage_access/', { waitUntil: 'domcontentloaded', timeout: 30000 })
+  await page.waitForSelector('text="Apps and websites"', { timeout: 15000 }).catch(() => {})
+  await page.waitForTimeout(1000)
+
+  const testerTab = await page.$('text=/Tester Invites/i')
+  if (!testerTab) return
+  await testerTab.click()
+  await page.waitForTimeout(1500)
+
+  const acceptBtn = await page.$('button:has-text("Accept"), [role="button"]:has-text("Accept")')
+  if (!acceptBtn) return // no pending invite
+  await acceptBtn.click()
+  await page.waitForTimeout(2000)
+}
+
+/**
  * Instagram's OAuth authorize flow chains through several screens via
  * client-side redirects (its own separate login form, a "remembered
  * account" Continue screen, the /accounts/onetap/ "save login info"

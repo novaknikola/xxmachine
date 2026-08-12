@@ -2,7 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import { one } from '@/lib/db'
 import { getCharacterBrowserConfig, launchWithConfig } from '@/lib/browser-launcher'
-import { autoLoginInstagram, authorizeMetaOAuth } from '@/lib/ig-auto-login'
+import { autoLoginInstagram, acceptInstagramTesterInvite, authorizeMetaOAuth } from '@/lib/ig-auto-login'
 
 const DEBUG_DIR = '/root/ig-oauth-debug'
 
@@ -68,6 +68,15 @@ export async function connectAccountViaOAuth(accountId: string): Promise<{ usern
       throw err
     }
     await debugScreenshot(page, accountId, '01-ig-logged-in')
+
+    // Being added as an Instagram Tester on the Meta dashboard isn't enough
+    // while the app is in Development mode — the account must separately
+    // accept the tester invite in its own settings, or the OAuth flow below
+    // completes (Allow gets clicked, shows as "Active") but our server's
+    // token exchange fails with a generic "Unsupported request" error.
+    // Best-effort: no-ops if there's no pending invite.
+    await acceptInstagramTesterInvite(page).catch(() => {})
+    await debugScreenshot(page, accountId, '01b-after-tester-invite-check')
 
     const oauthUrl = buildOAuthUrl(accountId)
     await authorizeMetaOAuth(page, oauthUrl, creds)
