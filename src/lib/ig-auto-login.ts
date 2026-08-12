@@ -20,6 +20,23 @@ export interface IgCredentials {
  * same flow has to run twice for a fresh account).
  */
 async function performLogin(page: Page, creds: IgCredentials): Promise<void> {
+  await page.waitForTimeout(500)
+
+  // A persistent profile that's already logged in doesn't show the email/
+  // pass form at all — confirmed live, it shows a "remembered account"
+  // screen instead (avatar + username + Continue), and this same check also
+  // covers being fully logged in already (no email field, no Continue
+  // button either — nothing left to do).
+  if (!(await page.$('input[name="email"]'))) {
+    const continueBtn = await page.$('button:has-text("Continue")')
+    if (continueBtn) {
+      await continueBtn.click()
+      await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {})
+      await page.waitForTimeout(1500)
+    }
+    return
+  }
+
   // Confirmed via a live input dump (name="username" and placeholder-based
   // guesses both missed): the visible "Mobile number, username or email"
   // text isn't a real placeholder — it's a floating label over a plain
@@ -102,13 +119,13 @@ export async function authorizeMetaOAuth(page: Page, oauthUrl: string, creds: Ig
   await page.waitForTimeout(1000)
 
   // Confirmed live: this OAuth authorize URL shows its own separate login
-  // form (a different, older-styled Instagram login page) even for an
-  // account that's already logged into instagram.com in this same browser
-  // — the "Authorize" button never appears until this second login is
-  // done too.
-  if (await page.$('input[name="email"]')) {
-    await performLogin(page, creds)
-  }
+  // step (a different, older-styled Instagram login page, or a "remembered
+  // account" Continue screen) even for an account that's already logged
+  // into instagram.com in this same browser — the "Authorize" button never
+  // appears until this second login step is cleared too. performLogin()
+  // handles all three shapes (full form / remembered-account / nothing to
+  // do) on its own, so just always call it here.
+  await performLogin(page, creds)
 
   // Click the "Authorize" / "Allow" button on Meta's permission page
   const authorizeBtn = await page.$(
