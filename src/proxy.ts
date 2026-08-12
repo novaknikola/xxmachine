@@ -31,6 +31,14 @@ const PUBLIC_API_PREFIXES = [
   // Same class of bug, same fix — the pose-recreate bot's own webhook, secured
   // the same way (?secret=CRON_SECRET checked inside the route).
   '/api/telegram-recreate/webhook',
+  // Instagram redirects the browser here to finish OAuth with a one-time
+  // `code` — Instagram's own signature that this is a legitimate completion
+  // for this app, same trust model as the webhooks above. That browser has
+  // no reason to also be logged into the xxmachine dashboard (confirmed
+  // live: an automated connect flow that never touched the dashboard got a
+  // silent 401 here with zero server-side log output, since the request
+  // never reached the route's own code at all).
+  '/api/instagram/oauth/callback',
 ]
 
 export function proxy(req: NextRequest) {
