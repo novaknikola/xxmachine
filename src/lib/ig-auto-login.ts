@@ -142,7 +142,20 @@ export async function authorizeMetaOAuth(page: Page, oauthUrl: string, creds: Ig
 
   const deadline = Date.now() + 60000
   while (Date.now() < deadline) {
-    const authorizeBtn = await page.$(AUTHORIZE_SELECTOR)
+    // page.$() throws "Execution context was destroyed" if a client-side
+    // redirect happens to fire mid-check — confirmed live, twice, crashing
+    // the whole flow instead of just meaning "nothing to find this instant."
+    // Treat that one error as an empty result and let the loop retry.
+    const safe$ = async (selector: string) => {
+      try {
+        return await page.$(selector)
+      } catch (err) {
+        if (err instanceof Error && err.message.includes('Execution context was destroyed')) return null
+        throw err
+      }
+    }
+
+    const authorizeBtn = await safe$(AUTHORIZE_SELECTOR)
     if (authorizeBtn) {
       await authorizeBtn.click()
       await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {})
@@ -169,13 +182,13 @@ export async function authorizeMetaOAuth(page: Page, oauthUrl: string, creds: Ig
       }
     }
 
-    const identifierField = await page.$(IDENTIFIER_SELECTOR)
+    const identifierField = await safe$(IDENTIFIER_SELECTOR)
     if (identifierField) {
       await fillLoginForm(page, creds)
       continue
     }
 
-    const dismissBtn = await page.$(DISMISS_SELECTOR)
+    const dismissBtn = await safe$(DISMISS_SELECTOR)
     if (dismissBtn) {
       await dismissBtn.click()
       await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {})
