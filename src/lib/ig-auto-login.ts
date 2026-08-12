@@ -22,10 +22,27 @@ export async function autoLoginInstagram(page: Page, creds: IgCredentials): Prom
   // click just times out waiting for it to become visible. Pressing Enter
   // in the password field submits the form natively regardless of which
   // element is technically the submit control.
+  // Correct credentials still got a fake "wrong password" from Instagram
+  // (confirmed with the account owner) — the classic tell for anti-bot
+  // deception rather than a real credential error. page.fill() sets the
+  // value instantly with no keystrokes, which is one of the more obvious
+  // automation signals; typing character-by-character with human-scale
+  // delays and a couple of "reading the page" pauses is the standard fix.
   await page.waitForSelector('input[name="email"]', { timeout: 15000 })
-  await page.fill('input[name="email"]', creds.username)
-  await page.fill('input[name="pass"]', creds.password)
-  await page.press('input[name="pass"]', 'Enter')
+  await page.waitForTimeout(800 + Math.random() * 1200)
+
+  const emailField = page.locator('input[name="email"]')
+  await emailField.click()
+  await emailField.type(creds.username, { delay: 90 + Math.random() * 70 })
+
+  await page.waitForTimeout(300 + Math.random() * 500)
+
+  const passField = page.locator('input[name="pass"]')
+  await passField.click()
+  await passField.type(creds.password, { delay: 90 + Math.random() * 70 })
+
+  await page.waitForTimeout(400 + Math.random() * 600)
+  await page.keyboard.press('Enter')
 
   // Wait for navigation or 2FA
   await page.waitForTimeout(3000)
