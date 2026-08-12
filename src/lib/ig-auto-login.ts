@@ -44,8 +44,14 @@ export async function autoLoginInstagram(page: Page, creds: IgCredentials): Prom
   await page.waitForTimeout(400 + Math.random() * 600)
   await page.keyboard.press('Enter')
 
-  // Wait for navigation or 2FA
-  await page.waitForTimeout(3000)
+  // Confirmed live: the previous fixed 3s wait caught the page mid-request
+  // (screenshot showed the Log in button still spinning) over the added
+  // latency of a residential proxy, and the URL check below ran before
+  // Instagram's response ever arrived — a false "failed" read, not a real
+  // one. Wait for the network to actually settle instead of guessing a
+  // fixed delay, with a generous timeout for proxy latency.
+  await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {})
+  await page.waitForTimeout(2000)
 
   const url = page.url()
 
@@ -57,7 +63,8 @@ export async function autoLoginInstagram(page: Page, creds: IgCredentials): Prom
     if (!input) throw new Error('2FA input not found on page')
     await input.fill(code)
     await page.click('button[type="submit"], [data-testid="two-factor-auth-submit-button"]')
-    await page.waitForTimeout(3000)
+    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {})
+    await page.waitForTimeout(2000)
   }
 
   // Check if logged in (redirected to feed or home)
@@ -82,6 +89,7 @@ export async function authorizeMetaOAuth(page: Page, oauthUrl: string): Promise<
   )
   if (authorizeBtn) {
     await authorizeBtn.click()
-    await page.waitForTimeout(3000)
+    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {})
+    await page.waitForTimeout(2000)
   }
 }
