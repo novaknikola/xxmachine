@@ -12,6 +12,8 @@ import { sanitizeDriveKey } from '@/lib/drive-archive/paths'
 import { uploadBuffer, uploadImageFromUrl } from '@/lib/supabase-storage'
 import { editImage } from '@/lib/wavespeed'
 import { getUserApiKey } from '@/lib/user-config'
+import { parseReelUrl } from '@/lib/monitor/parse-reel-url'
+import { resolveVideoUrlsViaApify } from '@/lib/instagram-scrape'
 import type { CopyPromptsJobInput } from '@/app/api/queue/submit/route'
 
 /**
@@ -54,11 +56,12 @@ interface PendingRow {
   photo_url: string | null
   count: number | null
   awaiting_prompt: boolean
+  ig_pose_urls: string[] | null
 }
 
 async function getPending(chatId: number): Promise<PendingRow | null> {
   return one<PendingRow>(
-    `SELECT format, photo_url, count, awaiting_prompt FROM telegram_recreate_pending WHERE chat_id = $1`,
+    `SELECT format, photo_url, count, awaiting_prompt, ig_pose_urls FROM telegram_recreate_pending WHERE chat_id = $1`,
     [chatId],
   )
 }
@@ -235,7 +238,10 @@ async function pollAndDeliver(
     if (row.status === 'done') {
       let images = (row.output?.copyPromptsRows ?? []).flatMap(r => r.images ?? [])
 
-      if (contentFormat === 'carousels' && images.length) {
+      // Only the library-draw ('adhoc-...') flow earns synthetic pose
+      // variants — /replicate jobs are labeled 'igrepl-...' and recreate
+      // specific real slides, so they skip this (see generateFromReference).
+      if (contentFormat === 'carousels' && images.length && label.startsWith('adhoc-')) {
         await sendText(chatId, `🎠 Base images done — generating pose variants for each…`)
         images = await expandCarouselVariants(userId, label, images).catch(err => {
           console.error('[telegram-recreate/webhook] carousel variant expansion failed:', err)
@@ -284,50 +290,69 @@ async function pollAndDeliver(
   await sendText(chatId, '⏳ Still running after 45 minutes — check back later, it will land here if it finishes.')
 }
 
-/** Runs once format + photo + count (+ optional extra prompt) are all known. */
+/**
+ * Runs once a reference photo + pose source are both known. Two pose
+ * sources: the pose_library (random draw, wantCount) for /recreate, or an
+ * explicit list of scraped Instagram image URLs (explicitPoses) for
+ * /replicate — same generation mechanism either way, only where the "image
+ * 1" scene reference comes from differs.
+ */
 async function generateFromReference(opts: {
   userId: string
   chatId: number
-  fmt: FormatCode
   referenceImageUrl: string
-  wantCount: number
   extra: string | null
+  contentFormat: ContentFormat
+  nsfw: boolean
+  formatLabel: string
+  wantCount?: number
+  explicitPoses?: string[]
+  /** Drive characterKey / job label prefix. 'adhoc' (default) = library draw, earns carousel variant expansion; anything else opts out (see pollAndDeliver). */
+  labelPrefix?: string
 }): Promise<void> {
-  const { userId, chatId, fmt, referenceImageUrl, wantCount, extra } = opts
-  const contentFormat = FORMAT_CODES[fmt]
-  const nsfw = fmt === 'fn'
+  const { userId, chatId, referenceImageUrl, extra, contentFormat, nsfw, formatLabel, wantCount, explicitPoses, labelPrefix } = opts
 
-  // Draws from the WHOLE library (all content_format tags combined), not
-  // just the tag matching the picked format — content_format only controls
-  // output dimension/Drive folder/NSFW gating below, it was never a real
-  // constraint on which pose can serve which output (every pose goes through
-  // the same Seedream Edit regardless). Per the user's explicit ask: a
-  // "posts"-tagged pool of 36-40 was recycling constantly while ~1000
-  // untagged-for-this-format poses sat unused. nsfw stays a hard filter — the
-  // one axis that's a genuine safety boundary, not organizational.
-  const poses = await rows<{ id: string; image_url: string; category: string | null }>(
-    `SELECT id, image_url, category FROM pose_library
-      WHERE user_id = $1 AND active = true AND nsfw = $2
-      ORDER BY random() LIMIT $3`,
-    [userId, nsfw, wantCount],
-  )
-  if (!poses.length) {
-    await sendText(chatId, `⚠️ No ${nsfw ? 'NSFW' : 'SFW'} poses in the library yet — import some first.`)
-    return
+  let poses: { id: string | null; image_url: string; category: string | null }[]
+  if (explicitPoses) {
+    poses = explicitPoses.map(url => ({ id: null, image_url: url, category: null }))
+  } else {
+    // Draws from the WHOLE library (all content_format tags combined), not
+    // just the tag matching the picked format — content_format only controls
+    // output dimension/Drive folder/NSFW gating below, it was never a real
+    // constraint on which pose can serve which output (every pose goes
+    // through the same Seedream Edit regardless). Per the user's explicit
+    // ask: a "posts"-tagged pool of 36-40 was recycling constantly while
+    // ~1000 untagged-for-this-format poses sat unused. nsfw stays a hard
+    // filter — the one axis that's a genuine safety boundary, not
+    // organizational.
+    const libraryPoses = await rows<{ id: string; image_url: string; category: string | null }>(
+      `SELECT id, image_url, category FROM pose_library
+        WHERE user_id = $1 AND active = true AND nsfw = $2
+        ORDER BY random() LIMIT $3`,
+      [userId, nsfw, wantCount ?? 1],
+    )
+    if (!libraryPoses.length) {
+      await sendText(chatId, `⚠️ No ${nsfw ? 'NSFW' : 'SFW'} poses in the ${escapeHtml(formatLabel)} library yet — import some first.`)
+      return
+    }
+    poses = libraryPoses
   }
 
-  const label = `adhoc-${new Date().toISOString().slice(0, 10)}-${Math.random().toString(36).slice(2, 6)}`
-  const note = poses.length < wantCount ? ` (only ${poses.length} pose${poses.length === 1 ? '' : 's'} available)` : ''
+  const prefix = labelPrefix ?? 'adhoc'
+  const label = `${prefix}-${new Date().toISOString().slice(0, 10)}-${Math.random().toString(36).slice(2, 6)}`
+  const note = wantCount && poses.length < wantCount ? ` (only ${poses.length} pose${poses.length === 1 ? '' : 's'} available)` : ''
   // Carousel: pose-variant expansion happens after the base job completes
   // (expandCarouselVariants, called from pollAndDeliver) — not through
   // copy_prompts_generate's own carousel.enabled here, see that function's
-  // doc comment for why.
-  const isCarousel = contentFormat === 'carousels'
-  const totalSlides = poses.length * (isCarousel ? 1 + CAROUSEL_VARIANT_COUNT : 1)
-  await sendText(chatId, `🎨 Generating ${poses.length} base image${poses.length === 1 ? '' : 's'}${isCarousel ? ` (${totalSlides} total with pose variants)` : ''}${note}…`)
+  // doc comment for why. Only the library-draw ('adhoc') flow gets synthetic
+  // variants — /replicate is recreating specific real slides, adding invented
+  // extra poses on top would defeat the point.
+  const willExpandVariants = contentFormat === 'carousels' && prefix === 'adhoc'
+  const totalSlides = poses.length * (willExpandVariants ? 1 + CAROUSEL_VARIANT_COUNT : 1)
+  await sendText(chatId, `🎨 Generating ${poses.length} base image${poses.length === 1 ? '' : 's'}${willExpandVariants ? ` (${totalSlides} total with pose variants)` : ''}${note}…`)
 
   const items: CopyPromptsJobInput['items'] = poses.map(p => ({
-    promptId: p.id,
+    promptId: p.id ?? crypto.randomUUID(),
     referenceImageUrls: [p.image_url],
     prompt: renderPoseRecreatePrompt({ category: p.category, nsfw, extra }),
   }))
@@ -352,10 +377,13 @@ async function generateFromReference(opts: {
     return
   }
 
-  await query(
-    `UPDATE pose_library SET used_count = used_count + 1, last_used_at = now() WHERE id = ANY($1)`,
-    [poses.map(p => p.id)],
-  )
+  const realPoseIds = poses.map(p => p.id).filter((id): id is string => id !== null)
+  if (realPoseIds.length) {
+    await query(
+      `UPDATE pose_library SET used_count = used_count + 1, last_used_at = now() WHERE id = ANY($1)`,
+      [realPoseIds],
+    )
+  }
 
   // Start now instead of waiting for cron — same claim-then-kick pattern the
   // main Copy-Paste bot's cpgo handler uses.
@@ -427,7 +455,49 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true })
     }
 
-    // ── photo upload — reference image for a pending format choice ──
+    // ── /replicate <url> — recreate an IG post/carousel's own images with your character ──
+    if (message?.text?.startsWith('/replicate')) {
+      const chatId = message.chat?.id as number | undefined
+      if (!chatId) return NextResponse.json({ ok: true })
+      const userId = await findUserId(chatId)
+      if (!userId) {
+        await sendText(chatId, '⚠️ Not linked yet — send /start first.')
+        return NextResponse.json({ ok: true })
+      }
+      const urlArg = (message.text as string).split(/\s+/)[1]
+      const parsed = urlArg ? parseReelUrl(urlArg) : null
+      if (!parsed) {
+        await sendText(chatId, 'Usage: /replicate &lt;instagram post or carousel link&gt;')
+        return NextResponse.json({ ok: true })
+      }
+      await sendText(chatId, '🔎 Fetching that post…')
+      try {
+        const byCode = await resolveVideoUrlsViaApify([parsed.permalink])
+        const match = byCode.get(parsed.shortCode.toLowerCase())
+        const images = match?.images?.length ? match.images : (match?.displayUrl ? [match.displayUrl] : [])
+        if (!images.length) {
+          await sendText(chatId, "⚠️ Couldn't find any images on that post — might be a video-only reel, private, or deleted.")
+          return NextResponse.json({ ok: true })
+        }
+        await query(
+          `INSERT INTO telegram_recreate_pending (chat_id, format, ig_pose_urls)
+           VALUES ($1, 'p', $2)
+           ON CONFLICT (chat_id) DO UPDATE SET
+             format = 'p', ig_pose_urls = $2, photo_url = NULL, count = NULL, awaiting_prompt = false, created_at = now()`,
+          [chatId, images],
+        )
+        await sendText(
+          chatId,
+          `📸 Found ${images.length} image${images.length === 1 ? '' : 's'}. Send a reference photo of your character now.`,
+        )
+      } catch (err) {
+        console.error('[telegram-recreate/webhook] /replicate fetch failed:', err)
+        await sendText(chatId, `❌ Could not fetch that post: ${escapeHtml(err instanceof Error ? err.message : 'unknown error')}`)
+      }
+      return NextResponse.json({ ok: true })
+    }
+
+    // ── photo upload — reference image for a pending format choice or /replicate ──
     if (message?.photo?.length) {
       const chatId = message.chat?.id as number | undefined
       if (!chatId) return NextResponse.json({ ok: true })
@@ -436,7 +506,7 @@ export async function POST(req: NextRequest) {
 
       const pending = await getPending(chatId)
       if (!pending) {
-        await sendText(chatId, 'Send /recreate first, pick a format, then send the photo.')
+        await sendText(chatId, 'Send /recreate or /replicate first.')
         return NextResponse.json({ ok: true })
       }
 
@@ -445,6 +515,21 @@ export async function POST(req: NextRequest) {
         const { buffer, contentType, extension } = await downloadTelegramFile(largest.file_id)
         const path = `pose-recreate-refs/${userId}/${Date.now()}.${extension}`
         const referenceImageUrl = await uploadBuffer(buffer, path, contentType)
+
+        if (pending.ig_pose_urls?.length) {
+          // /replicate — poses are already known, generate immediately (no
+          // count-picker/add-prompt steps, keeps "just paste a link" simple).
+          const igPoses = pending.ig_pose_urls
+          await clearPending(chatId)
+          const contentFormat: ContentFormat = igPoses.length > 1 ? 'carousels' : 'posts'
+          await generateFromReference({
+            userId, chatId, referenceImageUrl, extra: null,
+            contentFormat, nsfw: false, formatLabel: 'IG replicate',
+            explicitPoses: igPoses, labelPrefix: 'igrepl',
+          })
+          return NextResponse.json({ ok: true })
+        }
+
         await query(
           `UPDATE telegram_recreate_pending SET photo_url = $1 WHERE chat_id = $2`,
           [referenceImageUrl, chatId],
@@ -471,8 +556,10 @@ export async function POST(req: NextRequest) {
         await generateFromReference({
           userId: (await findUserId(chatId))!,
           chatId,
-          fmt,
           referenceImageUrl: photoUrl,
+          contentFormat: FORMAT_CODES[fmt],
+          nsfw: fmt === 'fn',
+          formatLabel: FORMAT_LABELS[fmt],
           wantCount,
           extra: message.text as string,
         })
@@ -509,7 +596,8 @@ export async function POST(req: NextRequest) {
         await query(
           `INSERT INTO telegram_recreate_pending (chat_id, format)
            VALUES ($1, $2)
-           ON CONFLICT (chat_id) DO UPDATE SET format = $2, photo_url = NULL, count = NULL, awaiting_prompt = false, created_at = now()`,
+           ON CONFLICT (chat_id) DO UPDATE SET
+             format = $2, photo_url = NULL, count = NULL, awaiting_prompt = false, ig_pose_urls = NULL, created_at = now()`,
           [chatId, fmt],
         )
         if (messageId) {
@@ -557,7 +645,11 @@ export async function POST(req: NextRequest) {
         await clearPending(chatId)
         await answerCallbackQuery(cb.id, 'Starting…')
         if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
-        await generateFromReference({ userId, chatId, fmt, referenceImageUrl: photoUrl, wantCount, extra: null })
+        await generateFromReference({
+          userId, chatId, referenceImageUrl: photoUrl,
+          contentFormat: FORMAT_CODES[fmt], nsfw: fmt === 'fn', formatLabel: FORMAT_LABELS[fmt],
+          wantCount, extra: null,
+        })
         return NextResponse.json({ ok: true })
       }
     }
