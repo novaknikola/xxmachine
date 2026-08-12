@@ -91,6 +91,12 @@ export async function connectAccountViaOAuth(accountId: string): Promise<{ usern
       await page.waitForTimeout(1500)
     }
     await debugScreenshot(page, accountId, '03-final-state')
+    // The 03 screenshot has shown a bare {"error":"unauthenticated"} JSON
+    // body with no page chrome at all more than once — that shape doesn't
+    // match anything oauth/callback/route.ts itself returns (it only ever
+    // redirects), so the URL is the only way to tell whether this is our
+    // route, a redirect target, or something else entirely intercepting it.
+    console.log('[auto-oauth-connect] DEBUG final url:', page.url())
 
     if (!hasToken) {
       throw new Error('OAuth flow ran with no error but no access token was written — check the 02/03 screenshots for the actual final page')
