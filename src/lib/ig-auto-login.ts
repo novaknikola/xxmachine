@@ -59,10 +59,13 @@ async function performLogin(page: Page, creds: IgCredentials): Promise<void> {
       'button:has-text("Continue"), [role="button"]:has-text("Continue"), ' +
       'button:has-text("Save info"), [role="button"]:has-text("Save info")',
     )
+    console.log('[ig-auto-login] performLogin: no identifier field, dismissBtn found:', !!dismissBtn, 'url:', page.url())
     if (dismissBtn) {
       await dismissBtn.click()
+      console.log('[ig-auto-login] performLogin: clicked dismiss button')
       await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {})
       await page.waitForTimeout(1500)
+      console.log('[ig-auto-login] performLogin: after dismiss click+wait, url:', page.url())
     }
     return
   }
