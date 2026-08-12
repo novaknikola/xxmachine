@@ -101,7 +101,11 @@ async function fillLoginForm(page: Page, creds: IgCredentials): Promise<void> {
 }
 
 export async function autoLoginInstagram(page: Page, creds: IgCredentials): Promise<void> {
-  await page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'networkidle', timeout: 30000 })
+  // networkidle is unreliable on this residential proxy (same finding as
+  // fillLoginForm's post-submit wait below) — some proxy exit IPs just never
+  // go quiet within the timeout even though the page itself loaded fine.
+  // domcontentloaded + the poll below for the actual field is the fix.
+  await page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'domcontentloaded', timeout: 30000 })
 
   // Poll instead of a single snapshot check — confirmed live that a fixed
   // short wait races the page's own render (a screenshot taken seconds
@@ -132,7 +136,9 @@ export async function autoLoginInstagram(page: Page, creds: IgCredentials): Prom
  * assuming a fixed order — is what actually keeps up with that chain.
  */
 export async function authorizeMetaOAuth(page: Page, oauthUrl: string, creds: IgCredentials): Promise<void> {
-  await page.goto(oauthUrl, { waitUntil: 'networkidle', timeout: 30000 })
+  // Same networkidle-unreliable-on-this-proxy issue as autoLoginInstagram —
+  // the loop below already polls for whatever screen actually renders.
+  await page.goto(oauthUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
 
   const deadline = Date.now() + 60000
   while (Date.now() < deadline) {
@@ -157,7 +163,7 @@ export async function authorizeMetaOAuth(page: Page, oauthUrl: string, creds: Ig
     if (currentUrl.includes('l.instagram.com')) {
       const dest = new URL(currentUrl).searchParams.get('u')
       if (dest) {
-        await page.goto(decodeURIComponent(dest), { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {})
+        await page.goto(decodeURIComponent(dest), { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {})
         await page.waitForTimeout(1500)
         continue
       }
