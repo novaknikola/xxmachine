@@ -12,19 +12,16 @@ export interface IgCredentials {
 export async function autoLoginInstagram(page: Page, creds: IgCredentials): Promise<void> {
   await page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'networkidle', timeout: 30000 })
 
-  // input[name="username"] doesn't match live — confirmed via screenshot the
-  // real field is labeled "Mobile number, username or email" with no
-  // matching name attribute. Same lesson as the meta-admin login work:
-  // target by placeholder/role instead of a guessed attribute.
-  const usernameField = page.getByPlaceholder(/username|email|mobile/i)
-  await usernameField.waitFor({ timeout: 15000 })
-  await usernameField.fill(creds.username)
-  await page.getByPlaceholder(/password/i).fill(creds.password)
-  try {
-    await page.getByRole('button', { name: 'Log in', exact: true }).click({ timeout: 8000 })
-  } catch {
-    await page.getByText('Log in', { exact: true }).first().click({ timeout: 8000 })
-  }
+  // Confirmed via a live input dump (name="username" and placeholder-based
+  // guesses both missed): the visible "Mobile number, username or email"
+  // text isn't a real placeholder — it's a floating label over a plain
+  // name="email" field. Instagram's login form reuses Facebook's own field
+  // names (name="email" / name="pass"), and submit is input[type="submit"],
+  // not a <button>.
+  await page.waitForSelector('input[name="email"]', { timeout: 15000 })
+  await page.fill('input[name="email"]', creds.username)
+  await page.fill('input[name="pass"]', creds.password)
+  await page.click('input[type="submit"], button[type="submit"]')
 
   // Wait for navigation or 2FA
   await page.waitForTimeout(3000)
