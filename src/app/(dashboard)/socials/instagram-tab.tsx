@@ -140,7 +140,7 @@ export function InstagramTab() {
   const [bulkStatus, setBulkStatus] = useState<BulkStatus>({})
   const [bulkMessages, setBulkMessages] = useState<Record<string, string>>({})
   const [bulkRunning, setBulkRunning] = useState(false)
-  const [bulkMode, setBulkMode] = useState<'api' | 'browser'>('api')
+  const [bulkMode, setBulkMode] = useState<'api' | 'browser' | 'oauth'>('api')
   const [bulkProgress, setBulkProgress] = useState({ done: 0, total: 0 })
   const [showAddForm, setShowAddForm] = useState(false)
   const [addForm, setAddForm] = useState({ name: '', username: '', password: '', totp: '', proxy: '' })
@@ -426,6 +426,60 @@ export function InstagramTab() {
       }
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : 'Bulk connect failed')
+    } finally { setBulkRunning(false) }
+  }
+
+  async function startBulkOAuthConnect() {
+    if (!selectedIds.size || bulkRunning) return
+    const ids = Array.from(selectedIds)
+    setBulkRunning(true)
+    setBulkMode('oauth')
+    setBulkProgress({ done: 0, total: ids.length })
+    const init: BulkStatus = {}
+    ids.forEach(id => { init[id] = 'idle' })
+    setBulkStatus(init)
+
+    try {
+      const res = await fetch('/api/instagram/bulk-oauth-connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountIds: ids }),
+      })
+      if (!res.body) throw new Error('No response stream')
+
+      const reader = res.body.getReader()
+      const dec = new TextDecoder()
+      let buf = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += dec.decode(value, { stream: true })
+        const events = buf.split('\n\n')
+        buf = events.pop() ?? ''
+        for (const ev of events) {
+          const line = ev.replace(/^data: /, '').trim()
+          if (!line) continue
+          try {
+            const msg = JSON.parse(line)
+            if (msg.type === 'connecting') setBulkStatus(p => ({ ...p, [msg.accountId]: 'connecting' }))
+            else if (msg.type === 'connected') {
+              setBulkStatus(p => ({ ...p, [msg.accountId]: 'connected' }))
+              setBulkProgress(p => ({ ...p, done: p.done + 1 }))
+              setSelectedIds(p => { const n = new Set(p); n.delete(msg.accountId); return n })
+            } else if (msg.type === 'error') {
+              setBulkStatus(p => ({ ...p, [msg.accountId]: 'error' }))
+              setBulkMessages(p => ({ ...p, [msg.accountId]: msg.message }))
+              setBulkProgress(p => ({ ...p, done: p.done + 1 }))
+            } else if (msg.type === 'done') {
+              toast.success(`Done: ${msg.connected} connected, ${msg.failed} failed`)
+              loadAccounts()
+            }
+          } catch {}
+        }
+      }
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Bulk OAuth connect failed')
     } finally { setBulkRunning(false) }
   }
 
@@ -870,7 +924,7 @@ export function InstagramTab() {
                   </Button>
                 </div>
               )}
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-3 gap-2">
                 <Button className="bg-pink-600 hover:bg-pink-700 text-xs"
                   onClick={startBulkConnect} disabled={!selectedIds.size || bulkRunning}>
                   {bulkRunning && bulkMode === 'api'
@@ -883,6 +937,14 @@ export function InstagramTab() {
                   {bulkRunning && bulkMode === 'browser'
                     ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" />{bulkProgress.done}/{bulkProgress.total}</>
                     : <><Monitor className="w-3 h-3 mr-1" />Browser ({selectedIds.size})</>
+                  }
+                </Button>
+                <Button variant="outline" className="border-green-500/40 text-green-400 hover:bg-green-500/10 text-xs"
+                  onClick={startBulkOAuthConnect} disabled={!selectedIds.size || bulkRunning}
+                  title="Logs into each Instagram account and clicks through OAuth authorize — requires saved password + the account to be an Instagram Tester on the app (or the app to be Live)">
+                  {bulkRunning && bulkMode === 'oauth'
+                    ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" />{bulkProgress.done}/{bulkProgress.total}</>
+                    : <><Link2 className="w-3 h-3 mr-1" />OAuth ({selectedIds.size})</>
                   }
                 </Button>
               </div>
