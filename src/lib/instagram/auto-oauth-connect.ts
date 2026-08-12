@@ -73,43 +73,26 @@ export async function connectAccountViaOAuth(accountId: string): Promise<{ usern
     await authorizeMetaOAuth(page, oauthUrl, creds)
     await debugScreenshot(page, accountId, '02-after-authorize')
 
-    // The 02 screenshot has looked identical to the blank OAuth login form
-    // twice in a row despite performLogin() apparently running without
-    // error — dumping the real input structure here too instead of
-    // continuing to guess whether it's the same fields as the main login
-    // page or something subtly different.
-    const oauthInputs = await page.$$eval('input', (els: HTMLInputElement[]) => els.map(e => ({
-      type: e.getAttribute('type'), name: e.getAttribute('name'),
-      placeholder: e.getAttribute('placeholder'), ariaLabel: e.getAttribute('aria-label'),
-      id: e.getAttribute('id'),
-    }))).catch(() => [])
-    console.log('[auto-oauth-connect] DEBUG oauth-step inputs:', JSON.stringify(oauthInputs, null, 2))
-
-    // Still landing on /accounts/onetap/ after the dismiss-button click
-    // that was supposed to handle it — same "not a real <button>" pattern
-    // seen elsewhere this session. Dump every clickable-looking element's
-    // actual text/tag instead of guessing another selector.
-    const clickables = await page.$$eval('button, [role="button"], a', (els: HTMLElement[]) => els
-      .map(e => ({ tag: e.tagName, text: e.innerText?.trim().slice(0, 60), role: e.getAttribute('role') }))
-      .filter(b => b.text)).catch(() => [])
-    console.log('[auto-oauth-connect] DEBUG clickable elements:', JSON.stringify(clickables, null, 2))
-    console.log('[auto-oauth-connect] DEBUG oauth-step url:', page.url())
-
-    // authorizeMetaOAuth navigates+clicks but doesn't wait for our callback's
-    // own redirect chain (token exchange -> back to /socials) to finish.
-    await page.waitForTimeout(5000)
+    // Confirmed live: authorizeMetaOAuth landing the browser on our own
+    // /api/instagram/oauth/callback?code=...&state=... URL means Instagram
+    // really did issue an authorization code — the browser just may still
+    // be sitting there while our callback route's own server-side token
+    // exchange (a further two external API calls) is still in flight. Poll
+    // the DB instead of a fixed wait so this doesn't check before that
+    // finishes.
+    let hasToken = false
+    const verifyDeadline = Date.now() + 20000
+    while (Date.now() < verifyDeadline) {
+      const verify = await one<{ has_token: boolean }>(
+        `SELECT (ig_access_token IS NOT NULL) AS has_token FROM instagram_accounts WHERE id=$1`,
+        [accountId],
+      )
+      if (verify?.has_token) { hasToken = true; break }
+      await page.waitForTimeout(1500)
+    }
     await debugScreenshot(page, accountId, '03-final-state')
 
-    // authorizeMetaOAuth silently no-ops if it can't find an Authorize
-    // button (confirmed live: it did exactly this against an unexpected
-    // second login form, and the script reported false success with no
-    // token ever written) — verify the callback actually wrote one instead
-    // of trusting that no exception means it worked.
-    const verify = await one<{ has_token: boolean }>(
-      `SELECT (ig_access_token IS NOT NULL) AS has_token FROM instagram_accounts WHERE id=$1`,
-      [accountId],
-    )
-    if (!verify?.has_token) {
+    if (!hasToken) {
       throw new Error('OAuth flow ran with no error but no access token was written — check the 02/03 screenshots for the actual final page')
     }
 
