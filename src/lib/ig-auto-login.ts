@@ -42,14 +42,18 @@ async function performLogin(page: Page, creds: IgCredentials): Promise<void> {
   }
 
   // A persistent profile that's already logged in doesn't show the email/
-  // pass form at all — confirmed live, it shows a "remembered account"
-  // screen instead (avatar + username + Continue), and this same check also
-  // covers being fully logged in already (no email field, no Continue
-  // button either — nothing left to do).
+  // pass form at all — confirmed live, it can land on a "remembered
+  // account" screen (avatar + username + Continue) or, after a real
+  // successful submit, Instagram's own /accounts/onetap/ "Save your login
+  // info?" interstitial (Save info / Not now, no Continue button at all —
+  // confirmed live via an empty input dump on that exact URL). Covers being
+  // fully logged in already too (none of these match — nothing left to do).
   if (!emailFieldHandle) {
-    const continueBtn = await page.$('button:has-text("Continue")')
-    if (continueBtn) {
-      await continueBtn.click()
+    const dismissBtn = await page.$(
+      'button:has-text("Continue"), button:has-text("Not now"), button:has-text("Not Now"), button:has-text("Save info")',
+    )
+    if (dismissBtn) {
+      await dismissBtn.click()
       await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {})
       await page.waitForTimeout(1500)
     }
