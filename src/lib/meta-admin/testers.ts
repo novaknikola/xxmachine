@@ -56,3 +56,31 @@ export async function clickAddPeopleAndDump(page: Page): Promise<void> {
     .filter(b => b.text || b.role === 'checkbox' || b.role === 'radio'))
   console.log('[meta-admin-testers] DEBUG dialog clickables:', JSON.stringify(clickables, null, 2))
 }
+
+/**
+ * Diagnostic-only: the dialog screenshot showed 6 role radios (Administrator,
+ * Developer, Tester, Analytics User, Instagram Tester, Threads Tester in that
+ * visual order) but no visible field to type a username anywhere in it —
+ * testing whether picking "Instagram Tester" (5th radio, confirmed by
+ * screenshot) reveals one, since the "Search..." input the previous dump
+ * found is more likely the global top-nav search than anything in this
+ * dialog (page.$$eval scans the whole page, not just the modal).
+ */
+export async function clickInstagramTesterRadioAndDump(page: Page): Promise<void> {
+  const radios = await page.$$('input[type="radio"]')
+  if (radios.length < 5) {
+    console.log('[meta-admin-testers] DEBUG: expected >=5 radios, found', radios.length)
+    return
+  }
+  await radios[4].click()
+  await page.waitForTimeout(1500)
+  await debugScreenshot(page, 'roles-03-instagram-tester-selected')
+
+  const inputs = await page.$$eval('input, textarea', els => els.map(e => ({
+    tag: e.tagName,
+    type: e.getAttribute('type'),
+    placeholder: e.getAttribute('placeholder'),
+    ariaLabel: e.getAttribute('aria-label'),
+  })))
+  console.log('[meta-admin-testers] DEBUG inputs after selecting Instagram Tester:', JSON.stringify(inputs, null, 2))
+}
