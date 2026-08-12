@@ -12,9 +12,14 @@ export interface IgCredentials {
   totpSecret?: string | null
 }
 
-export async function autoLoginInstagram(page: Page, creds: IgCredentials): Promise<void> {
-  await page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'networkidle', timeout: 30000 })
-
+/**
+ * Fills and submits whichever login form is currently on the page (shared
+ * by autoLoginInstagram and authorizeMetaOAuth — confirmed live that the
+ * OAuth authorize URL presents its own separate login form even when
+ * already logged into instagram.com in the same browser/session, so this
+ * same flow has to run twice for a fresh account).
+ */
+async function performLogin(page: Page, creds: IgCredentials): Promise<void> {
   // Confirmed via a live input dump (name="username" and placeholder-based
   // guesses both missed): the visible "Mobile number, username or email"
   // text isn't a real placeholder — it's a floating label over a plain
@@ -87,10 +92,23 @@ export async function autoLoginInstagram(page: Page, creds: IgCredentials): Prom
   }
 }
 
-export async function authorizeMetaOAuth(page: Page, oauthUrl: string): Promise<void> {
-  await page.goto(oauthUrl, { waitUntil: 'networkidle', timeout: 30000 })
+export async function autoLoginInstagram(page: Page, creds: IgCredentials): Promise<void> {
+  await page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'networkidle', timeout: 30000 })
+  await performLogin(page, creds)
+}
 
-  await page.waitForTimeout(2000)
+export async function authorizeMetaOAuth(page: Page, oauthUrl: string, creds: IgCredentials): Promise<void> {
+  await page.goto(oauthUrl, { waitUntil: 'networkidle', timeout: 30000 })
+  await page.waitForTimeout(1000)
+
+  // Confirmed live: this OAuth authorize URL shows its own separate login
+  // form (a different, older-styled Instagram login page) even for an
+  // account that's already logged into instagram.com in this same browser
+  // — the "Authorize" button never appears until this second login is
+  // done too.
+  if (await page.$('input[name="email"]')) {
+    await performLogin(page, creds)
+  }
 
   // Click the "Authorize" / "Allow" button on Meta's permission page
   const authorizeBtn = await page.$(

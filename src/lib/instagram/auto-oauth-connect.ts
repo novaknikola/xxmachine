@@ -46,13 +46,11 @@ export async function connectAccountViaOAuth(accountId: string): Promise<{ usern
   const config = await getCharacterBrowserConfig(accountId)
   const { context, page } = await launchWithConfig(config)
 
+  const creds = { username: acc.ig_username, password: acc.ig_password, totpSecret: acc.ig_totp_secret }
+
   try {
     try {
-      await autoLoginInstagram(page, {
-        username: acc.ig_username,
-        password: acc.ig_password,
-        totpSecret: acc.ig_totp_secret,
-      })
+      await autoLoginInstagram(page, creds)
     } catch (err) {
       // autoLoginInstagram takes no screenshots of its own — without this,
       // a failure here leaves zero visual evidence of what Instagram
@@ -72,13 +70,26 @@ export async function connectAccountViaOAuth(accountId: string): Promise<{ usern
     await debugScreenshot(page, accountId, '01-ig-logged-in')
 
     const oauthUrl = buildOAuthUrl(accountId)
-    await authorizeMetaOAuth(page, oauthUrl)
+    await authorizeMetaOAuth(page, oauthUrl, creds)
     await debugScreenshot(page, accountId, '02-after-authorize')
 
     // authorizeMetaOAuth navigates+clicks but doesn't wait for our callback's
     // own redirect chain (token exchange -> back to /socials) to finish.
     await page.waitForTimeout(5000)
     await debugScreenshot(page, accountId, '03-final-state')
+
+    // authorizeMetaOAuth silently no-ops if it can't find an Authorize
+    // button (confirmed live: it did exactly this against an unexpected
+    // second login form, and the script reported false success with no
+    // token ever written) — verify the callback actually wrote one instead
+    // of trusting that no exception means it worked.
+    const verify = await one<{ has_token: boolean }>(
+      `SELECT (ig_access_token IS NOT NULL) AS has_token FROM instagram_accounts WHERE id=$1`,
+      [accountId],
+    )
+    if (!verify?.has_token) {
+      throw new Error('OAuth flow ran with no error but no access token was written — check the 02/03 screenshots for the actual final page')
+    }
 
     return { username: acc.ig_username }
   } finally {
