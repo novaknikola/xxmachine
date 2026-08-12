@@ -35,6 +35,77 @@ const AUTHORIZE_SELECTOR =
   'button:has-text("Authorize"), [role="button"]:has-text("Authorize"), ' +
   'button:has-text("Allow"), [role="button"]:has-text("Allow")'
 
+const WIZARD_NEXT_SELECTOR = 'button:has-text("Next"):not([disabled])'
+const WIZARD_DONE_SELECTOR = 'button:has-text("Done"):not([disabled])'
+const WIZARD_CONTINUE_SELECTOR = 'button:has-text("Continue"):not([disabled]), [role="button"]:has-text("Continue")'
+
+/**
+ * Instagram's Business Login OAuth flow refuses the requested scopes for a
+ * personal account and instead routes through its own account-type
+ * conversion wizard first — confirmed live end-to-end (2026-08-13):
+ * "Change to professional account?" -> Change -> pick Creator (radio
+ * value="media_creator", not Business) -> Next -> a benefits info screen ->
+ * Next -> category picker (radio list, "Done" disabled until one is picked)
+ * -> Done -> a public-account privacy warning modal ("your profile and
+ * content will be public") -> Continue -> "account is ready" screen -> Done
+ * -> lands back on the normal OAuth consent/Allow screen, which the loop
+ * above already handles. No Facebook Page linking anywhere in this path.
+ * Always picks Creator and a neutral "Personal blog" category (id 2700,
+ * confirmed present in the "Suggested" list) — a generic default, not a
+ * claim about what the account actually is. Also unchecks "Show category on
+ * profile" (checked by default) since there's no reason to publicize it for
+ * these accounts.
+ */
+async function handleProfessionalAccountConversion(page: Page): Promise<boolean> {
+  try {
+    const bodyText = await page.evaluate(() => document.body.innerText).catch(() => '')
+
+    if (bodyText.includes('Change to professional account')) {
+      const btn = await page.$('button:has-text("Change"), [role="button"]:has-text("Change")')
+      if (btn) { await btn.click(); await page.waitForTimeout(2000); return true }
+    }
+
+    if (bodyText.includes('Which best describes you')) {
+      const radio = await page.$('input[type="radio"][value="media_creator"]')
+      if (radio) { await radio.click(); await page.waitForTimeout(500) }
+      const next = await page.$(WIZARD_NEXT_SELECTOR)
+      if (next) { await next.click(); await page.waitForTimeout(2000); return true }
+    }
+
+    if (bodyText.includes('Flexible profile controls')) {
+      const next = await page.$(WIZARD_NEXT_SELECTOR)
+      if (next) { await next.click(); await page.waitForTimeout(2000); return true }
+    }
+
+    if (bodyText.includes('Select a category')) {
+      const alreadyChecked = await page.$('input[type="radio"]:checked')
+      if (!alreadyChecked) {
+        const preferred = await page.$('input[type="radio"][value="2700"]') // "Personal blog"
+        const radio = preferred || await page.$('input[type="radio"][value]')
+        if (radio) { await radio.click(); await page.waitForTimeout(500) }
+      }
+      const showOnProfile = await page.$('input[type="checkbox"]:checked')
+      if (showOnProfile) await showOnProfile.click().catch(() => {})
+      const done = await page.$(WIZARD_DONE_SELECTOR)
+      if (done) { await done.click(); await page.waitForTimeout(1500); return true }
+    }
+
+    if (bodyText.includes('will be public')) {
+      const cont = await page.$(WIZARD_CONTINUE_SELECTOR)
+      if (cont) { await cont.click(); await page.waitForTimeout(2500); return true }
+    }
+
+    if (bodyText.includes('account is ready')) {
+      const done = await page.$(WIZARD_DONE_SELECTOR)
+      if (done) { await done.click(); await page.waitForTimeout(2000); return true }
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('Execution context was destroyed')) return false
+    throw err
+  }
+  return false
+}
+
 /**
  * Fills and submits the currently-visible email/pass (or username/password)
  * form, including the 2FA follow-up if one appears. Assumes the identifier
@@ -140,7 +211,10 @@ export async function authorizeMetaOAuth(page: Page, oauthUrl: string, creds: Ig
   // the loop below already polls for whatever screen actually renders.
   await page.goto(oauthUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
 
-  const deadline = Date.now() + 60000
+  // 90s, not 60s: the professional-account conversion sub-flow (when it
+  // triggers) is itself 6 extra screens, each with its own wait — the
+  // original 60s budget predates that path and is tight once it's added in.
+  const deadline = Date.now() + 90000
   while (Date.now() < deadline) {
     // page.$() throws "Execution context was destroyed" if a client-side
     // redirect happens to fire mid-check — confirmed live, twice, crashing
@@ -187,6 +261,8 @@ export async function authorizeMetaOAuth(page: Page, oauthUrl: string, creds: Ig
       await fillLoginForm(page, creds)
       continue
     }
+
+    if (await handleProfessionalAccountConversion(page)) continue
 
     const dismissBtn = await safe$(DISMISS_SELECTOR)
     if (dismissBtn) {
