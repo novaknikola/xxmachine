@@ -49,8 +49,15 @@ async function performLogin(page: Page, creds: IgCredentials): Promise<void> {
   // confirmed live via an empty input dump on that exact URL). Covers being
   // fully logged in already too (none of these match — nothing left to do).
   if (!emailFieldHandle) {
+    // Confirmed live via a clickable-elements dump: "Not now" on the
+    // onetap screen is a <div role="button">, not a real <button> — a
+    // button-only selector silently matched nothing. Every variant now
+    // checked as both a real button and a role="button" element.
     const dismissBtn = await page.$(
-      'button:has-text("Continue"), button:has-text("Not now"), button:has-text("Not Now"), button:has-text("Save info")',
+      'button:has-text("Not now"), [role="button"]:has-text("Not now"), ' +
+      'button:has-text("Not Now"), [role="button"]:has-text("Not Now"), ' +
+      'button:has-text("Continue"), [role="button"]:has-text("Continue"), ' +
+      'button:has-text("Save info"), [role="button"]:has-text("Save info")',
     )
     if (dismissBtn) {
       await dismissBtn.click()
