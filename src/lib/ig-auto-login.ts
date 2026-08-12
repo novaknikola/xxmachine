@@ -144,6 +144,25 @@ export async function authorizeMetaOAuth(page: Page, oauthUrl: string, creds: Ig
       return
     }
 
+    // Root cause found live (2026-08-12) after several silent "no error, no
+    // token" runs: Instagram routes the final redirect to our callback
+    // through its own l.instagram.com "leaving Instagram" link-shim page —
+    // an outbound-link interstitial this loop never recognized, so it just
+    // sat there polling for the rest of its budget and returned having done
+    // nothing. Confirmed by a real manual connect landing on exactly this
+    // URL shape mid-flow. The actual destination is already sitting in the
+    // shim's own `u` query param — going straight there sidesteps needing to
+    // find/click whatever confirmation UI that page shows at all.
+    const currentUrl = page.url()
+    if (currentUrl.includes('l.instagram.com')) {
+      const dest = new URL(currentUrl).searchParams.get('u')
+      if (dest) {
+        await page.goto(decodeURIComponent(dest), { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {})
+        await page.waitForTimeout(1500)
+        continue
+      }
+    }
+
     const identifierField = await page.$(IDENTIFIER_SELECTOR)
     if (identifierField) {
       await fillLoginForm(page, creds)
