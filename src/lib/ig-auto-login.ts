@@ -16,12 +16,16 @@ export async function autoLoginInstagram(page: Page, creds: IgCredentials): Prom
   // guesses both missed): the visible "Mobile number, username or email"
   // text isn't a real placeholder — it's a floating label over a plain
   // name="email" field. Instagram's login form reuses Facebook's own field
-  // names (name="email" / name="pass"), and submit is input[type="submit"],
-  // not a <button>.
+  // names (name="email" / name="pass"). The input[type="submit"] the dump
+  // found is present but not visible (a hidden native fallback behind
+  // whatever renders the actual "Log in" button) — confirmed live, the
+  // click just times out waiting for it to become visible. Pressing Enter
+  // in the password field submits the form natively regardless of which
+  // element is technically the submit control.
   await page.waitForSelector('input[name="email"]', { timeout: 15000 })
   await page.fill('input[name="email"]', creds.username)
   await page.fill('input[name="pass"]', creds.password)
-  await page.click('input[type="submit"], button[type="submit"]')
+  await page.press('input[name="pass"]', 'Enter')
 
   // Wait for navigation or 2FA
   await page.waitForTimeout(3000)
