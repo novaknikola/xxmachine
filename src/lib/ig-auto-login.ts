@@ -20,14 +20,24 @@ export interface IgCredentials {
  * same flow has to run twice for a fresh account).
  */
 async function performLogin(page: Page, creds: IgCredentials): Promise<void> {
-  await page.waitForTimeout(500)
+  // A fixed 500ms wait here raced the page's own render (confirmed live: a
+  // screenshot taken ~5s after this check still showed the full login form
+  // rendering in, meaning the email-field check ran before React had
+  // mounted it, took the "nothing to do" branch, and the actual form was
+  // never touched). Poll for up to 8s instead of trusting one snapshot.
+  let emailFieldHandle = await page.$('input[name="email"]')
+  const pollStart = Date.now()
+  while (!emailFieldHandle && Date.now() - pollStart < 8000) {
+    await page.waitForTimeout(500)
+    emailFieldHandle = await page.$('input[name="email"]')
+  }
 
   // A persistent profile that's already logged in doesn't show the email/
   // pass form at all — confirmed live, it shows a "remembered account"
   // screen instead (avatar + username + Continue), and this same check also
   // covers being fully logged in already (no email field, no Continue
   // button either — nothing left to do).
-  if (!(await page.$('input[name="email"]'))) {
+  if (!emailFieldHandle) {
     const continueBtn = await page.$('button:has-text("Continue")')
     if (continueBtn) {
       await continueBtn.click()
