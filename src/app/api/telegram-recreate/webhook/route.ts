@@ -6,7 +6,7 @@ import {
   downloadTelegramFile, recreateMenuKeyboard, countKeyboard, promptChoiceKeyboard,
   FORMAT_CODES, FORMAT_LABELS, CAROUSEL_VARIANT_COUNT, type FormatCode,
 } from '@/lib/telegram-recreate'
-import { renderPoseRecreatePrompt, renderCarouselVariantPrompt, CAROUSEL_POSE_VARIANTS } from '@/lib/pose-recreate'
+import { renderPoseRecreatePrompt, renderCarouselVariantPrompt } from '@/lib/pose-recreate'
 import { suggestedDimensionForFormat, type ContentFormat } from '@/lib/drive-archive/content-format'
 import { sanitizeDriveKey } from '@/lib/drive-archive/paths'
 import { uploadBuffer, uploadImageFromUrl } from '@/lib/supabase-storage'
@@ -118,14 +118,20 @@ const STALE_AFTER_MS = 12 * 60 * 1000
 const POLL_INTERVAL_MS = 10_000
 const HARD_CAP_MS = 45 * 60 * 1000
 
-/** N random, non-repeating picks from CAROUSEL_POSE_VARIANTS. */
-function pickVariantPoses(n: number): string[] {
-  const pool = [...CAROUSEL_POSE_VARIANTS]
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1))
-    ;[pool[i], pool[j]] = [pool[j], pool[i]]
-  }
-  return pool.slice(0, n)
+/**
+ * N random, non-repeating picks from the carousel_pose_prompts pool (~300,
+ * Grok-generated — see scripts/seed-carousel-pose-prompts.ts). Replaced the
+ * old 8-item hardcoded list per the user's explicit ask: too small a pool
+ * made the same few variants recur constantly, same lesson as pose_library
+ * itself.
+ */
+async function pickVariantPoses(n: number): Promise<string[]> {
+  return (
+    await rows<{ prompt_text: string }>(
+      `SELECT prompt_text FROM carousel_pose_prompts WHERE active = true ORDER BY random() LIMIT $1`,
+      [n],
+    )
+  ).map(r => r.prompt_text)
 }
 
 /**
@@ -136,18 +142,43 @@ function pickVariantPoses(n: number): string[] {
  * alongside the base image, which left the model unsure which image to
  * follow; pose barely changed, environment drifted instead). Runs entirely
  * outside generation_queue, after the base job is already 'done'.
+ *
+ * Every slide (base AND variant) is re-archived here under one shared
+ * seriesLabel with a sequential seriesIndex, so the whole carousel gets
+ * consistent `{label}_01.jpg`, `{label}_02.jpg`, ... naming in Drive — the
+ * base images already got archived once by the shared worker under its own
+ * machine-generated name; this adds a second, cleanly-numbered copy rather
+ * than touching that shared archiving code.
  */
 async function expandCarouselVariants(userId: string, label: string, baseImages: string[]): Promise<string[]> {
   const apiKey = await getUserApiKey(userId, 'wavespeed_api_key').catch(() => '')
   if (!apiKey) return baseImages
 
   const { enqueueDriveArchive } = await import('@/lib/drive-archive/enqueue')
+  const seriesId = `adhoc-carousel:${label}`
+  let seriesIndex = 0
   const all: string[] = []
+
+  const archiveSlide = (url: string) =>
+    enqueueDriveArchive({
+      userId,
+      sourceType: 'queue_job',
+      sourceId: `${seriesId}:${seriesIndex}`,
+      urls: [url],
+      characterKey: label,
+      kind: 'carousels',
+      stage: 'ready',
+      seriesId,
+      seriesIndex: seriesIndex++,
+      seriesLabel: label,
+    }).catch(err => console.error('[telegram-recreate/webhook] carousel slide archive failed:', err))
 
   for (let bi = 0; bi < baseImages.length; bi++) {
     const base = baseImages[bi]
     all.push(base)
-    const poses = pickVariantPoses(CAROUSEL_VARIANT_COUNT)
+    await archiveSlide(base)
+
+    const poses = await pickVariantPoses(CAROUSEL_VARIANT_COUNT)
     const results = await Promise.allSettled(
       poses.map(pose =>
         editImage({
@@ -168,15 +199,7 @@ async function expandCarouselVariants(userId: string, label: string, baseImages:
       try {
         const stored = await uploadImageFromUrl(r.value[0], `queue/adhoc-carousel/${userId}/${bi}_${vi}_${Date.now()}.jpg`)
         all.push(stored)
-        await enqueueDriveArchive({
-          userId,
-          sourceType: 'queue_job',
-          sourceId: `adhoc-carousel:${label}:${bi}:${vi}`,
-          urls: [stored],
-          characterKey: label,
-          kind: 'carousels',
-          stage: 'ready',
-        }).catch(err => console.error('[telegram-recreate/webhook] carousel variant archive failed:', err))
+        await archiveSlide(stored)
       } catch (err) {
         console.error(`[telegram-recreate/webhook] carousel variant ${bi}:${vi} upload failed:`, err)
       }
