@@ -217,6 +217,7 @@ export function ReproduceTab() {
 
   const canRunImmediate = settings.count <= 10 && !running && !queueing && sources.length > 0
   const totalVariants = sources.length * settings.count
+  const folderMode = inputFolderId.trim().length > 0
 
   return (
     <div className="space-y-6">
@@ -380,7 +381,11 @@ export function ReproduceTab() {
             {!running && !queueing ? (
               <div className="flex gap-2">
                 <Button className="flex-1" onClick={runImmediate} disabled={!canRunImmediate}
-                  title={settings.count > 10 ? 'Max 10 for immediate run — use Queue' : undefined}>
+                  title={
+                    folderMode
+                      ? 'Immediate mode needs an upload — a Drive folder only works with Queue'
+                      : settings.count > 10 ? 'Max 10 for immediate run — use Queue' : undefined
+                  }>
                   <Play className="w-4 h-4 mr-2" />
                   Run {settings.count <= 10 ? totalVariants : '(≤10 only)'}
                 </Button>
@@ -405,6 +410,11 @@ export function ReproduceTab() {
                 <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                 Uploading to queue…
               </Button>
+            )}
+            {folderMode && !sources.length && !running && !queueing && (
+              <p className="text-[10px] text-amber-400/80">
+                Drive folder is set — Run needs an upload instead, use Queue for the folder.
+              </p>
             )}
             {variants.length > 0 && !running && !queueing && (
               <Button variant="outline" className="w-full" onClick={downloadZip}>

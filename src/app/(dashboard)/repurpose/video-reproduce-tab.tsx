@@ -243,6 +243,7 @@ export function VideoReproduceTab() {
 
   const canRunImmediate = count <= 10 && !running && !queueing && sources.length > 0
   const totalVariants = sources.length * count
+  const folderMode = inputFolderId.trim().length > 0
 
   return (
     <div className="space-y-6">
@@ -392,7 +393,11 @@ export function VideoReproduceTab() {
                   className="flex-1"
                   onClick={runImmediate}
                   disabled={!sources.length || count > 10}
-                  title={count > 10 ? 'Max 10 for immediate run — use Queue' : undefined}
+                  title={
+                    folderMode
+                      ? 'Immediate mode needs an upload — a Drive folder only works with Queue'
+                      : count > 10 ? 'Max 10 for immediate run — use Queue' : undefined
+                  }
                 >
                   <Play className="w-4 h-4 mr-2" />
                   Run {count <= 10 ? `${totalVariants}` : '(≤10 only)'}
@@ -424,6 +429,11 @@ export function VideoReproduceTab() {
                 <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                 Uploading to queue…
               </Button>
+            )}
+            {folderMode && !sources.length && !running && !queueing && (
+              <p className="text-[10px] text-amber-400/80">
+                Drive folder is set — Run needs an upload instead, use Queue for the folder.
+              </p>
             )}
 
             {variants.length > 0 && !running && !queueing && (
