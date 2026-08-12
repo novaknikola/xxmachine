@@ -1,7 +1,10 @@
 import type { Page } from 'playwright-core'
-// otplib esm — use require for cjs compat
+// otplib v13 dropped the old `authenticator.generate()` API entirely —
+// confirmed live, destructuring `authenticator` returned undefined and
+// crashed on the first real 2FA screen reached this session. v13's API is
+// generateSync({ secret }).
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { authenticator } = require('otplib')
+const otplib = require('otplib')
 
 export interface IgCredentials {
   username: string
@@ -60,13 +63,21 @@ export async function autoLoginInstagram(page: Page, creds: IgCredentials): Prom
   // Two-factor authentication challenge
   if (url.includes('two_factor') || url.includes('challenge')) {
     if (!creds.totpSecret) throw new Error('2FA required but no TOTP secret provided')
-    const code = authenticator.generate(creds.totpSecret)
-    const input = await page.$('input[name="verificationCode"], input[aria-label*="code"], input[autocomplete="one-time-code"]')
-    if (!input) throw new Error('2FA input not found on page')
-    await input.fill(code)
-    await page.click('button[type="submit"], [data-testid="two-factor-auth-submit-button"]')
-    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {})
-    await page.waitForTimeout(2000)
+    const code = otplib.generateSync({ secret: creds.totpSecret })
+
+    // Confirmed live via input dump: this screen has exactly one text
+    // input (the "Code" field, floating label again — no name/aria-label
+    // to match), a hidden submit fallback, and a "trust this device"
+    // checkbox (already checked by default). Enter submits reliably, same
+    // fix as the login form.
+    const codeInput = page.locator('input[type="text"]').first()
+    await codeInput.waitFor({ timeout: 15000 })
+    await codeInput.click()
+    await codeInput.type(code, { delay: 90 + Math.random() * 70 })
+    await page.waitForTimeout(400 + Math.random() * 400)
+    await page.keyboard.press('Enter')
+    await page.waitForURL(u => !u.pathname.includes('/accounts/login') && !u.pathname.includes('/challenge') && !u.pathname.includes('two_factor'), { timeout: 40000 }).catch(() => {})
+    await page.waitForTimeout(1500)
   }
 
   // Check if logged in (redirected to feed or home)

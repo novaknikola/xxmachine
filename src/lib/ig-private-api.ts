@@ -80,8 +80,11 @@ export async function loginIgClient(
       if (name === 'IgLoginTwoFactorRequiredError') {
         if (!totpSecret) throw new Error('2FA required but no TOTP secret provided')
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { authenticator } = require('otplib')
-        const twoFactorCode = authenticator.generate(totpSecret)
+        const otplib = require('otplib')
+        // otplib v13 dropped the old authenticator.generate() API — see
+        // ig-auto-login.ts for where this was confirmed live (undefined
+        // crash on the first real 2FA screen this bug was hit on).
+        const twoFactorCode = otplib.generateSync({ secret: totpSecret })
         const twoFactorInfo = (err as { response?: { body?: { two_factor_info?: { two_factor_identifier?: string } } } })
           .response?.body?.two_factor_info
         loggedInUser = await ig.account.twoFactorLogin({
