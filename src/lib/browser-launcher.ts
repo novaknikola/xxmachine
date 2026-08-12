@@ -59,7 +59,18 @@ export async function launchWithConfig(config: AccountBrowserConfig) {
   }
 
   if (proxyUrl) {
-    contextOptions.proxy = { server: proxyUrl }
+    // Playwright's proxy option wants server/username/password as separate
+    // fields — Chromium's --proxy-server doesn't support inline user:pass@
+    // in the URL, so passing the raw proxyUrl straight through as `server`
+    // (as this did before) fails at the browser level with
+    // ERR_INVALID_AUTH_CREDENTIALS, confirmed live against a real
+    // authenticated residential proxy.
+    const parsed = new URL(proxyUrl)
+    contextOptions.proxy = {
+      server: `${parsed.protocol}//${parsed.host}`,
+      username: decodeURIComponent(parsed.username),
+      password: decodeURIComponent(parsed.password),
+    }
   }
 
   const context = await chromium.launchPersistentContext(userDataDir, contextOptions)
