@@ -47,11 +47,19 @@ export async function connectAccountViaOAuth(accountId: string): Promise<{ usern
   const { context, page } = await launchWithConfig(config)
 
   try {
-    await autoLoginInstagram(page, {
-      username: acc.ig_username,
-      password: acc.ig_password,
-      totpSecret: acc.ig_totp_secret,
-    })
+    try {
+      await autoLoginInstagram(page, {
+        username: acc.ig_username,
+        password: acc.ig_password,
+        totpSecret: acc.ig_totp_secret,
+      })
+    } catch (err) {
+      // autoLoginInstagram takes no screenshots of its own — without this,
+      // a failure here leaves zero visual evidence of what Instagram
+      // actually showed (confirmed live: the debug dir didn't even exist).
+      await debugScreenshot(page, accountId, '00-login-failed')
+      throw err
+    }
     await debugScreenshot(page, accountId, '01-ig-logged-in')
 
     const oauthUrl = buildOAuthUrl(accountId)
