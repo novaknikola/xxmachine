@@ -60,21 +60,22 @@ async function handleProfessionalAccountConversion(page: Page): Promise<boolean>
   try {
     const bodyText = await page.evaluate(() => document.body.innerText).catch(() => '')
 
-    if (bodyText.includes('Change to professional account')) {
-      const btn = await page.$('button:has-text("Change"), [role="button"]:has-text("Change")')
-      if (btn) { await btn.click(); await page.waitForTimeout(2000); return true }
+    // Checked most-specific/final-state first, not screen order: confirmed
+    // live that the privacy-warning modal renders ON TOP of the still-
+    // mounted category screen rather than replacing it, so bodyText matches
+    // BOTH "Select a category" and "will be public" at once. Checking
+    // screen order top-down re-ran the category screen's stale "Done" click,
+    // which is now covered by the modal — "element ... intercepts pointer
+    // events" on the modal's own Cancel button. Most-specific-first avoids
+    // ever acting on a screen that's already been superseded.
+    if (bodyText.includes('account is ready')) {
+      const done = await page.$(WIZARD_DONE_SELECTOR)
+      if (done) { await done.click(); await page.waitForTimeout(2000); return true }
     }
 
-    if (bodyText.includes('Which best describes you')) {
-      const radio = await page.$('input[type="radio"][value="media_creator"]')
-      if (radio) { await radio.click(); await page.waitForTimeout(500) }
-      const next = await page.$(WIZARD_NEXT_SELECTOR)
-      if (next) { await next.click(); await page.waitForTimeout(2000); return true }
-    }
-
-    if (bodyText.includes('Flexible profile controls')) {
-      const next = await page.$(WIZARD_NEXT_SELECTOR)
-      if (next) { await next.click(); await page.waitForTimeout(2000); return true }
+    if (bodyText.includes('will be public')) {
+      const cont = await page.$(WIZARD_CONTINUE_SELECTOR)
+      if (cont) { await cont.click(); await page.waitForTimeout(2500); return true }
     }
 
     if (bodyText.includes('Select a category')) {
@@ -90,14 +91,21 @@ async function handleProfessionalAccountConversion(page: Page): Promise<boolean>
       if (done) { await done.click(); await page.waitForTimeout(1500); return true }
     }
 
-    if (bodyText.includes('will be public')) {
-      const cont = await page.$(WIZARD_CONTINUE_SELECTOR)
-      if (cont) { await cont.click(); await page.waitForTimeout(2500); return true }
+    if (bodyText.includes('Flexible profile controls')) {
+      const next = await page.$(WIZARD_NEXT_SELECTOR)
+      if (next) { await next.click(); await page.waitForTimeout(2000); return true }
     }
 
-    if (bodyText.includes('account is ready')) {
-      const done = await page.$(WIZARD_DONE_SELECTOR)
-      if (done) { await done.click(); await page.waitForTimeout(2000); return true }
+    if (bodyText.includes('Which best describes you')) {
+      const radio = await page.$('input[type="radio"][value="media_creator"]')
+      if (radio) { await radio.click(); await page.waitForTimeout(500) }
+      const next = await page.$(WIZARD_NEXT_SELECTOR)
+      if (next) { await next.click(); await page.waitForTimeout(2000); return true }
+    }
+
+    if (bodyText.includes('Change to professional account')) {
+      const btn = await page.$('button:has-text("Change"), [role="button"]:has-text("Change")')
+      if (btn) { await btn.click(); await page.waitForTimeout(2000); return true }
     }
   } catch (err) {
     if (err instanceof Error && err.message.includes('Execution context was destroyed')) return false
