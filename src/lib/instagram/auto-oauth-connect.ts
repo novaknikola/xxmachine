@@ -84,6 +84,15 @@ export async function connectAccountViaOAuth(accountId: string): Promise<{ usern
       id: e.getAttribute('id'),
     }))).catch(() => [])
     console.log('[auto-oauth-connect] DEBUG oauth-step inputs:', JSON.stringify(oauthInputs, null, 2))
+
+    // Still landing on /accounts/onetap/ after the dismiss-button click
+    // that was supposed to handle it — same "not a real <button>" pattern
+    // seen elsewhere this session. Dump every clickable-looking element's
+    // actual text/tag instead of guessing another selector.
+    const clickables = await page.$$eval('button, [role="button"], a', (els: HTMLElement[]) => els
+      .map(e => ({ tag: e.tagName, text: e.innerText?.trim().slice(0, 60), role: e.getAttribute('role') }))
+      .filter(b => b.text)).catch(() => [])
+    console.log('[auto-oauth-connect] DEBUG clickable elements:', JSON.stringify(clickables, null, 2))
     console.log('[auto-oauth-connect] DEBUG oauth-step url:', page.url())
 
     // authorizeMetaOAuth navigates+clicks but doesn't wait for our callback's
