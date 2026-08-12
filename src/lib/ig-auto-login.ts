@@ -12,13 +12,6 @@ export interface IgCredentials {
   totpSecret?: string | null
 }
 
-/**
- * Fills and submits whichever login form is currently on the page (shared
- * by autoLoginInstagram and authorizeMetaOAuth — confirmed live that the
- * OAuth authorize URL presents its own separate login form even when
- * already logged into instagram.com in the same browser/session, so this
- * same flow has to run twice for a fresh account).
- */
 // Confirmed live: the main site's login page (instagram.com/accounts/login/)
 // uses name="email"/name="pass" (Facebook's field names, post-unification),
 // but the OAuth authorize flow's own login
@@ -28,65 +21,32 @@ export interface IgCredentials {
 const IDENTIFIER_SELECTOR = 'input[name="email"], input[name="username"]'
 const PASSWORD_SELECTOR = 'input[name="pass"], input[name="password"]'
 
-async function performLogin(page: Page, creds: IgCredentials): Promise<void> {
-  // A fixed 500ms wait here raced the page's own render (confirmed live: a
-  // screenshot taken ~5s after this check still showed the full login form
-  // rendering in, meaning the field check ran before React had mounted it,
-  // took the "nothing to do" branch, and the actual form was never
-  // touched). Poll for up to 8s instead of trusting one snapshot.
-  let emailFieldHandle = await page.$(IDENTIFIER_SELECTOR)
-  const pollStart = Date.now()
-  while (!emailFieldHandle && Date.now() - pollStart < 8000) {
-    await page.waitForTimeout(500)
-    emailFieldHandle = await page.$(IDENTIFIER_SELECTOR)
-  }
+// Confirmed live via a clickable-elements dump: "Not now" on the onetap
+// screen is a <div role="button">, not a real <button> — every variant is
+// checked as both a real button and a role="button" element.
+const DISMISS_SELECTOR =
+  'button:has-text("Not now"), [role="button"]:has-text("Not now"), ' +
+  'button:has-text("Not Now"), [role="button"]:has-text("Not Now"), ' +
+  'button:has-text("Continue"), [role="button"]:has-text("Continue"), ' +
+  'button:has-text("Save info"), [role="button"]:has-text("Save info")'
 
-  // A persistent profile that's already logged in doesn't show the email/
-  // pass form at all — confirmed live, it can land on a "remembered
-  // account" screen (avatar + username + Continue) or, after a real
-  // successful submit, Instagram's own /accounts/onetap/ "Save your login
-  // info?" interstitial (Save info / Not now, no Continue button at all —
-  // confirmed live via an empty input dump on that exact URL). Covers being
-  // fully logged in already too (none of these match — nothing left to do).
-  if (!emailFieldHandle) {
-    // Confirmed live via a clickable-elements dump: "Not now" on the
-    // onetap screen is a <div role="button">, not a real <button> — a
-    // button-only selector silently matched nothing. Every variant now
-    // checked as both a real button and a role="button" element.
-    const dismissBtn = await page.$(
-      'button:has-text("Not now"), [role="button"]:has-text("Not now"), ' +
-      'button:has-text("Not Now"), [role="button"]:has-text("Not Now"), ' +
-      'button:has-text("Continue"), [role="button"]:has-text("Continue"), ' +
-      'button:has-text("Save info"), [role="button"]:has-text("Save info")',
-    )
-    console.log('[ig-auto-login] performLogin: no identifier field, dismissBtn found:', !!dismissBtn, 'url:', page.url())
-    if (dismissBtn) {
-      await dismissBtn.click()
-      console.log('[ig-auto-login] performLogin: clicked dismiss button')
-      await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {})
-      await page.waitForTimeout(1500)
-      console.log('[ig-auto-login] performLogin: after dismiss click+wait, url:', page.url())
-    }
-    return
-  }
+const AUTHORIZE_SELECTOR =
+  'button[name="__CONFIRM__"], [data-testid="app-install-allow-button"], ' +
+  'button:has-text("Authorize"), [role="button"]:has-text("Authorize"), ' +
+  'button:has-text("Allow"), [role="button"]:has-text("Allow")'
 
-  // Confirmed via a live input dump (name="username" and placeholder-based
-  // guesses both missed): the visible "Mobile number, username or email"
-  // text isn't a real placeholder — it's a floating label over a plain
-  // name="email" field. Instagram's login form reuses Facebook's own field
-  // names (name="email" / name="pass"). The input[type="submit"] the dump
-  // found is present but not visible (a hidden native fallback behind
-  // whatever renders the actual "Log in" button) — confirmed live, the
-  // click just times out waiting for it to become visible. Pressing Enter
-  // in the password field submits the form natively regardless of which
-  // element is technically the submit control.
+/**
+ * Fills and submits the currently-visible email/pass (or username/password)
+ * form, including the 2FA follow-up if one appears. Assumes the identifier
+ * field is already confirmed present — callers check that first.
+ */
+async function fillLoginForm(page: Page, creds: IgCredentials): Promise<void> {
   // Correct credentials still got a fake "wrong password" from Instagram
   // (confirmed with the account owner) — the classic tell for anti-bot
   // deception rather than a real credential error. page.fill() sets the
   // value instantly with no keystrokes, which is one of the more obvious
   // automation signals; typing character-by-character with human-scale
   // delays and a couple of "reading the page" pauses is the standard fix.
-  await page.waitForSelector(IDENTIFIER_SELECTOR, { timeout: 15000 })
   await page.waitForTimeout(800 + Math.random() * 1200)
 
   const emailField = page.locator(IDENTIFIER_SELECTOR)
@@ -107,9 +67,7 @@ async function performLogin(page: Page, creds: IgCredentials): Promise<void> {
   // still spinning past 20s) — this residential proxy is just slow enough
   // that networkidle's "briefly no requests" heuristic never actually
   // fires. Wait directly for the one thing that matters: navigation away
-  // from the login path, with a generous timeout for proxy latency. If it
-  // times out, the URL check below still runs and reports accurately
-  // instead of assuming success.
+  // from the login path, with a generous timeout for proxy latency.
   await page.waitForURL(u => !u.pathname.includes('/accounts/login'), { timeout: 40000 }).catch(() => {})
   await page.waitForTimeout(1500)
 
@@ -144,33 +102,64 @@ async function performLogin(page: Page, creds: IgCredentials): Promise<void> {
 
 export async function autoLoginInstagram(page: Page, creds: IgCredentials): Promise<void> {
   await page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'networkidle', timeout: 30000 })
-  await performLogin(page, creds)
+
+  // Poll instead of a single snapshot check — confirmed live that a fixed
+  // short wait races the page's own render (a screenshot taken seconds
+  // after an instant check still showed the form rendering in).
+  let identifierField = await page.$(IDENTIFIER_SELECTOR)
+  const pollStart = Date.now()
+  while (!identifierField && Date.now() - pollStart < 8000) {
+    await page.waitForTimeout(500)
+    identifierField = await page.$(IDENTIFIER_SELECTOR)
+  }
+  if (identifierField) {
+    await fillLoginForm(page, creds)
+  }
+  // No identifier field at all here means the persistent profile is
+  // already logged in — nothing to do on the main site's login page.
 }
 
+/**
+ * Instagram's OAuth authorize flow chains through several screens via
+ * client-side redirects (its own separate login form, a "remembered
+ * account" Continue screen, the /accounts/onetap/ "save login info"
+ * interstitial, then finally the Authorize screen) — and confirmed live,
+ * more than once, that a fixed check-one-thing-then-move-on sequence keeps
+ * missing steps that render in *after* the check already ran (e.g. a
+ * snapshot mid-poll showed plain instagram.com/, and moments later the page
+ * had gone on to /accounts/onetap/ on its own). Polling in a loop and
+ * handling whichever recognizable screen is currently up — rather than
+ * assuming a fixed order — is what actually keeps up with that chain.
+ */
 export async function authorizeMetaOAuth(page: Page, oauthUrl: string, creds: IgCredentials): Promise<void> {
   await page.goto(oauthUrl, { waitUntil: 'networkidle', timeout: 30000 })
-  await page.waitForTimeout(1000)
 
-  // Confirmed live: this OAuth authorize URL shows its own separate login
-  // step (a different, older-styled Instagram login page, or a "remembered
-  // account" Continue screen) even for an account that's already logged
-  // into instagram.com in this same browser — the "Authorize" button never
-  // appears until this second login step is cleared too. performLogin()
-  // handles all three shapes (full form / remembered-account / nothing to
-  // do) on its own, so just always call it here.
-  await performLogin(page, creds)
+  const deadline = Date.now() + 60000
+  while (Date.now() < deadline) {
+    const authorizeBtn = await page.$(AUTHORIZE_SELECTOR)
+    if (authorizeBtn) {
+      await authorizeBtn.click()
+      await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {})
+      await page.waitForTimeout(2000)
+      return
+    }
 
-  // Click the "Authorize" / "Allow" button on Meta's permission page
-  const authorizeBtn = await page.$(
-    'button[name="__CONFIRM__"], ' +
-    '[data-testid="app-install-allow-button"], ' +
-    'button:has-text("Authorize"), ' +
-    'button:has-text("Allow"), ' +
-    'button:has-text("Continue")'
-  )
-  if (authorizeBtn) {
-    await authorizeBtn.click()
-    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {})
-    await page.waitForTimeout(2000)
+    const identifierField = await page.$(IDENTIFIER_SELECTOR)
+    if (identifierField) {
+      await fillLoginForm(page, creds)
+      continue
+    }
+
+    const dismissBtn = await page.$(DISMISS_SELECTOR)
+    if (dismissBtn) {
+      await dismissBtn.click()
+      await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {})
+      await page.waitForTimeout(1500)
+      continue
+    }
+
+    // Nothing recognized right now — likely mid client-side redirect.
+    // Wait and recheck rather than giving up on the first empty snapshot.
+    await page.waitForTimeout(1500)
   }
 }
