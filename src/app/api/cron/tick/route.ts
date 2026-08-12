@@ -6,6 +6,7 @@ import { runDailyAutoSchedule } from '@/lib/instagram/auto-schedule'
 import { processDriveExports } from '@/lib/drive-archive/process'
 import { internalBaseUrl } from '@/lib/internal-url'
 import { syncPoseLibraryFromPinterest, reapStaleAdhocJobs } from '@/lib/pose-recreate-sync'
+import { notifyMonitorUser } from '@/lib/monitor/notify'
 
 const CRON_SECRET = process.env.CRON_SECRET
 const QUEUE_CONCURRENCY = 2
@@ -138,18 +139,38 @@ export async function GET(req: NextRequest) {
   // in flight with no local record of it, and resubmitting blind risks paying
   // for the same render twice. Mark it failed and let a person decide,
   // after checking whether the original call actually billed.
-  await query(
-    `UPDATE generation_queue
-        SET status = 'failed',
-            error = COALESCE(error, 'Job stalled — no progress for 60 minutes. Check WaveSpeed usage before resubmitting; the original call may have already billed.'),
-            finished_at = now()
-      WHERE status = 'processing'
-        AND job_type IN ('copy_paste_v2', 'copy_prompts_generate', 'seedance_i2v', 'infinite_talk')
-        AND COALESCE(
-              NULLIF(output->>'progressAt', '')::timestamptz,
-              started_at
-            ) < now() - interval '60 minutes'`,
-  ).catch(err => console.error('[cron/tick] fail stale heartbeat jobs:', err))
+  //
+  // Also notify — this used to be the "never notifies anyone" sweep called
+  // out above; a person waiting in Telegram deserves the same push
+  // reapStaleAdhocJobs already gives pose-recreate, not silence for an hour.
+  // Per-row instead of one bulk UPDATE so each notify is tied to the exact
+  // job it fired for; the status='processing' guard on the UPDATE still
+  // makes this race-safe against a concurrent tick the same way the old
+  // single statement was.
+  const STALE_JOB_ERROR = 'Job stalled — no progress for 60 minutes. Check WaveSpeed usage before resubmitting; the original call may have already billed.'
+  try {
+    const staleJobs = await rows<{ id: string; user_id: string }>(
+      `SELECT id, user_id FROM generation_queue
+        WHERE status = 'processing'
+          AND job_type IN ('copy_paste_v2', 'copy_prompts_generate', 'seedance_i2v', 'infinite_talk')
+          AND COALESCE(
+                NULLIF(output->>'progressAt', '')::timestamptz,
+                started_at
+              ) < now() - interval '60 minutes'`,
+    )
+    for (const job of staleJobs) {
+      const failed = await query(
+        `UPDATE generation_queue SET status = 'failed', error = COALESCE(error, $1), finished_at = now()
+          WHERE id = $2 AND status = 'processing'`,
+        [STALE_JOB_ERROR, job.id],
+      )
+      if (failed.rowCount) {
+        await notifyMonitorUser(job.user_id, `❌ ${STALE_JOB_ERROR}`).catch(() => {})
+      }
+    }
+  } catch (err) {
+    console.error('[cron/tick] fail stale heartbeat jobs:', err)
+  }
 
   // My Pod resume lease: worker heartbeats progressAt ~every 60s during Comfy/Python work.
   // If heartbeat stops (deploy/crash), requeue to pending and continue from done_items.
