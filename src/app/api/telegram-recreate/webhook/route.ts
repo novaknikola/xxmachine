@@ -316,20 +316,23 @@ async function generateFromReference(opts: {
   if (explicitPoses) {
     poses = explicitPoses.map(url => ({ id: null, image_url: url, category: null }))
   } else {
-    // Draws from the WHOLE library (all content_format tags combined), not
-    // just the tag matching the picked format — content_format only controls
-    // output dimension/Drive folder/NSFW gating below, it was never a real
-    // constraint on which pose can serve which output (every pose goes
-    // through the same Seedream Edit regardless). Per the user's explicit
-    // ask: a "posts"-tagged pool of 36-40 was recycling constantly while
-    // ~1000 untagged-for-this-format poses sat unused. nsfw stays a hard
-    // filter — the one axis that's a genuine safety boundary, not
-    // organizational.
+    // Draws from the WHOLE library (all content_format tags combined AND all
+    // accounts' imports, not just this user's own), not just the tag matching
+    // the picked format — content_format only controls output dimension/Drive
+    // folder/NSFW gating below, it was never a real constraint on which pose
+    // can serve which output (every pose goes through the same Seedream Edit
+    // regardless). Per the user's explicit ask: a "posts"-tagged pool of
+    // 36-40 was recycling constantly while ~1000 untagged-for-this-format
+    // poses sat unused. Shared across accounts per the user's explicit ask
+    // 2026-08-13 — with only a handful of accounts total there's no reason
+    // one account's imported poses should be invisible to another's bot.
+    // nsfw stays a hard filter — the one axis that's a genuine safety
+    // boundary, not organizational.
     const libraryPoses = await rows<{ id: string; image_url: string; category: string | null }>(
       `SELECT id, image_url, category FROM pose_library
-        WHERE user_id = $1 AND active = true AND nsfw = $2
-        ORDER BY random() LIMIT $3`,
-      [userId, nsfw, wantCount ?? 1],
+        WHERE active = true AND nsfw = $1
+        ORDER BY random() LIMIT $2`,
+      [nsfw, wantCount ?? 1],
     )
     if (!libraryPoses.length) {
       await sendText(chatId, `⚠️ No ${nsfw ? 'NSFW' : 'SFW'} poses in the ${escapeHtml(formatLabel)} library yet — import some first.`)
