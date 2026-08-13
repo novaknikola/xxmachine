@@ -108,6 +108,13 @@ export async function connectAccountViaOAuth(accountId: string): Promise<{ usern
     console.log('[auto-oauth-connect] DEBUG final url:', page.url())
 
     if (!hasToken) {
+      // Distinguish a suspended account from a generic stuck-flow failure —
+      // confirmed live that Instagram routes OAuth straight to this URL for
+      // suspended accounts instead of any error the loop above recognizes,
+      // so it otherwise surfaces as an opaque "ran with no error" failure.
+      if (page.url().includes('/accounts/suspended/')) {
+        throw new Error('Instagram has suspended this account')
+      }
       throw new Error('OAuth flow ran with no error but no access token was written — check the 02/03 screenshots for the actual final page')
     }
 
