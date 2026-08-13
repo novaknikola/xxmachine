@@ -285,7 +285,7 @@ export function RunTab() {
           job_type: 'video_repurpose',
           input: {
             videoUrl: item.kling_video_url,
-            videoName: `copypaste_${item.id.slice(0, 8)}.mp4`,
+            videoName: `${item.id.slice(0, 8)}.mp4`,
             count: studio.repurposeCount,
             effects: {
               brightness: true, contrast: true, saturation: true,

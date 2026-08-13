@@ -510,7 +510,7 @@ export async function POST(req: NextRequest) {
       await enqueueRepurposeJob({
         userId: rpUserId,
         videoUrl: item.kling_video_url,
-        videoName: `copypaste_${String(postId).slice(0, 8)}.mp4`,
+        videoName: `${String(postId).slice(0, 8)}.mp4`,
         count: s.variantCount,
         effects: s.effects,
         outputDriveFolderId: s.outputDriveFolderId,

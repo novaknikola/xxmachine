@@ -50,7 +50,7 @@ async function enqueueRepurpose(opts: {
       opts.userId,
       JSON.stringify({
         videoUrl: opts.videoUrl,
-        videoName: `copypaste_${opts.itemId.slice(0, 8)}.mp4`,
+        videoName: `${opts.itemId.slice(0, 8)}.mp4`,
         count: opts.count,
         baseSeed: Math.floor(Math.random() * 0xffffff),
         // Everything on: the point is maximum spread between variants.
