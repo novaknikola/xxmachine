@@ -428,7 +428,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         }
       }
 
-      {
+      // Telegram push only for jobs the bot itself created (folder command /
+      // "Repurpose ×N" button — enqueueRepurposeJob always sets archiveToDrive
+      // true). A web-dashboard submission never sets this, so it stays silent —
+      // nothing there was ever triggered from Telegram, so a Telegram DM about
+      // it has no start-of-loop to close.
+      if (archiveToDrive) {
         const { notifyRepurposeDone } = await import('@/lib/monitor/notify')
         await notifyRepurposeDone({
           userId: job.user_id,
@@ -534,16 +539,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         [count, JSON.stringify(finalUrls), id],
       )
 
-      {
-        const { notifyRepurposeDone } = await import('@/lib/monitor/notify')
-        await notifyRepurposeDone({
-          userId: job.user_id,
-          total: count,
-          failed: finalUrls.filter(u => u.startsWith('error:')).length,
-          videoName: imageName,
-          outputDriveFolderId,
-        }).catch(() => {})
-      }
+      // No Telegram origin exists for image_repurpose yet — it's only ever
+      // submitted from the web dashboard, so there is nothing to notify back
+      // to. Revisit if a Telegram-triggered path is ever added (mirror the
+      // archiveToDrive gate video_repurpose uses above).
 
       return NextResponse.json({ ok: true, done: count })
     }
@@ -1994,10 +1993,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         `UPDATE generation_queue SET status='failed', error=$1, finished_at=now() WHERE id=$2`,
         [errMsg, id],
       )
-      if (job.job_type === 'video_repurpose') {
+      // Same archiveToDrive gate as the success path: only jobs the bot itself
+      // queued (folder command / "Repurpose ×N" button) get a Telegram push.
+      const repurposeInput = job.input as { videoName?: string; archiveToDrive?: boolean } | undefined
+      if (job.job_type === 'video_repurpose' && repurposeInput?.archiveToDrive) {
         const { notifyRepurposeFailed } = await import('@/lib/monitor/notify')
-        const videoName = (job.input as { videoName?: string } | undefined)?.videoName
-        await notifyRepurposeFailed(job.user_id, errMsg, videoName).catch(() => {})
+        await notifyRepurposeFailed(job.user_id, errMsg, repurposeInput.videoName).catch(() => {})
       }
     } else {
       await query(
