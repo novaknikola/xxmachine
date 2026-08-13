@@ -34,6 +34,28 @@ if (list.parsed.length !== 2 || list.parsed[0].shortCode !== 'AAA111') {
   console.log('ok list', list.parsed.map(p => p.shortCode))
 }
 
+// A bare shortcode alone on its own line still works via the list parser.
+const listBare = parseReelUrlList('ABC123xyz_')
+if (listBare.parsed.length !== 1 || listBare.parsed[0].shortCode !== 'ABC123xyz_') {
+  console.error('FAIL list bare shortcode', listBare)
+  failed++
+} else {
+  console.log('ok list bare shortcode', listBare.parsed.map(p => p.shortCode))
+}
+
+// Regression for the 2026-08-13 incident: a real link followed by a plain
+// instruction sentence must not shred the sentence into fake reel links.
+const listSentence = parseReelUrlList(
+  'https://www.instagram.com/reel/Db5mUCDO86a/\n' +
+  'Change environment background colors a little. Remove screen. Increase breasts chest, petite.',
+)
+if (listSentence.parsed.length !== 1 || listSentence.parsed[0].shortCode !== 'Db5mUCDO86a') {
+  console.error('FAIL sentence shredded into fake shortcodes', listSentence)
+  failed++
+} else {
+  console.log('ok sentence not shredded', listSentence.parsed.map(p => p.shortCode))
+}
+
 if (failed) {
   console.error(`\n${failed} failed`)
   process.exit(1)
