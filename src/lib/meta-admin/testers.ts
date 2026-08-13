@@ -96,6 +96,27 @@ const USERNAME_FIELD_SELECTOR = 'input[placeholder="Enter the username of the In
  * (autocomplete/suggestion behavior, success confirmation) has not been
  * exercised live yet.
  */
+/**
+ * Meta's own anti-abuse rate limiter for this dashboard action — confirmed
+ * live (2026-08-13) after ~8 rapid Add People submissions in a row: a
+ * "You're Temporarily Blocked — It looks like you were misusing this
+ * feature by going too fast" modal appears and every subsequent add fails
+ * with an opaque "Add (submit) button not found" (the button is there, this
+ * modal is just covering it). Callers should stop the whole batch on this,
+ * not keep retrying — hammering a live rate limit only risks extending it.
+ */
+export class MetaRateLimitedError extends Error {
+  constructor() { super('Meta has temporarily blocked Add People for going too fast') }
+}
+
+async function checkNotRateLimited(page: Page): Promise<void> {
+  const blocked = await page.$('text="You\'re Temporarily Blocked"')
+  if (!blocked) return
+  const closeBtn = await page.$('button:has-text("Close"), [role="button"]:has-text("Close")')
+  if (closeBtn) await closeBtn.click().catch(() => {})
+  throw new MetaRateLimitedError()
+}
+
 export async function addInstagramTester(page: Page, appId: string, igUsername: string): Promise<void> {
   await goToRolesPage(page, appId)
 
@@ -103,6 +124,7 @@ export async function addInstagramTester(page: Page, appId: string, igUsername: 
   if (!addPeopleBtn) throw new Error('Add People button not found')
   await addPeopleBtn.click()
   await page.waitForTimeout(1500)
+  await checkNotRateLimited(page)
 
   const radios = await page.$$('input[type="radio"]')
   if (radios.length < 5) throw new Error(`Expected >=5 role radios, found ${radios.length}`)
@@ -114,6 +136,7 @@ export async function addInstagramTester(page: Page, appId: string, igUsername: 
   await usernameField.type(igUsername, { delay: 80 + Math.random() * 60 })
   await page.waitForTimeout(2000)
   await debugScreenshot(page, `add-tester-${igUsername}-filled`)
+  await checkNotRateLimited(page)
 
   // Exact text-match on igUsername doesn't work: Instagram's typeahead
   // renders its own normalized display string (e.g. dots become underscores),
