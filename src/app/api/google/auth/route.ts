@@ -31,7 +31,9 @@ export async function GET(req: NextRequest) {
     cookieStore.set('google_purpose', 'archive', { httpOnly: true, secure, maxAge: 600 })
     cookieStore.set('google_user_id', user.id, { httpOnly: true, secure, maxAge: 600 })
     // Only files created by this app — safer for per-user archive.
-    scope = 'https://www.googleapis.com/auth/drive.file'
+    // Spreadsheets scope added for the account-import/status-tracking sheet
+    // flow, which reuses this same per-user token store.
+    scope = 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets'
   } else if (accountId) {
     cookieStore.set('google_account_id', accountId, { httpOnly: true, secure, maxAge: 600 })
   } else if (characterId) {
