@@ -28,37 +28,52 @@ export function randomTimeInWindow(day: Date, window: ScheduleWindow): Date {
   return new Date(start.getTime() + Math.random() * (end.getTime() - start.getTime()))
 }
 
-async function listUnqueuedDriveFiles(accountId: string, folderId: string): Promise<DriveFile[]> {
+// A shared pool folder needs its "already used" check to span every
+// account, not just the one currently being scheduled — otherwise two
+// different accounts pulling from the same folder would both grab the same
+// oldest unqueued file, since neither one's own history excludes it.
+async function listUnqueuedDriveFiles(folderId: string, accountId: string, poolIsShared: boolean): Promise<DriveFile[]> {
   const accessToken = await getGoogleAccessToken()
   const q = encodeURIComponent(`'${folderId}' in parents and mimeType='video/mp4' and trashed=false`)
   const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime,size)&orderBy=createdTime&pageSize=100`,
+    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime,size)&orderBy=createdTime&pageSize=300`,
     { headers: { Authorization: `Bearer ${accessToken}` } },
   )
   const data = await res.json()
   if (!res.ok) throw new Error(data.error?.message ?? 'Drive API error')
 
-  const used = await rows<{ drive_file_id: string }>(
-    `SELECT drive_file_id FROM instagram_queue
-     WHERE account_id=$1 AND status IN ('pending','pending_approval','publishing','done')`,
-    [accountId],
-  )
+  const used = poolIsShared
+    ? await rows<{ drive_file_id: string }>(
+        `SELECT drive_file_id FROM instagram_queue WHERE status IN ('pending','pending_approval','publishing','done')`,
+      )
+    : await rows<{ drive_file_id: string }>(
+        `SELECT drive_file_id FROM instagram_queue
+         WHERE account_id=$1 AND status IN ('pending','pending_approval','publishing','done')`,
+        [accountId],
+      )
   const usedIds = new Set(used.map(r => r.drive_file_id))
   return ((data.files ?? []) as DriveFile[]).filter(f => !usedIds.has(f.id))
 }
 
+// Fallback content source for accounts with no dedicated google_drive_folder_id
+// of their own — one shared pool of generic, pre-split, one-file-per-account
+// videos (confirmed live 2026-08-13: 1000+ mp4s, already split into distinct
+// numbered variants so no two accounts ever post the literal same file).
+const SHARED_POOL_FOLDER_ID = process.env.CONTENT_POOL_DRIVE_FOLDER_ID
+
 /**
- * Once-a-day content distribution: each connected account with a Drive folder
- * gets up to one post per schedule window (morning/afternoon/evening), pulled
- * from its own folder's not-yet-queued videos. "Proportional" here means each
- * account draws from what it actually has available — an account with fewer
- * new videos in Drive that day simply gets fewer posts, nothing is shared
- * across accounts' folders.
+ * Once-a-day content distribution: each connected account gets up to one
+ * post per schedule window (morning/afternoon/evening) — an account with its
+ * own google_drive_folder_id draws from that folder alone; an account
+ * without one falls back to the shared pool (CONTENT_POOL_DRIVE_FOLDER_ID),
+ * globally deduplicated across every account so the same file never gets
+ * assigned twice.
  *
- * Inserted rows use status 'pending_approval' — a value with no CHECK
- * constraint on instagram_queue.status, so the existing cron publish query
- * (WHERE status='pending') and every other existing consumer of this table
- * simply never sees them until a human approves.
+ * Own-folder accounts insert as 'pending_approval' (a human must approve
+ * before the cron publish query — WHERE status='pending' — ever sees them).
+ * Shared-pool accounts insert directly as 'pending' — no per-day approval
+ * step, per an explicit decision to run these fully hands-off rather than
+ * require someone to approve ~180 items/day across dozens of accounts.
  */
 export async function runDailyAutoSchedule(): Promise<{ ran: boolean; created: number }> {
   const today = new Date().toISOString().slice(0, 10)
@@ -73,26 +88,30 @@ export async function runDailyAutoSchedule(): Promise<{ ran: boolean; created: n
   )
   if (!claimed) return { ran: false, created: 0 }
 
-  const accounts = await rows<{ id: string; google_drive_folder_id: string }>(
+  const accounts = await rows<{ id: string; google_drive_folder_id: string | null }>(
     `SELECT id, google_drive_folder_id FROM instagram_accounts
-     WHERE google_drive_folder_id IS NOT NULL
-       AND (ig_access_token IS NOT NULL OR ig_session IS NOT NULL)`,
+     WHERE (ig_access_token IS NOT NULL OR ig_session IS NOT NULL)`,
   )
 
   let created = 0
   const day = new Date()
 
   for (const acc of accounts) {
+    const usesSharedPool = !acc.google_drive_folder_id
+    if (usesSharedPool && !SHARED_POOL_FOLDER_ID) continue // no folder to draw from at all
+    const folderId = acc.google_drive_folder_id ?? SHARED_POOL_FOLDER_ID!
+    const status = usesSharedPool ? 'pending' : 'pending_approval'
+
     try {
-      const files = await listUnqueuedDriveFiles(acc.id, acc.google_drive_folder_id)
+      const files = await listUnqueuedDriveFiles(folderId, acc.id, usesSharedPool)
       const picks = files.slice(0, WINDOWS.length)
 
       for (let i = 0; i < picks.length; i++) {
         const scheduledAt = randomTimeInWindow(day, WINDOWS[i])
         await query(
           `INSERT INTO instagram_queue (account_id, drive_file_id, filename, status, scheduled_at)
-           VALUES ($1,$2,$3,'pending_approval',$4)`,
-          [acc.id, picks[i].id, picks[i].name, scheduledAt.toISOString()],
+           VALUES ($1,$2,$3,$4,$5)`,
+          [acc.id, picks[i].id, picks[i].name, status, scheduledAt.toISOString()],
         )
         created++
       }
