@@ -76,10 +76,18 @@ async function main() {
 
   console.log('Reading account rows...')
   const values = await readSheetRange(GOOGLE_USER_ID, SPREADSHEET_ID, `${sheetName}!A1:D1000`)
-  const sheetRows: SheetRow[] = values
+  let sheetRows: SheetRow[] = values
     .map((r, i) => ({ rowNumber: i + 1, username: (r[0] ?? '').trim(), password: (r[1] ?? '').trim(), totp: (r[2] ?? '').replace(/\s+/g, '') }))
     .filter(r => r.username && r.password)
   console.log(`Found ${sheetRows.length} account rows.`)
+
+  // Optional: pass specific usernames as argv to run a small controlled
+  // batch (e.g. testing after a fix) instead of the whole remaining sheet.
+  const onlyUsernames = process.argv.slice(2).map(u => u.toLowerCase())
+  if (onlyUsernames.length) {
+    sheetRows = sheetRows.filter(r => onlyUsernames.includes(r.username.toLowerCase()))
+    console.log(`Filtered to ${sheetRows.length} requested account(s): ${onlyUsernames.join(', ')}`)
+  }
 
   async function setStatus(rowNumber: number, status: string) {
     await writeSheetCell(GOOGLE_USER_ID, SPREADSHEET_ID, `${sheetName}!D${rowNumber}`, status).catch(err =>
