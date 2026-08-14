@@ -208,7 +208,13 @@ async function main() {
         console.log(`  ✗ ${r.username}: ${status}`)
       }
       writeProgress(results)
-      await sleep(4000)
+      // A flat 4s between accounts reads as a script, not a person — random
+      // 1-3 minutes between whole account connects instead, on top of the
+      // Add People pacing above, so back-to-back OAuth-connects don't look
+      // like a burst either.
+      const betweenAccounts = humanDelayMs(60, 180)
+      console.log(`Waiting ${(betweenAccounts / 1000).toFixed(0)}s before the next account...`)
+      await sleep(betweenAccounts)
     }
   } finally {
     if (metaContext) await metaContext.close()
