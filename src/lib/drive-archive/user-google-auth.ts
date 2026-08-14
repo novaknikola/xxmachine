@@ -1,8 +1,5 @@
 import { one, query } from '@/lib/db'
 
-const CLIENT_ID = process.env.GOOGLE_CLIENT_ID!
-const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!
-
 interface UserGoogleTokens {
   accessToken: string
   refreshToken: string
@@ -70,6 +67,19 @@ async function refreshUserGoogleToken(refreshToken: string): Promise<{
   refreshToken?: string
   expiresInSec: number
 }> {
+  // Read lazily, not as a module-level const: standalone scripts that call
+  // dotenv.config() themselves still hit ESM's static-import hoisting (every
+  // import statement resolves before any of the importing file's own
+  // top-level code runs, regardless of source order), so a module-scope
+  // read here would capture undefined even when dotenv.config() appears
+  // "before" the import textually. Confirmed live, twice, in two different
+  // standalone scripts — this was silently masked as long as the cached
+  // access token stayed valid, since neither script actually exercised the
+  // refresh path until enough time had passed. The running Next.js app
+  // itself is unaffected either way — it loads .env.local before any
+  // application code runs.
+  const CLIENT_ID = process.env.GOOGLE_CLIENT_ID
+  const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET
   if (!CLIENT_ID || !CLIENT_SECRET) {
     throw new Error('GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET not configured')
   }
