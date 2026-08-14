@@ -146,6 +146,12 @@ export function InstagramTab() {
   const [addForm, setAddForm] = useState({ name: '', username: '', password: '', totp: '', proxy: '' })
   const [addingAccount, setAddingAccount] = useState(false)
   const [openBrowserRunning, setOpenBrowserRunning] = useState(false)
+  const [sheetSync, setSheetSync] = useState<{
+    running: boolean
+    startedAt: string | null
+    results: Record<string, string>
+    recentLog: string[]
+  }>({ running: false, startedAt: null, results: {}, recentLog: [] })
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editForm, setEditForm] = useState({ name: '', username: '', password: '', totp: '', proxy: '' })
   const [savingEdit, setSavingEdit] = useState(false)
@@ -204,6 +210,24 @@ export function InstagramTab() {
     const acc = accounts.find(a => a.id === accountId)
     setDriveFolderInput(acc?.google_drive_folder_id ?? '')
   }, [accountId, accounts])
+
+  // Sheet sync runs as a detached background process (can take hours), so
+  // its status comes from polling, not from a stream held open across the
+  // whole run — that would fight Next.js/nginx request timeouts the same
+  // way the cron loopback calls already have to work around.
+  useEffect(() => {
+    let cancelled = false
+    async function poll() {
+      try {
+        const res = await fetch('/api/instagram/sheet-sync/status')
+        if (!res.ok || cancelled) return
+        setSheetSync(await res.json())
+      } catch { /* transient network hiccup — next poll will catch up */ }
+    }
+    poll()
+    const interval = setInterval(poll, 5000)
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [])
   
   function connectWithInstagramApi(id = accountId) {
   if (!id) return
@@ -481,6 +505,27 @@ export function InstagramTab() {
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : 'Bulk OAuth connect failed')
     } finally { setBulkRunning(false) }
+  }
+
+  async function startSheetSync() {
+    try {
+      const res = await fetch('/api/instagram/sheet-sync/start', { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) { toast.error(data.error ?? 'Failed to start'); return }
+      toast.success('Sheet sync started — this can take a while for a large batch')
+      setSheetSync(s => ({ ...s, running: true, startedAt: new Date().toISOString() }))
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Failed to start sheet sync')
+    }
+  }
+
+  async function stopSheetSync() {
+    try {
+      const res = await fetch('/api/instagram/sheet-sync/stop', { method: 'POST' })
+      if (res.ok) toast.success('Stopping...')
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Failed to stop sheet sync')
+    }
   }
 
   async function startBulkBrowserConnect() {
@@ -1000,6 +1045,57 @@ export function InstagramTab() {
                   Retry {Object.values(bulkStatus).filter(s => s === 'error').length} failed with Browser
                 </Button>
               )}
+
+              <div className="border-t border-border/50 pt-3 space-y-2">
+                <p className="text-xs text-muted-foreground font-medium">Sync from Google Sheet</p>
+                <p className="text-[11px] text-muted-foreground leading-relaxed">
+                  Adds every not-yet-connected account from the tracking sheet as a Meta Tester,
+                  imports it with a fresh proxy, and OAuth-connects it — paced slowly to avoid
+                  Meta&apos;s rate limiter. Can take hours for a large batch.
+                </p>
+                <div className="flex gap-2">
+                  <Button size="sm" className="flex-1 h-8 text-xs bg-purple-600 hover:bg-purple-700"
+                    onClick={startSheetSync} disabled={sheetSync.running}>
+                    {sheetSync.running
+                      ? <><Loader2 className="w-3 h-3 mr-1.5 animate-spin" />Running...</>
+                      : <><Play className="w-3 h-3 mr-1.5" />Run</>
+                    }
+                  </Button>
+                  {sheetSync.running && (
+                    <Button size="sm" variant="outline"
+                      className="h-8 text-xs border-destructive/40 text-destructive hover:bg-destructive/10"
+                      onClick={stopSheetSync}>
+                      <X className="w-3 h-3" />
+                    </Button>
+                  )}
+                </div>
+                {sheetSync.startedAt && (
+                  <p className="text-[11px] text-muted-foreground">
+                    {sheetSync.running ? 'Started' : 'Last run started'} {new Date(sheetSync.startedAt).toLocaleString()}
+                  </p>
+                )}
+                {Object.keys(sheetSync.results).length > 0 && (
+                  <div className="grid grid-cols-2 gap-2 text-center">
+                    <div className="rounded-lg bg-green-500/10 px-2 py-1.5">
+                      <p className="text-sm font-bold text-green-400">
+                        {Object.values(sheetSync.results).filter(v => v === 'connected').length}
+                      </p>
+                      <p className="text-[10px] text-muted-foreground">Connected</p>
+                    </div>
+                    <div className="rounded-lg bg-secondary/50 px-2 py-1.5">
+                      <p className="text-sm font-bold">{Object.keys(sheetSync.results).length}</p>
+                      <p className="text-[10px] text-muted-foreground">Processed</p>
+                    </div>
+                  </div>
+                )}
+                {sheetSync.recentLog.length > 0 && (
+                  <div className="rounded-lg bg-secondary/30 p-2 max-h-40 overflow-y-auto">
+                    <pre className="text-[10px] text-muted-foreground whitespace-pre-wrap font-mono">
+                      {sheetSync.recentLog.join('\n')}
+                    </pre>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
