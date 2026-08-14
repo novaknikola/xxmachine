@@ -22,8 +22,12 @@ const USER_AGENTS = [
 ]
 
 const TIMEZONES = [
+  // 'America/Miami' is not a real IANA timezone ID — confirmed live
+  // (2026-08-14), it crashed browserType.launchPersistentContext outright.
+  // Miami is Eastern time, already covered by America/New_York; replaced
+  // with Anchorage for actual geographic diversity instead of a duplicate.
   'America/New_York', 'America/Los_Angeles', 'America/Chicago', 'America/Denver',
-  'America/Phoenix', 'America/Toronto', 'America/Vancouver', 'America/Miami',
+  'America/Phoenix', 'America/Toronto', 'America/Vancouver', 'America/Anchorage',
   'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Madrid', 'Europe/Rome',
   'Europe/Amsterdam', 'Europe/Warsaw', 'Europe/Stockholm', 'Europe/Zurich',
   'Asia/Tokyo', 'Asia/Seoul', 'Asia/Singapore', 'Asia/Dubai',
