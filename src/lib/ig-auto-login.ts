@@ -157,16 +157,17 @@ async function fillLoginForm(page: Page, creds: IgCredentials): Promise<void> {
     if (!creds.totpSecret) throw new Error('2FA required but no TOTP secret provided')
     const code = otplib.generateSync({ secret: creds.totpSecret })
 
-    // Confirmed live via input dump: this screen has exactly one text
-    // input (the "Code" field, floating label again — no name/aria-label
-    // to match), a hidden submit fallback, and a "trust this device"
-    // checkbox (already checked by default). Enter submits reliably, same
-    // fix as the login form.
-    // 15s wasn't always enough — confirmed live (2026-08-14) a real timeout
-    // on a working account where the challenge screen just rendered slowly
-    // on that proxy hop, not a genuinely missing field. 35s gives real
-    // proxy latency more room before treating it as a hard failure.
-    const codeInput = page.locator('input[type="text"]').first()
+    // Confirmed live via input dump: this screen has exactly one code
+    // input (a hidden submit fallback and a "trust this device" checkbox
+    // alongside it, already checked by default). Enter submits reliably,
+    // same fix as the login form.
+    // The field's type isn't consistent across accounts — confirmed live
+    // (2026-08-14) a real account whose challenge screen used
+    // input[type="tel"] (name="verificationCode"), not "text", so the
+    // original selector never matched at all — it looked like a timing
+    // issue (retried twice, failed identically both times with the same
+    // 35s timeout) but was actually a selector gap.
+    const codeInput = page.locator('input[type="text"], input[type="tel"]').first()
     await codeInput.waitFor({ timeout: 35000 })
     await codeInput.click()
     await codeInput.type(code, { delay: 90 + Math.random() * 70 })
