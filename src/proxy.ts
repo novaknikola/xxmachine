@@ -39,6 +39,19 @@ const PUBLIC_API_PREFIXES = [
   // silent 401 here with zero server-side log output, since the request
   // never reached the route's own code at all).
   '/api/instagram/oauth/callback',
+  // Same class of bug, same silent-401-with-no-server-log symptom, found
+  // live 2026-08-14: cron/tick's own internal loopback calls to these three
+  // routes carry no session cookie and no secret header, so every due
+  // Instagram reel / scheduled post / token refresh was silently dropped at
+  // the edge — the automated posting pipeline has likely never actually
+  // fired since this allowlist was introduced. Each is UUID-gated (acts
+  // only on a pre-existing, already-approved queue/post row it's given the
+  // id for) or takes no user input at all, so exposing them doesn't let an
+  // outsider inject or approve new content, only nudge something already
+  // queued to run slightly early if they somehow guessed its id.
+  '/api/publish/now',
+  '/api/instagram/publish-reel',
+  '/api/instagram/refresh-token',
 ]
 
 export function proxy(req: NextRequest) {
