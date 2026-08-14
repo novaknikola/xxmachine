@@ -162,8 +162,12 @@ async function fillLoginForm(page: Page, creds: IgCredentials): Promise<void> {
     // to match), a hidden submit fallback, and a "trust this device"
     // checkbox (already checked by default). Enter submits reliably, same
     // fix as the login form.
+    // 15s wasn't always enough — confirmed live (2026-08-14) a real timeout
+    // on a working account where the challenge screen just rendered slowly
+    // on that proxy hop, not a genuinely missing field. 35s gives real
+    // proxy latency more room before treating it as a hard failure.
     const codeInput = page.locator('input[type="text"]').first()
-    await codeInput.waitFor({ timeout: 15000 })
+    await codeInput.waitFor({ timeout: 35000 })
     await codeInput.click()
     await codeInput.type(code, { delay: 90 + Math.random() * 70 })
     await page.waitForTimeout(400 + Math.random() * 400)

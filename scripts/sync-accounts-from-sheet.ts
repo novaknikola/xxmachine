@@ -69,6 +69,15 @@ function humanDelayMs(minSec: number, maxSec: number): number {
 }
 const sleep = (ms: number) => new Promise(res => setTimeout(res, ms))
 
+// Timeouts, dropped connections, a slow-rendering page — worth one retry
+// after a real pause, since the persistent Chrome profile usually resumes
+// mid-session rather than from scratch. Suspensions, wrong credentials, and
+// "no TOTP secret" are real outcomes retrying can't change — those still
+// fail immediately, once.
+function isTransientError(message: string): boolean {
+  return /timeout|econnreset|etimedout|net::err|execution context was destroyed/i.test(message)
+}
+
 async function main() {
   console.log('Resolving sheet tab name...')
   const sheetName = await resolveSheetName()
@@ -140,6 +149,7 @@ async function main() {
   const results: Record<string, string> = {}
   let rateLimited = false
   let processed = 0
+  const retryQueue: (SheetRow & { accountId: string; failedStage: 'tester' | 'oauth' })[] = []
 
   try {
     for (const r of needsWork) {
@@ -170,10 +180,16 @@ async function main() {
               console.log(`\n!!! Meta rate-limited us — stopping tester-adds for the rest of this run.`)
               rateLimited = true
             } else {
-              console.log(`  tester FAILED: ${r.username} — ${err instanceof Error ? err.message : err}`)
-              await setStatus(r.rowNumber, `failed: tester add — ${err instanceof Error ? err.message.slice(0, 80) : err}`)
-              results[r.username] = 'tester add failed'
-              writeProgress(results)
+              const msg = err instanceof Error ? err.message : String(err)
+              if (isTransientError(msg)) {
+                console.log(`  tester FAILED (transient, will retry): ${r.username} — ${msg}`)
+                retryQueue.push({ ...r, accountId: r.accountId!, failedStage: 'tester' })
+              } else {
+                console.log(`  tester FAILED: ${r.username} — ${msg}`)
+                await setStatus(r.rowNumber, `failed: tester add — ${msg.slice(0, 80)}`)
+                results[r.username] = 'tester add failed'
+                writeProgress(results)
+              }
               continue // don't attempt OAuth-connect, it needs the tester role
             }
           }
@@ -202,10 +218,15 @@ async function main() {
         console.log(`  ✓ ${r.username}`)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
-        const status = message.includes('suspended') ? 'suspended' : `failed: ${message.slice(0, 100)}`
-        await setStatus(r.rowNumber, status)
-        results[r.username] = status
-        console.log(`  ✗ ${r.username}: ${status}`)
+        if (isTransientError(message)) {
+          console.log(`  ✗ ${r.username} (transient, will retry): ${message}`)
+          retryQueue.push({ ...r, accountId: r.accountId!, failedStage: 'oauth' })
+        } else {
+          const status = message.includes('suspended') ? 'suspended' : `failed: ${message.slice(0, 100)}`
+          await setStatus(r.rowNumber, status)
+          results[r.username] = status
+          console.log(`  ✗ ${r.username}: ${status}`)
+        }
       }
       writeProgress(results)
       // A flat 4s between accounts reads as a script, not a person — random
@@ -215,6 +236,39 @@ async function main() {
       const betweenAccounts = humanDelayMs(60, 180)
       console.log(`Waiting ${(betweenAccounts / 1000).toFixed(0)}s before the next account...`)
       await sleep(betweenAccounts)
+    }
+
+    // One retry pass for whatever looked transient — after a real pause,
+    // not immediately, so a flaky moment (proxy hiccup, slow render) has
+    // actually passed rather than hitting the exact same condition again.
+    if (retryQueue.length && !rateLimited) {
+      const pause = humanDelayMs(120, 300)
+      console.log(`\n${retryQueue.length} account(s) had transient failures — waiting ${(pause / 60000).toFixed(1)} min before retrying them once...`)
+      await sleep(pause)
+
+      for (const r of retryQueue) {
+        console.log(`Retrying ${r.username} (failed at: ${r.failedStage})...`)
+        try {
+          if (r.failedStage === 'tester') {
+            const delay = humanDelayMs(25, 55)
+            await sleep(delay)
+            await addInstagramTester(metaPage!, META_APP_ID, r.username)
+            console.log(`  tester ok on retry: ${r.username}`)
+          }
+          await connectAccountViaOAuth(r.accountId)
+          await setStatus(r.rowNumber, 'connected')
+          results[r.username] = 'connected'
+          console.log(`  ✓ ${r.username} (retry succeeded)`)
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          const status = message.includes('suspended') ? 'suspended' : `failed after retry: ${message.slice(0, 100)}`
+          await setStatus(r.rowNumber, status)
+          results[r.username] = status
+          console.log(`  ✗ ${r.username}: ${status}`)
+        }
+        writeProgress(results)
+        await sleep(humanDelayMs(60, 180))
+      }
     }
   } finally {
     if (metaContext) await metaContext.close()
