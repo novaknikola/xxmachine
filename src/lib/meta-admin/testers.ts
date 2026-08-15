@@ -110,7 +110,13 @@ export class MetaRateLimitedError extends Error {
 }
 
 async function checkNotRateLimited(page: Page): Promise<void> {
-  const blocked = await page.$('text="You\'re Temporarily Blocked"')
+  // An exact-text selector quoting a straight ASCII apostrophe never matched
+  // live — confirmed 2026-08-14, this exact modal showing clearly in a
+  // screenshot while the check silently passed and the run kept hammering
+  // an already-active block for ~19 more accounts. Meta's actual DOM text
+  // almost certainly uses a typographic apostrophe (’, U+2019), not '.
+  // Matching "Temporarily Blocked" alone sidesteps the character entirely.
+  const blocked = await page.$('text=Temporarily Blocked')
   if (!blocked) return
   const closeBtn = await page.$('button:has-text("Close"), [role="button"]:has-text("Close")')
   if (closeBtn) await closeBtn.click().catch(() => {})
