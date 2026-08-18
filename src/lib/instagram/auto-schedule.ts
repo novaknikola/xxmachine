@@ -125,5 +125,11 @@ export async function runDailyAutoSchedule(): Promise<{ ran: boolean; created: n
     [created, today],
   )
 
+  // Now fire-and-forget from cron/tick, so this is the only place its
+  // outcome shows up — worth a success line, not just errors, since a
+  // suspiciously low count (fewer than ~3x eligible accounts) is itself
+  // the signal something truncated the run.
+  console.log(`[auto-schedule] done: ${created} items created for ${accounts.length} eligible accounts`)
+
   return { ran: true, created }
 }

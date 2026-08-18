@@ -64,14 +64,18 @@ export async function GET(req: NextRequest) {
   }
 
   // Instagram daily auto-schedule — draws unqueued Drive videos per connected
-  // account, inserts as 'pending_approval' (never picked up by the reel query
-  // above until a human approves it in the UI).
-  let autoSchedule: Awaited<ReturnType<typeof runDailyAutoSchedule>> = { ran: false, created: 0 }
-  try {
-    autoSchedule = await runDailyAutoSchedule()
-  } catch (err) {
-    console.error('[cron/tick] auto-schedule error:', err)
-  }
+  // account, inserts as 'pending_approval' (own-folder accounts) or 'pending'
+  // (shared-pool accounts). Fire-and-forget, not awaited: confirmed live
+  // 2026-08-18 that awaiting this inline let something truncate the whole
+  // tick request partway through the account loop (32 eligible accounts,
+  // only 2 got queued) — the once-per-day claim is taken up front, so a
+  // truncated run silently starves every account after wherever it got cut
+  // off for the rest of that day, with nothing else to retry it. Once
+  // detached from the request/response cycle, the loop keeps running
+  // in-process regardless of whatever cut the request short (a Node
+  // request timeout was the leading suspect, but this fix doesn't depend on
+  // pinning down the exact mechanism to stop being affected by it).
+  runDailyAutoSchedule().catch(err => console.error('[cron/tick] auto-schedule error:', err))
 
   // Pose-recreate bot: boards titled "[format] ..." auto re-sync (throttled
   // internally to every 30min per board) and any new pins flow straight into
@@ -425,6 +429,6 @@ export async function GET(req: NextRequest) {
     stalledBatchesFinalized,
     monitor: monitorScans,
     driveArchive,
-    autoSchedule,
+    autoSchedule: 'fire-and-forget — not awaited, check logs for its own [auto-schedule] lines',
   })
 }
