@@ -124,7 +124,14 @@ export async function connectAccountViaOAuth(accountId: string): Promise<{ usern
       // distinctly (not the generic message below) is what lets
       // sync-accounts-from-sheet.ts's isTesterGateError route this into a
       // tester-add retry instead of repeating the same doomed attempt.
-      if (/unsupported request/i.test(decodeURIComponent(page.url()))) {
+      //
+      // decodeURIComponent alone does NOT turn "+" back into a space (that's
+      // form-encoding, a different convention from %XX escaping) — confirmed
+      // live this exact check failed to match "Unsupported+request" against
+      // a regex written assuming a real space, even after decoding. Query
+      // params here use "+" for spaces, so that has to be normalized first.
+      const decodedUrl = decodeURIComponent(page.url().replace(/\+/g, ' '))
+      if (/unsupported request/i.test(decodedUrl)) {
         throw new Error('Unsupported request — account was never actually granted the Instagram Tester role')
       }
       throw new Error('OAuth flow ran with no error but no access token was written — check the 02/03 screenshots for the actual final page')
