@@ -28,19 +28,45 @@ export function randomTimeInWindow(day: Date, window: ScheduleWindow): Date {
   return new Date(start.getTime() + Math.random() * (end.getTime() - start.getTime()))
 }
 
+// A single Drive list call caps out at 1000 results — the pool has grown
+// past that, so a one-page fetch only ever sees the *oldest* slice. As that
+// slice gets consumed day over day, fewer of its files remain unused even
+// though thousands of newer ones exist further down the listing — confirmed
+// live 2026-08-18 as the real cause of a steady decline in items created
+// (99 -> 50 -> 4 across three days) despite the pool being nowhere near
+// empty. Pages through nextPageToken until the whole folder is read.
+async function listAllDriveFiles(folderId: string): Promise<DriveFile[]> {
+  const accessToken = await getGoogleAccessToken()
+  const q = encodeURIComponent(`'${folderId}' in parents and mimeType='video/mp4' and trashed=false`)
+  const all: DriveFile[] = []
+  let pageToken: string | undefined
+  do {
+    const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime,size),nextPageToken&orderBy=createdTime&pageSize=1000${pageToken ? `&pageToken=${pageToken}` : ''}`
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error?.message ?? 'Drive API error')
+    all.push(...((data.files ?? []) as DriveFile[]))
+    pageToken = data.nextPageToken
+  } while (pageToken)
+  return all
+}
+
+// Full-listing cache, keyed by folder, scoped to one runDailyAutoSchedule()
+// call — every shared-pool account (the common case, dozens per day) would
+// otherwise page through the same few-thousand-file folder from scratch.
+const folderListingCache = new Map<string, Promise<DriveFile[]>>()
+
 // A shared pool folder needs its "already used" check to span every
 // account, not just the one currently being scheduled — otherwise two
 // different accounts pulling from the same folder would both grab the same
 // oldest unqueued file, since neither one's own history excludes it.
 async function listUnqueuedDriveFiles(folderId: string, accountId: string, poolIsShared: boolean): Promise<DriveFile[]> {
-  const accessToken = await getGoogleAccessToken()
-  const q = encodeURIComponent(`'${folderId}' in parents and mimeType='video/mp4' and trashed=false`)
-  const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime,size)&orderBy=createdTime&pageSize=300`,
-    { headers: { Authorization: `Bearer ${accessToken}` } },
-  )
-  const data = await res.json()
-  if (!res.ok) throw new Error(data.error?.message ?? 'Drive API error')
+  let listing = folderListingCache.get(folderId)
+  if (!listing) {
+    listing = listAllDriveFiles(folderId)
+    folderListingCache.set(folderId, listing)
+  }
+  const files = await listing
 
   const used = poolIsShared
     ? await rows<{ drive_file_id: string }>(
@@ -52,7 +78,7 @@ async function listUnqueuedDriveFiles(folderId: string, accountId: string, poolI
         [accountId],
       )
   const usedIds = new Set(used.map(r => r.drive_file_id))
-  return ((data.files ?? []) as DriveFile[]).filter(f => !usedIds.has(f.id))
+  return files.filter(f => !usedIds.has(f.id))
 }
 
 // Fallback content source for accounts with no dedicated google_drive_folder_id
@@ -87,6 +113,10 @@ export async function runDailyAutoSchedule(): Promise<{ ran: boolean; created: n
     [today],
   )
   if (!claimed) return { ran: false, created: 0 }
+
+  // This is a long-lived process (pm2, not per-request) — clear the cache
+  // from any previous day's run rather than serving stale listings forever.
+  folderListingCache.clear()
 
   const accounts = await rows<{ id: string; google_drive_folder_id: string | null }>(
     `SELECT id, google_drive_folder_id FROM instagram_accounts
