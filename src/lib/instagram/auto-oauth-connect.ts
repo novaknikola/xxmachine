@@ -115,6 +115,18 @@ export async function connectAccountViaOAuth(accountId: string): Promise<{ usern
       if (page.url().includes('/accounts/suspended/')) {
         throw new Error('Instagram has suspended this account')
       }
+      // Same reasoning as the suspended case — this one lands back on our
+      // own /login page carrying the real failure in an instagram_error
+      // query param instead of throwing anywhere the loop above would
+      // catch it. Confirmed live 2026-08-19: this exact string is the
+      // "account was never actually granted the Instagram Tester role"
+      // signature (see acceptInstagramTesterInvite) — surfacing it
+      // distinctly (not the generic message below) is what lets
+      // sync-accounts-from-sheet.ts's isTesterGateError route this into a
+      // tester-add retry instead of repeating the same doomed attempt.
+      if (/unsupported request/i.test(decodeURIComponent(page.url()))) {
+        throw new Error('Unsupported request — account was never actually granted the Instagram Tester role')
+      }
       throw new Error('OAuth flow ran with no error but no access token was written — check the 02/03 screenshots for the actual final page')
     }
 
