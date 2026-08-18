@@ -78,6 +78,20 @@ function isTransientError(message: string): boolean {
   return /timeout|econnreset|etimedout|net::err|execution context was destroyed/i.test(message)
 }
 
+// "Unsupported request - method type: get" at the token-exchange step is
+// the documented signature of an account that was never actually granted
+// the Instagram Tester role on Meta's dashboard, even though it already has
+// a DB row (accountId) — confirmed live 2026-08-19 for beckett.browning,
+// same root cause as the earlier regan515571/frankie509489 case: having an
+// accountId only means "imported", not "tester-add actually succeeded"
+// (e.g. it silently lost to Meta's rate limiter in an earlier run). Routing
+// this into the tester-stage retry (not a plain oauth retry) means the next
+// pass actually re-adds it as a tester before trying to connect again,
+// instead of repeating the same doomed OAuth attempt forever.
+function isTesterGateError(message: string): boolean {
+  return /unsupported request/i.test(message)
+}
+
 async function main() {
   console.log('Resolving sheet tab name...')
   const sheetName = await resolveSheetName()
@@ -138,12 +152,16 @@ async function main() {
 
   let metaContext: Awaited<ReturnType<typeof launchMetaAdminBrowser>>['context'] | null = null
   let metaPage: Awaited<ReturnType<typeof launchMetaAdminBrowser>>['page'] | null = null
-  if (needsTester.length) {
+  async function ensureMetaBrowser() {
+    if (metaPage) return
     const creds = JSON.parse(fs.readFileSync(CREDS_PATH, 'utf8'))
     const launched = await launchMetaAdminBrowser()
     metaContext = launched.context
     metaPage = launched.page
     await loginToMeta(metaPage, creds)
+  }
+  if (needsTester.length) {
+    await ensureMetaBrowser()
   }
 
   const results: Record<string, string> = {}
@@ -218,7 +236,10 @@ async function main() {
         console.log(`  ✓ ${r.username}`)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
-        if (isTransientError(message)) {
+        if (isTesterGateError(message)) {
+          console.log(`  ✗ ${r.username} (never actually tester-added, will retry via tester-add): ${message}`)
+          retryQueue.push({ ...r, accountId: r.accountId!, failedStage: 'tester' })
+        } else if (isTransientError(message)) {
           console.log(`  ✗ ${r.username} (transient, will retry): ${message}`)
           retryQueue.push({ ...r, accountId: r.accountId!, failedStage: 'oauth' })
         } else {
@@ -245,6 +266,14 @@ async function main() {
       const pause = humanDelayMs(120, 300)
       console.log(`\n${retryQueue.length} account(s) had transient failures — waiting ${(pause / 60000).toFixed(1)} min before retrying them once...`)
       await sleep(pause)
+
+      // A tester-gate failure (isTesterGateError) can show up even when the
+      // initial pass never opened the Meta browser at all — e.g. every
+      // account in this run already had an accountId, per the same "has a
+      // DB row" heuristic that caused the gate failure in the first place.
+      if (retryQueue.some(r => r.failedStage === 'tester')) {
+        await ensureMetaBrowser()
+      }
 
       for (const r of retryQueue) {
         console.log(`Retrying ${r.username} (failed at: ${r.failedStage})...`)
