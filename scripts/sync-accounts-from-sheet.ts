@@ -283,6 +283,14 @@ async function main() {
             await sleep(delay)
             await addInstagramTester(metaPage!, META_APP_ID, r.username)
             console.log(`  tester ok on retry: ${r.username}`)
+            // Confirmed live 2026-08-19: connecting immediately after a
+            // successful Add People still hit the same "never actually
+            // granted the Tester role" error — Meta's dashboard action
+            // likely needs a moment before Instagram's own side reflects a
+            // pending invite for acceptInstagramTesterInvite to find.
+            const propagationWait = humanDelayMs(30, 60)
+            console.log(`  waiting ${(propagationWait / 1000).toFixed(0)}s for the tester invite to propagate...`)
+            await sleep(propagationWait)
           }
           await connectAccountViaOAuth(r.accountId)
           await setStatus(r.rowNumber, 'connected')
