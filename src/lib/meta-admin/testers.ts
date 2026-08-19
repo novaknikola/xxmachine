@@ -144,27 +144,36 @@ export async function addInstagramTester(page: Page, appId: string, igUsername: 
   await debugScreenshot(page, `add-tester-${igUsername}-filled`)
   await checkNotRateLimited(page)
 
-  // Exact text-match on igUsername doesn't work: Instagram's typeahead
-  // renders its own normalized display string (e.g. dots become underscores),
-  // which never equals the raw input. Confirmed live that the dropdown rows
-  // are `role="option"` divs whose `id` is the account's numeric IG user id
-  // — position (first = best match, same ranking Instagram itself shows) is
-  // the reliable signal, not text. Leaving the dropdown open by finding no
-  // match was the actual bug: the open list then intercepts the Add button
-  // click underneath it.
-  const suggestionRowId = await page.evaluate(() => {
-    const row = Array.from(document.querySelectorAll('div[role="option"][id]'))
-      .find(el => /^\d+$/.test(el.id))
-    return row ? row.id : null
+  // Raw text-match on igUsername doesn't work: Instagram's typeahead renders
+  // its own normalized display string (e.g. dots become underscores), which
+  // never equals the raw input. Previously this just took the first
+  // `role="option"` row by DOM position, trusting Instagram's own search
+  // ranking — confirmed live 2026-08-19 that's unsafe: for a username with
+  // no real exact match, Instagram's search surfaced an unrelated real
+  // account ("beckett_browning6" for a search on "beckett.browning") as the
+  // top result, and it got silently invited as a Tester. That's someone
+  // else's real account getting an unsolicited notification — worse than
+  // just failing the add. Now requires the candidate's own text to equal
+  // the query after both are normalized (lowercased, non-alphanumeric
+  // stripped) — if nothing matches exactly, this throws instead of
+  // guessing. Confirmed to still work for the underscore-substitution case
+  // (e.g. "hina.rin54" -> displayed "hina_rin54" still normalizes equal).
+  const candidates = await page.evaluate(() => {
+    return Array.from(document.querySelectorAll('div[role="option"][id]'))
+      .filter(el => /^\d+$/.test(el.id))
+      .map(el => ({ id: el.id, text: (el as HTMLElement).innerText || '' }))
   })
-  if (suggestionRowId) {
-    await page.click(`[id="${suggestionRowId}"]`)
-    await page.waitForTimeout(1000)
-  } else {
-    // No suggestion rendered — make sure no leftover dropdown is still open
-    // and intercepting the Add button.
-    await usernameField.press('Escape').catch(() => {})
+  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const target = normalize(igUsername)
+  const match = candidates.find(c => normalize(c.text) === target)
+
+  if (!match) {
+    await debugScreenshot(page, `add-tester-${igUsername}-no-exact-match`)
+    const seen = candidates.map(c => c.text).join(', ') || '(no suggestions at all)'
+    throw new Error(`No exact-matching Instagram account for "${igUsername}" — search showed: ${seen}. Not guessing to avoid inviting the wrong account.`)
   }
+  await page.click(`[id="${match.id}"]`)
+  await page.waitForTimeout(1000)
 
   const addBtn = await page.$('button:has-text("Add"):not(:has-text("People")), [role="button"]:has-text("Add"):not(:has-text("People"))')
   if (!addBtn) throw new Error('Add (submit) button not found after filling username')
