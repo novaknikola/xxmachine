@@ -13,6 +13,7 @@ import { RunTab } from './run-tab'
 import { CostsTab } from './costs-tab'
 import { ImageToVideoTab } from './image-to-video-tab'
 import { InfiniteTalkTab } from './infinite-talk-tab'
+import { ContentEngineTab } from './content-engine-tab'
 
 function StudioChrome({ children }: { children: React.ReactNode }) {
   const studio = useStudioSettings()
@@ -89,6 +90,7 @@ function StudioBody() {
             <TabsTrigger value="run">Seedance Viral</TabsTrigger>
             <TabsTrigger value="i2v">Image to Video</TabsTrigger>
             <TabsTrigger value="talk">Infinite Talk</TabsTrigger>
+            <TabsTrigger value="content-engine">Content Engine</TabsTrigger>
           </TabsList>
           <TabsContent value="run" className="mt-2">
             <RunTab />
@@ -98,6 +100,9 @@ function StudioBody() {
           </TabsContent>
           <TabsContent value="talk" className="mt-2">
             <InfiniteTalkTab />
+          </TabsContent>
+          <TabsContent value="content-engine" className="mt-2">
+            <ContentEngineTab />
           </TabsContent>
         </Tabs>
       </div>
