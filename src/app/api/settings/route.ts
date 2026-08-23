@@ -94,6 +94,7 @@ export async function PATCH(req: NextRequest) {
     }
 
     const { decryptOrNull } = await import('@/lib/crypto')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { authenticator } = require('otplib') as { authenticator: { verify: (opts: { token: string; secret: string }) => boolean } }
     const secret = decryptOrNull(user.totp_secret)
     if (!secret) {
@@ -107,6 +108,64 @@ export async function PATCH(req: NextRequest) {
 
     const hash = await bcrypt.hash(newPassword, 11)
     await one(`UPDATE users SET password_hash = $1 WHERE id = $2`, [hash, auth.id])
+    return NextResponse.json({ ok: true })
+  }
+
+  // ── Enable 2FA (existing account, e.g. legacy accounts created before ─────
+  // TOTP existed — new signups already get this at signup time). Step 1:
+  // generate + store a secret but leave totp_enabled false until the first
+  // code is verified, so a half-finished enrollment can't silently "enable"
+  // 2FA without the user ever having scanned the QR code.
+  if (body.type === 'enable_2fa_start') {
+    const existing = await one<{ totp_enabled: boolean }>(
+      `SELECT totp_enabled FROM users WHERE id = $1`,
+      [auth.id],
+    )
+    if (existing?.totp_enabled) {
+      return NextResponse.json({ error: '2FA is already enabled' }, { status: 400 })
+    }
+
+    const QRCode = (await import('qrcode')).default
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { authenticator } = require('otplib') as {
+      authenticator: { generateSecret: () => string; keyuri: (email: string, issuer: string, secret: string) => string }
+    }
+    const totpSecret = authenticator.generateSecret()
+    const { encrypt } = await import('@/lib/crypto')
+    await one(`UPDATE users SET totp_secret = $1 WHERE id = $2`, [encrypt(totpSecret), auth.id])
+
+    const otpauthUrl = authenticator.keyuri(auth.email, 'XXmachine', totpSecret)
+    const qrDataUrl: string = await QRCode.toDataURL(otpauthUrl)
+    return NextResponse.json({ ok: true, qrDataUrl, otpauthUrl })
+  }
+
+  // Step 2: verify the first code against the secret stored in step 1, then flip it on.
+  if (body.type === 'enable_2fa_confirm') {
+    const { code } = body as { code?: string }
+    if (!code || code.length !== 6) {
+      return NextResponse.json({ error: '6-digit code required' }, { status: 400 })
+    }
+
+    const user = await one<{ totp_secret: string | null; totp_enabled: boolean }>(
+      `SELECT totp_secret, totp_enabled FROM users WHERE id = $1`,
+      [auth.id],
+    )
+    if (user?.totp_enabled) {
+      return NextResponse.json({ error: '2FA is already enabled' }, { status: 400 })
+    }
+    const { decryptOrNull } = await import('@/lib/crypto')
+    const secret = decryptOrNull(user?.totp_secret)
+    if (!secret) {
+      return NextResponse.json({ error: 'No pending 2FA setup — start again' }, { status: 400 })
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { authenticator } = require('otplib') as { authenticator: { verify: (opts: { token: string; secret: string }) => boolean } }
+    if (!authenticator.verify({ token: code, secret })) {
+      return NextResponse.json({ error: 'Invalid code' }, { status: 400 })
+    }
+
+    await one(`UPDATE users SET totp_enabled = true WHERE id = $1`, [auth.id])
     return NextResponse.json({ ok: true })
   }
 

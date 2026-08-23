@@ -20,6 +20,7 @@ import {
   Unplug,
   Upload,
   Image as ImageIcon,
+  ShieldCheck,
 } from 'lucide-react'
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -85,6 +86,63 @@ function ProfileTab({ initialData }: { initialData: SettingsData['profile'] }) {
   const [totpCode, setTotpCode] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [savingPassword, setSavingPassword] = useState(false)
+
+  // 2FA enrollment (for accounts created before TOTP existed — new signups already get this
+  // at signup time, so this only ever shows up for a legacy account).
+  const [totpEnabled, setTotpEnabled] = useState(initialData.totp_enabled)
+  const [settingUp2fa, setSettingUp2fa] = useState(false)
+  const [starting2fa, setStarting2fa] = useState(false)
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null)
+  const [otpauthUrl, setOtpauthUrl] = useState<string | null>(null)
+  const [confirmCode, setConfirmCode] = useState('')
+  const [confirming2fa, setConfirming2fa] = useState(false)
+
+  async function start2fa() {
+    setStarting2fa(true)
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'enable_2fa_start' }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      setQrDataUrl(data.qrDataUrl)
+      setOtpauthUrl(data.otpauthUrl)
+      setSettingUp2fa(true)
+    } catch (err) {
+      toast.error(String(err))
+    } finally {
+      setStarting2fa(false)
+    }
+  }
+
+  async function confirm2fa() {
+    if (confirmCode.length !== 6) {
+      toast.error('Enter the 6-digit code from your authenticator app')
+      return
+    }
+    setConfirming2fa(true)
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'enable_2fa_confirm', code: confirmCode }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      toast.success('2FA enabled')
+      setTotpEnabled(true)
+      setSettingUp2fa(false)
+      setQrDataUrl(null)
+      setOtpauthUrl(null)
+      setConfirmCode('')
+    } catch (err) {
+      toast.error(String(err))
+    } finally {
+      setConfirming2fa(false)
+    }
+  }
 
   async function saveProfile() {
     setSavingProfile(true)
@@ -159,7 +217,7 @@ function ProfileTab({ initialData }: { initialData: SettingsData['profile'] }) {
         </div>
         <div className="flex items-center justify-between pt-1">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            {initialData.totp_enabled ? (
+            {totpEnabled ? (
               <><CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> 2FA enabled</>
             ) : (
               <><XCircle className="w-3.5 h-3.5 text-destructive" /> 2FA not active</>
@@ -176,6 +234,59 @@ function ProfileTab({ initialData }: { initialData: SettingsData['profile'] }) {
           </Button>
         </div>
       </div>
+
+      {/* Enable 2FA — only shown for accounts that don't have it yet */}
+      {!totpEnabled && (
+        <div className="glass-card rounded-2xl p-6 space-y-4">
+          <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4" /> Enable 2FA
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            This account predates the 2FA requirement. Password changes are locked until it&apos;s set up.
+          </p>
+
+          {!settingUp2fa ? (
+            <Button onClick={start2fa} disabled={starting2fa} size="sm" variant="outline" className="h-8">
+              {starting2fa ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" /> : <ShieldCheck className="w-3.5 h-3.5 mr-1.5" />}
+              Set up 2FA
+            </Button>
+          ) : (
+            <div className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                Scan this in Google Authenticator (or any TOTP app), then enter the 6-digit code it shows.
+              </p>
+              {qrDataUrl && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={qrDataUrl} alt="2FA QR code" className="w-40 h-40 rounded-lg border border-border bg-white p-2" />
+              )}
+              {otpauthUrl && (
+                <p className="text-[11px] text-muted-foreground break-all font-mono">{otpauthUrl}</p>
+              )}
+              <div className="flex items-end gap-2">
+                <div className="space-y-1.5">
+                  <label className="text-xs text-muted-foreground">Code from app</label>
+                  <Input
+                    value={confirmCode}
+                    onChange={e => setConfirmCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="000000"
+                    inputMode="numeric"
+                    className="bg-secondary/50 border-border font-mono tracking-[0.5em] text-center w-32"
+                  />
+                </div>
+                <Button
+                  onClick={confirm2fa}
+                  disabled={confirming2fa || confirmCode.length !== 6}
+                  size="sm"
+                  className="h-9"
+                >
+                  {confirming2fa ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" /> : null}
+                  Confirm
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Change password */}
       <div className="glass-card rounded-2xl p-6 space-y-4">
