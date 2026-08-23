@@ -23,7 +23,7 @@ import { toast } from 'sonner'
 import {
   Loader2, Heart, Plug, RefreshCw, Unplug,
   Sparkles, CalendarClock, Images, Upload, Link2, X, Users, MessageCircle,
-  HelpCircle, Trash2, CheckSquare, Square,
+  HelpCircle, Trash2, CheckSquare, Square, Pencil, RotateCw,
 } from 'lucide-react'
 
 function sleep(ms: number): Promise<void> {
@@ -169,6 +169,13 @@ function FanvuePageInner() {
   const [confirmDeleteIds, setConfirmDeleteIds] = useState<string[] | null>(null)
   const [deletingQueue, setDeletingQueue] = useState(false)
 
+  // Edit + retry for stuck 'failed'/'pending' rows — the only rows that never made it to
+  // Fanvue at all, so re-attempting in place (optionally with edited fields) makes sense.
+  // 'scheduled'/'published' rows already exist on Fanvue's side and aren't editable here.
+  const [editingQueueId, setEditingQueueId] = useState<string | null>(null)
+  const [editDraft, setEditDraft] = useState<{ caption: string; price: string; scheduledAt: string } | null>(null)
+  const [retryingQueueId, setRetryingQueueId] = useState<string | null>(null)
+
   const loadStatus = useCallback(async () => {
     try {
       const res = await fetch('/api/fanvue/sync')
@@ -248,6 +255,50 @@ function FanvuePageInner() {
     setSelectedQueueIds(prev =>
       prev.size === queueItems.length ? new Set() : new Set(queueItems.map(it => it.id)),
     )
+  }
+
+  function startEditQueueItem(item: QueueItem) {
+    setEditingQueueId(item.id)
+    setEditDraft({
+      caption: item.caption,
+      price: typeof item.priceCents === 'number' ? (item.priceCents / 100).toFixed(2) : '',
+      scheduledAt: toLocalDatetimeValue(new Date(item.scheduledAt)),
+    })
+  }
+
+  function cancelEditQueueItem() {
+    setEditingQueueId(null)
+    setEditDraft(null)
+  }
+
+  async function retryQueueItem(id: string, draft: { caption: string; price: string; scheduledAt: string } | null) {
+    setRetryingQueueId(id)
+    try {
+      const body = draft
+        ? {
+            caption: draft.caption,
+            price: priceToCents(draft.price),
+            scheduledAt: new Date(draft.scheduledAt).toISOString(),
+          }
+        : {}
+      const res = await fetch(`/api/fanvue/schedule/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        toast.error(data.detail || data.error || 'Retry nije uspeo')
+        loadQueue()
+        return
+      }
+      toast.success('Zakazano na Fanvue-u')
+      setEditingQueueId(null)
+      setEditDraft(null)
+      loadQueue()
+    } finally {
+      setRetryingQueueId(null)
+    }
   }
 
   async function openCaptionLibrary(index: number) {
@@ -790,30 +841,97 @@ function FanvuePageInner() {
             {queueItems.length === 0 && <p className="text-sm text-muted-foreground">Ništa nije zakazano.</p>}
 
             <div className="space-y-3 max-h-[480px] overflow-y-auto pr-1">
-              {queueItems.map(item => (
-                <div key={item.id} className="flex gap-3 items-center border-b border-border/40 pb-3 last:border-0 last:pb-0">
-                  <button type="button" onClick={() => toggleQueueSelected(item.id)} className="shrink-0 text-muted-foreground hover:text-foreground">
-                    {selectedQueueIds.has(item.id) ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
-                  </button>
-                  <img src={item.imageUrl} alt="" className="w-12 h-12 object-cover rounded shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm truncate">{item.creatorDisplayName || item.creatorUuid}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {new Date(item.scheduledAt).toLocaleString()}
-                      {item.priceCents ? ` · $${(item.priceCents / 100).toFixed(2)}` : ''}
-                    </p>
-                    {item.error && <p className="text-xs text-destructive truncate">{item.error}</p>}
+              {queueItems.map(item => {
+                const retryable = item.status === 'failed' || item.status === 'pending'
+                const editing = editingQueueId === item.id
+                return (
+                  <div key={item.id} className="border-b border-border/40 pb-3 last:border-0 last:pb-0">
+                    <div className="flex gap-3 items-center">
+                      <button type="button" onClick={() => toggleQueueSelected(item.id)} className="shrink-0 text-muted-foreground hover:text-foreground">
+                        {selectedQueueIds.has(item.id) ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+                      </button>
+                      <img src={item.imageUrl} alt="" className="w-12 h-12 object-cover rounded shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm truncate">{item.creatorDisplayName || item.creatorUuid}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {new Date(item.scheduledAt).toLocaleString()}
+                          {item.priceCents ? ` · $${(item.priceCents / 100).toFixed(2)}` : ''}
+                        </p>
+                        {item.error && <p className="text-xs text-destructive truncate">{item.error}</p>}
+                      </div>
+                      {statusBadge(item.status)}
+                      {retryable && (
+                        <button
+                          type="button"
+                          title="Uredi"
+                          onClick={() => editing ? cancelEditQueueItem() : startEditQueueItem(item)}
+                          className="shrink-0 text-muted-foreground hover:text-foreground"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      {retryable && (
+                        <button
+                          type="button"
+                          title="Pokušaj ponovo"
+                          disabled={retryingQueueId === item.id}
+                          onClick={() => retryQueueItem(item.id, null)}
+                          className="shrink-0 text-muted-foreground hover:text-primary disabled:opacity-50"
+                        >
+                          {retryingQueueId === item.id
+                            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            : <RotateCw className="w-3.5 h-3.5" />}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        title="Obriši"
+                        onClick={() => setConfirmDeleteIds([item.id])}
+                        className="shrink-0 text-muted-foreground hover:text-destructive"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    {editing && editDraft && (
+                      <div className="mt-3 ml-7 space-y-2 rounded-lg border border-border/60 p-3">
+                        <Textarea
+                          value={editDraft.caption}
+                          onChange={e => setEditDraft(d => d && { ...d, caption: e.target.value })}
+                          rows={2}
+                        />
+                        <div className="flex gap-2 items-center flex-wrap">
+                          <Input
+                            placeholder="PPV cena u $ (opciono)"
+                            className="h-8 text-xs w-40"
+                            value={editDraft.price}
+                            onChange={e => setEditDraft(d => d && { ...d, price: e.target.value })}
+                          />
+                          <Input
+                            type="datetime-local"
+                            className="h-8 text-xs w-auto"
+                            value={editDraft.scheduledAt}
+                            onChange={e => setEditDraft(d => d && { ...d, scheduledAt: e.target.value })}
+                          />
+                        </div>
+                        <div className="flex gap-2">
+                          <Button
+                            size="sm"
+                            disabled={retryingQueueId === item.id}
+                            onClick={() => retryQueueItem(item.id, editDraft)}
+                          >
+                            {retryingQueueId === item.id
+                              ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                              : <RotateCw className="w-3.5 h-3.5 mr-1.5" />}
+                            Sačuvaj i pokušaj ponovo
+                          </Button>
+                          <Button size="sm" variant="ghost" onClick={cancelEditQueueItem}>Otkaži</Button>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                  {statusBadge(item.status)}
-                  <button
-                    type="button"
-                    onClick={() => setConfirmDeleteIds([item.id])}
-                    className="shrink-0 text-muted-foreground hover:text-destructive"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              ))}
+                )
+              })}
             </div>
 
             {queueItems.length < queueTotal && (
