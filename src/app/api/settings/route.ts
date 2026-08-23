@@ -2,8 +2,21 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createHmac } from 'node:crypto'
 import { requireUser } from '@/lib/session'
 import { one, rows } from '@/lib/db'
-import { encryptOrNull } from '@/lib/crypto'
+import { encryptOrNull, encrypt, decryptOrNull } from '@/lib/crypto'
 import bcrypt from 'bcryptjs'
+import QRCode from 'qrcode'
+
+// A require() nested inside a conditional branch (rather than at module scope, like every
+// other otplib caller in this codebase does it) does not bundle reliably under Next's server
+// build — it compiled fine but `authenticator` came back undefined at runtime in production.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { authenticator } = require('otplib') as {
+  authenticator: {
+    generateSecret: () => string
+    keyuri: (email: string, issuer: string, secret: string) => string
+    verify: (opts: { token: string; secret: string }) => boolean
+  }
+}
 
 const KEY_FIELDS = [
   'wavespeed_api_key',
@@ -93,9 +106,6 @@ export async function PATCH(req: NextRequest) {
       return NextResponse.json({ error: '2FA not configured' }, { status: 400 })
     }
 
-    const { decryptOrNull } = await import('@/lib/crypto')
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { authenticator } = require('otplib') as { authenticator: { verify: (opts: { token: string; secret: string }) => boolean } }
     const secret = decryptOrNull(user.totp_secret)
     if (!secret) {
       return NextResponse.json({ error: 'Could not read 2FA secret' }, { status: 500 })
@@ -125,13 +135,7 @@ export async function PATCH(req: NextRequest) {
       return NextResponse.json({ error: '2FA is already enabled' }, { status: 400 })
     }
 
-    const QRCode = (await import('qrcode')).default
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { authenticator } = require('otplib') as {
-      authenticator: { generateSecret: () => string; keyuri: (email: string, issuer: string, secret: string) => string }
-    }
     const totpSecret = authenticator.generateSecret()
-    const { encrypt } = await import('@/lib/crypto')
     await one(`UPDATE users SET totp_secret = $1 WHERE id = $2`, [encrypt(totpSecret), auth.id])
 
     const otpauthUrl = authenticator.keyuri(auth.email, 'XXmachine', totpSecret)
@@ -153,14 +157,11 @@ export async function PATCH(req: NextRequest) {
     if (user?.totp_enabled) {
       return NextResponse.json({ error: '2FA is already enabled' }, { status: 400 })
     }
-    const { decryptOrNull } = await import('@/lib/crypto')
     const secret = decryptOrNull(user?.totp_secret)
     if (!secret) {
       return NextResponse.json({ error: 'No pending 2FA setup — start again' }, { status: 400 })
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { authenticator } = require('otplib') as { authenticator: { verify: (opts: { token: string; secret: string }) => boolean } }
     if (!authenticator.verify({ token: code, secret })) {
       return NextResponse.json({ error: 'Invalid code' }, { status: 400 })
     }
