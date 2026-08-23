@@ -15,6 +15,7 @@ export interface SessionUser {
   email: string
   display_name: string
   role: 'admin' | 'user'
+  isOwner: boolean
 }
 
 interface SessionRow {
@@ -24,6 +25,12 @@ interface SessionRow {
   display_name: string
   role: 'admin' | 'user'
   active: boolean
+}
+
+/** True only for the single hardcoded owner account — independent of `role`, since
+ *  other accounts (e.g. team admins) must never see owner-only features like Fanvue. */
+function isOwnerEmail(email: string): boolean {
+  return !!process.env.OWNER_EMAIL && email === process.env.OWNER_EMAIL
 }
 
 /** Verify the session cookie, return the user or null. Used in API routes & middleware. */
@@ -53,6 +60,7 @@ export async function getSessionUser(req?: NextRequest): Promise<SessionUser | n
     email: row.email,
     display_name: row.display_name,
     role: row.role,
+    isOwner: isOwnerEmail(row.email),
   }
 }
 
@@ -107,5 +115,14 @@ export async function requireAdmin(req: NextRequest): Promise<SessionUser | Next
   const user = await getSessionUser(req)
   if (!user) return NextResponse.json({ error: 'unauthenticated' }, { status: 401 })
   if (user.role !== 'admin') return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  return user
+}
+
+/** API guard: the single owner account only — NOT satisfied by role==='admin'.
+ *  Use for anything that must stay invisible to other team admins (e.g. Fanvue routes). */
+export async function requireOwner(req: NextRequest): Promise<SessionUser | NextResponse> {
+  const user = await getSessionUser(req)
+  if (!user) return NextResponse.json({ error: 'unauthenticated' }, { status: 401 })
+  if (!user.isOwner) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
   return user
 }

@@ -15,8 +15,11 @@ import {
   getFanInsights,
   isConnected,
 } from '@/lib/fanvue'
+import { requireOwner } from '@/lib/session'
 
 export async function GET(req: NextRequest) {
+  const owner = await requireOwner(req)
+  if (owner instanceof NextResponse) return owner
   if (!(await isConnected())) {
     return NextResponse.json({ error: 'NOT_CONNECTED' }, { status: 401 })
   }
@@ -71,7 +74,10 @@ export async function GET(req: NextRequest) {
       }
 
       case 'leaderboard': {
-        const data = await getChatterLeaderboard()
+        const data = await getChatterLeaderboard(
+          searchParams.get('startDate') ?? undefined,
+          searchParams.get('endDate') ?? undefined,
+        )
         return NextResponse.json(data)
       }
 
@@ -91,6 +97,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const owner = await requireOwner(req)
+  if (owner instanceof NextResponse) return owner
   if (!(await isConnected())) {
     return NextResponse.json({ error: 'NOT_CONNECTED' }, { status: 401 })
   }

@@ -6,6 +6,7 @@ import {
   applyCookies,
   fanvueFetch,
 } from '@/lib/fanvue-server'
+import { requireOwner } from '@/lib/session'
 
 interface FanvueSubscriber {
   uuid?: string
@@ -46,6 +47,8 @@ function flattenSources(
 
 // GET — quick connection status check (does NOT touch the API)
 export async function GET(req: NextRequest) {
+  const owner = await requireOwner(req)
+  if (owner instanceof NextResponse) return owner
   const access = req.cookies.get('fv_access_token')?.value
   const refresh = req.cookies.get('fv_refresh_token')?.value
   const expiresAt = Number(req.cookies.get('fv_expires_at')?.value ?? 0)
@@ -59,6 +62,8 @@ function sleep(ms: number) {
 
 // POST — perform sync
 export async function POST(req: NextRequest) {
+  const owner = await requireOwner(req)
+  if (owner instanceof NextResponse) return owner
   const { accessToken, cookieDeltas } = await getFanvueAccessToken(req)
   if (!accessToken) {
     return NextResponse.json(
@@ -174,9 +179,14 @@ export async function POST(req: NextRequest) {
 }
 
 // DELETE — disconnect (clear cookies)
-export async function DELETE() {
+export async function DELETE(req: NextRequest) {
+  const owner = await requireOwner(req)
+  if (owner instanceof NextResponse) return owner
   const res = NextResponse.json({ ok: true })
-  for (const name of ['fv_access_token', 'fv_refresh_token', 'fv_expires_at', 'fv_connected']) {
+  for (const name of [
+    'fv_access_token', 'fv_refresh_token', 'fv_expires_at', 'fv_connected',
+    'fanvue_access_token', 'fanvue_refresh_token', 'fanvue_expires_at', 'fanvue_connected',
+  ]) {
     res.cookies.delete(name)
   }
   return res

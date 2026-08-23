@@ -6,6 +6,7 @@ import {
   applyCookies,
   fanvueFetch,
 } from '@/lib/fanvue-server'
+import { requireOwner } from '@/lib/session'
 
 interface ScheduleBody {
   fanId?: string
@@ -24,6 +25,8 @@ interface DeleteBody {
 }
 
 export async function POST(req: NextRequest) {
+  const owner = await requireOwner(req)
+  if (owner instanceof NextResponse) return owner
   const { accessToken, cookieDeltas } = await getFanvueAccessToken(req)
   if (!accessToken) {
     return NextResponse.json({ error: 'not_authenticated', authUrl: '/api/fanvue/auth' }, { status: 401 })
@@ -137,6 +140,8 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const owner = await requireOwner(req)
+  if (owner instanceof NextResponse) return owner
   const { accessToken, cookieDeltas } = await getFanvueAccessToken(req)
   if (!accessToken) {
     return NextResponse.json({ error: 'not_authenticated', authUrl: '/api/fanvue/auth' }, { status: 401 })
@@ -165,6 +170,8 @@ export async function DELETE(req: NextRequest) {
 }
 
 export async function GET(req: NextRequest) {
+  const owner = await requireOwner(req)
+  if (owner instanceof NextResponse) return owner
   const fanId = req.nextUrl.searchParams.get('fanId')
 
   if (!fanId) {

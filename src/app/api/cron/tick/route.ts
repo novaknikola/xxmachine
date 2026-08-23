@@ -25,7 +25,7 @@ export async function GET(req: NextRequest) {
   // 300s nginx allows on the public host. See internalBaseUrl().
   const base = internalBaseUrl()
 
-  // Existing scheduled posts (Telegram/Fanvue)
+  // Existing scheduled posts (Telegram)
   const due = await rows<{ id: string }>(
     `SELECT id FROM scheduled_posts WHERE status='approved' AND scheduled_at <= now()`,
   )
@@ -38,6 +38,12 @@ export async function GET(req: NextRequest) {
       }),
     ),
   )
+
+  // Fanvue scheduling no longer routes through this tick: `/api/fanvue/schedule` now calls
+  // Fanvue's create-post with `publishAt` synchronously at click time, so Fanvue's own
+  // infrastructure holds and fires the post — an xxmachine outage after that point can't stop
+  // it. Nothing is ever inserted with status='pending' anymore, so there is no sweep to run
+  // here; rows land straight in 'scheduled' or 'failed'.
 
   // Instagram Reels queue
   const dueReels = await rows<{ id: string }>(

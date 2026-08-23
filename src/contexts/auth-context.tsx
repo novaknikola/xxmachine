@@ -8,6 +8,7 @@ export interface SessionUser {
   display_name: string
   role: 'admin' | 'user'
   subscription_status?: string
+  isOwner?: boolean
 }
 
 export interface LoginResult {

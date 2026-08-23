@@ -1,9 +1,12 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { cookies } from 'next/headers'
 import { generateCodeVerifier, generateCodeChallenge, buildAuthUrl } from '@/lib/fanvue'
 import { randomBytes } from 'crypto'
+import { requireOwner } from '@/lib/session'
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const owner = await requireOwner(req)
+  if (owner instanceof NextResponse) return owner
   const codeVerifier = generateCodeVerifier()
   const codeChallenge = await generateCodeChallenge(codeVerifier)
   const state = randomBytes(16).toString('hex')

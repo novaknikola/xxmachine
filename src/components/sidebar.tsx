@@ -24,6 +24,9 @@ import {
   Layers,
   Captions,
   Images,
+  Heart,
+  Send,
+  MessageCircle,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -50,6 +53,7 @@ const NAV_ITEMS: NavItem[] = [
       { href: '/bulk?tab=train', label: 'Train LoRA', icon: Layers },
       { href: '/bulk?tab=bulk', label: 'Bulk Generate', icon: ImageIcon },
       { href: '/bulk?tab=carousel', label: 'Carousel', icon: ImageIcon },
+      { href: '/bulk?tab=nsfw', label: 'NSFW', icon: Heart },
     ],
   },
   { href: '/captions?tab=captions', label: 'Captions', icon: Captions },
@@ -102,9 +106,9 @@ function pathMatches(href: string, pathname: string, search: string) {
 }
 
 function childIsActive(child: NavItem, pathname: string, search: string) {
-  // Image Generate lives at bare /bulk (no tab query).
-  if (child.href === '/bulk') {
-    return pathname.startsWith('/bulk') && !search.includes('tab=')
+  // Image Generate lives at bare /bulk (no tab query); same deal for Fanvue's Poster tab.
+  if (child.href === '/bulk' || child.href === '/fanvue') {
+    return pathname.startsWith(child.href) && !search.includes('tab=')
   }
   return pathMatches(child.href, pathname, search)
 }
@@ -362,6 +366,21 @@ const ADMIN_ITEMS = [
   { href: '/admin', label: 'Users', icon: Users },
 ]
 
+/** Owner-only — rendered separately from NAV_ITEMS, never subject to the
+ *  module-permission toggle (that system defaults to visible; this must default to hidden).
+ *  Three systems planned for this section; Fans & Chatteri and Auto-chat are placeholder
+ *  tabs today (no functionality yet) — see /fanvue?tab=fans / ?tab=autochat. */
+const FANVUE_NAV_ITEM: NavItem = {
+  href: '/fanvue',
+  label: 'Fanvue',
+  icon: Heart,
+  children: [
+    { href: '/fanvue', label: 'Poster', icon: Send },
+    { href: '/fanvue?tab=fans', label: 'Fans & Chatteri', icon: Users },
+    { href: '/fanvue?tab=autochat', label: 'Auto-chat', icon: MessageCircle },
+  ],
+}
+
 interface SidebarProps {
   onMobileClose?: () => void
 }
@@ -419,7 +438,10 @@ export function Sidebar({ onMobileClose }: SidebarProps) {
         <p className="px-3 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground mb-3">
           Tools
         </p>
-        {NAV_ITEMS.filter(allowed).map(item => {
+        {(user?.isOwner
+          ? NAV_ITEMS.flatMap(item => item.href === '/my-pod' ? [FANVUE_NAV_ITEM, item] : [item])
+          : NAV_ITEMS
+        ).filter(allowed).map(item => {
           const children = item.children?.filter(allowed) ?? []
           if (children.length > 0) {
             return (

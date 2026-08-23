@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { requireOwner } from '@/lib/session'
 
 const API_BASE = 'https://api.fanvue.com'
 const API_VERSION = '2025-06-26'
@@ -41,6 +42,8 @@ async function probe(url: string, accessToken: string): Promise<ProbeResult> {
 }
 
 export async function GET(req: NextRequest) {
+  const owner = await requireOwner(req)
+  if (owner instanceof NextResponse) return owner
   const accessToken = req.cookies.get('fv_access_token')?.value
   if (!accessToken) {
     return NextResponse.json(

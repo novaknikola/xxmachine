@@ -62,7 +62,9 @@ export default function SchedulePage() {
   const [imageUrls, setImageUrls] = useState<string[]>([])
   const [manualUrl, setManualUrl] = useState('')
   const [caption, setCaption] = useState('')
-  const [platforms, setPlatforms] = useState<('telegram' | 'fanvue')[]>(['telegram', 'fanvue'])
+  // 'fanvue' deliberately removed — this page has no owner gate and Fanvue must stay
+  // owner-only; Fanvue scheduling now lives entirely under the dedicated /fanvue page.
+  const [platforms, setPlatforms] = useState<('telegram' | 'fanvue')[]>(['telegram'])
   const [scheduledAt, setScheduledAt] = useState(toLocalDatetimeInput())
   const [pickFromHistory, setPickFromHistory] = useState(false)
 
@@ -319,7 +321,7 @@ export default function SchedulePage() {
           <div className="space-y-1.5">
             <Label className="text-xs text-muted-foreground uppercase tracking-wider">Platforms</Label>
             <div className="flex gap-2">
-              {(['telegram', 'fanvue'] as const).map(p => (
+              {(['telegram'] as const).map(p => (
                 <button
                   key={p}
                   onClick={() => togglePlatform(p)}

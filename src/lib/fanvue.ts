@@ -35,7 +35,11 @@ export function buildAuthUrl(codeChallenge: string, state: string): string {
   url.searchParams.set('client_id', FANVUE_CLIENT_ID)
   url.searchParams.set('redirect_uri', FANVUE_REDIRECT_URI)
   url.searchParams.set('response_type', 'code')
-  url.searchParams.set('scope', 'read:self read:creator write:creator read:chat write:chat read:fan read:media read:insights')
+  // openid/offline_access/offline are required by Fanvue's own docs for a refresh_token to be
+  // issued at all — confirmed 2026-08-19 against api.fanvue.com/docs/authentication/
+  // implementation-guide.md. The earlier `prompt=consent` param was a wrong guess at this same
+  // problem (the docs explicitly say no special prompt param is needed) — removed.
+  url.searchParams.set('scope', 'openid offline_access offline read:self read:creator write:creator read:chat write:chat read:fan read:media write:media read:post write:post read:insights')
   url.searchParams.set('state', state)
   url.searchParams.set('code_challenge', codeChallenge)
   url.searchParams.set('code_challenge_method', 'S256')
@@ -180,8 +184,12 @@ export async function getCreatorEarnings(creatorUuid: string) {
   return res.json()
 }
 
-export async function getChatterLeaderboard() {
-  const res = await fanvueFetch('/agency/chatter-leaderboard')
+export async function getChatterLeaderboard(startDate?: string, endDate?: string) {
+  const params = new URLSearchParams()
+  if (startDate) params.set('startDate', startDate)
+  if (endDate) params.set('endDate', endDate)
+  const qs = params.toString()
+  const res = await fanvueFetch(`/agency/chatter-leaderboard${qs ? `?${qs}` : ''}`)
   if (!res.ok) throw new Error('Failed to fetch leaderboard')
   return res.json()
 }

@@ -5,6 +5,7 @@ import {
   applyCookies,
   fanvueFetch,
 } from '@/lib/fanvue-server'
+import { requireOwner } from '@/lib/session'
 
 interface FanvueMessage {
   uuid: string
@@ -33,6 +34,8 @@ export interface ChatMessageLite {
 }
 
 export async function POST(req: NextRequest) {
+  const owner = await requireOwner(req)
+  if (owner instanceof NextResponse) return owner
   const { accessToken, cookieDeltas } = await getFanvueAccessToken(req)
   if (!accessToken) {
     return NextResponse.json(

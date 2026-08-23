@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { one, query } from '@/lib/db'
 import { sendPhoto, sendText, editMessageReplyMarkup, editMessageCaption } from '@/lib/telegram'
-import { internalBaseUrl } from '@/lib/internal-url'
 
 const ADMIN_GROUP = process.env.TELEGRAM_ADMIN_GROUP_ID!
 
@@ -40,22 +39,9 @@ const channelId = char?.telegram_channel_id
     }
   }
 
-  // ── Fanvue ──────────────────────────────────────────────────────
-  if (post.platforms.includes('fanvue')) {
-    try {
-      // Fanvue posting requires a valid session token stored in cookies.
-      // We call the internal Fanvue post endpoint which handles token refresh.
-      const res = await fetch(`${internalBaseUrl()}/api/fanvue/post`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageUrl: post.image_url, caption: post.caption }),
-      })
-      if (!res.ok) throw new Error(await res.text())
-      results.push('Fanvue')
-    } catch (e) {
-      errors.push(`Fanvue: ${e instanceof Error ? e.message : 'unknown'}`)
-    }
-  }
+  // Fanvue deliberately not handled here — it has its own dedicated table/pipeline
+  // (fanvue_scheduled_posts, /api/fanvue/schedule) so it never has to route through
+  // `characters`, which this shared scheduler pipeline is not owner-gated behind.
 
   const success = errors.length === 0
   const newStatus = success ? 'published' : 'failed'

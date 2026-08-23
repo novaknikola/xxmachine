@@ -209,14 +209,17 @@ export default function FansPage() {
   const selectedCreator = characters.find(c => c.id === selectedCreatorId)
   const color = selectedCreatorId ? creatorColor(selectedCreatorId) : '#6366f1'
 
-  const visibleFans = fans.filter(f => {
-    if (search && !f.displayName.toLowerCase().includes(search.toLowerCase()) &&
-      !(f.fanvueHandle ?? '').toLowerCase().includes(search.toLowerCase())) return false
-    if (!isAdmin) {
-      return assignments.some(a => a.fanUuid === f.id && a.chatterId === user?.id)
-    }
-    return true
-  })
+  const visibleFans = fans
+    .filter(f => {
+      if (search && !f.displayName.toLowerCase().includes(search.toLowerCase()) &&
+        !(f.fanvueHandle ?? '').toLowerCase().includes(search.toLowerCase())) return false
+      if (!isAdmin) {
+        return assignments.some(a => a.fanUuid === f.id && a.chatterId === user?.id)
+      }
+      return true
+    })
+    // Top spenders first — a chatter's time goes to the fans worth the most, not whoever's listed first.
+    .sort((a, b) => (b.lifetimeGrossCents ?? 0) - (a.lifetimeGrossCents ?? 0))
 
   function getAssignment(fanId: string) {
     return assignments.find(a => a.fanUuid === fanId && a.creatorUuid === selectedCreatorId)
@@ -499,7 +502,21 @@ export default function FansPage() {
               <div ref={messagesEndRef} />
             </div>
 
-            <div className="px-4 py-3 border-t border-border shrink-0">
+            <div className="px-4 py-3 border-t border-border shrink-0 space-y-2">
+              {(summary?.dailyHooks?.length ?? 0) > 0 && (
+                <div className="flex gap-1.5 flex-wrap">
+                  {summary!.dailyHooks.map((h, i) => (
+                    <button
+                      key={i}
+                      onClick={() => setReply(h)}
+                      title="Click to use this suggestion"
+                      className="text-xs px-2.5 py-1 rounded-full bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 transition-colors max-w-full truncate"
+                    >
+                      <Zap className="w-3 h-3 inline mr-1 -mt-0.5" />{h}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="flex gap-2">
                 <Input
                   placeholder={`Write as ${selectedCreator?.name ?? 'Creator'}...`}

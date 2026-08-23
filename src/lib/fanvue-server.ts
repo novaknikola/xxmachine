@@ -30,6 +30,10 @@ export interface CookieDelta {
 export interface TokenContext {
   accessToken: string | null
   cookieDeltas: CookieDelta[]
+  /** Set only when accessToken is null because a refresh attempt actually failed (network or
+   *  non-2xx) — distinct from "no refresh token cookie at all". Callers may ignore this; it
+   *  exists so a caller that wants to show more than a generic "not_authenticated" can. */
+  error?: string
 }
 
 export async function getFanvueAccessToken(req: NextRequest): Promise<TokenContext> {
@@ -45,25 +49,34 @@ export async function getFanvueAccessToken(req: NextRequest): Promise<TokenConte
   }
 
   const basic = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64')
-  const refreshRes = await fetch(FANVUE_TOKEN_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      Authorization: `Basic ${basic}`,
-    },
-    body: new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: refresh,
-    }),
-  })
+  let refreshRes: Response
+  try {
+    refreshRes = await fetch(FANVUE_TOKEN_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: `Basic ${basic}`,
+      },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refresh,
+      }),
+    })
+  } catch (err) {
+    const cause = err instanceof Error && err.cause ? ` cause=${String(err.cause)}` : ''
+    return { accessToken: null, cookieDeltas: [], error: `token_refresh_network_error: ${FANVUE_TOKEN_URL}${cause}` }
+  }
 
-  if (!refreshRes.ok) return { accessToken: null, cookieDeltas: [] }
+  if (!refreshRes.ok) {
+    const body = await refreshRes.text().catch(() => '')
+    return { accessToken: null, cookieDeltas: [], error: `token_refresh_failed: ${refreshRes.status} ${body.slice(0, 300)}` }
+  }
   const data = await refreshRes.json() as {
     access_token?: string
     refresh_token?: string
     expires_in?: number
   }
-  if (!data.access_token) return { accessToken: null, cookieDeltas: [] }
+  if (!data.access_token) return { accessToken: null, cookieDeltas: [], error: 'token_refresh_no_access_token_in_response' }
 
   const accessSecs = Number(data.expires_in ?? 3600)
   const newExpiresAt = Date.now() + Math.max(60, accessSecs - 60) * 1000
