@@ -12,7 +12,6 @@ import { Badge } from '@/components/ui/badge'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
-import { CAROUSEL_PRESETS, DEFAULT_CAROUSEL_PRESET_ID } from '@/lib/carousel-presets'
 import { cleanSceneRefUrls, DEFAULT_SCENE_EDIT_PROMPT } from '@/lib/scene-refs'
 import { maxItemsForJob } from '@/lib/queue-limits'
 import { SEEDREAM_MAX_IMAGES } from '@/lib/wavespeed'
@@ -45,8 +44,7 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
   const [triggerWord, setTriggerWord] = useState('')
   const [carouselEnabled, setCarouselEnabled] = useState(false)
   const [carouselCount, setCarouselCount] = useState<1 | 2 | 3 | 4>(2)
-  const [carouselPreset, setCarouselPreset] = useState(DEFAULT_CAROUSEL_PRESET_ID)
-  const [grokSmart, setGrokSmart] = useState(false)
+  const [posePrompt, setPosePrompt] = useState('')
   const [uploadedRefs, setUploadedRefs] = useState<UploadedRef[]>([])
   const [sceneRefUrlsRaw, setSceneRefUrlsRaw] = useState('')
   const [pinPrompt, setPinPrompt] = useState(DEFAULT_SCENE_EDIT_PROMPT)
@@ -153,6 +151,7 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
       return
     }
     if (!folderName.trim()) { toast.error('Enter a Drive folder name'); return }
+    if (carouselEnabled && !posePrompt.trim()) { toast.error('Write a pose-change prompt for the carousel'); return }
 
     setSubmitting(true)
     try {
@@ -197,7 +196,7 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
             characterId: character?.id ?? null,
             characterName: character?.name ?? null,
             carousel: carouselEnabled
-              ? { enabled: true, count: carouselCount, presetId: carouselPreset, grokSmart }
+              ? { enabled: true, count: carouselCount, posePrompt: posePrompt.trim() }
               : undefined,
           },
         }),
@@ -444,19 +443,18 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
                     </button>
                   ))}
                 </div>
-                <Select value={carouselPreset} onValueChange={v => setCarouselPreset(v ?? DEFAULT_CAROUSEL_PRESET_ID)}>
-                  <SelectTrigger className="w-full h-8 text-xs"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {CAROUSEL_PRESETS.map(p => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-                <button
-                  onClick={() => setGrokSmart(v => !v)}
-                  className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
-                >
-                  <Wand2 className="w-3.5 h-3.5" />
-                  Grok smart analysis {grokSmart ? 'on' : 'off'}
-                </button>
+                <div className="space-y-1">
+                  <p className="text-[10px] text-muted-foreground">Pose change prompt</p>
+                  <Textarea
+                    value={posePrompt}
+                    onChange={e => setPosePrompt(e.target.value)}
+                    placeholder="e.g. three-quarter angle, camera rotated slightly right, same outfit and room"
+                    className="text-xs min-h-[60px]"
+                  />
+                  <p className="text-[10px] text-muted-foreground/60 leading-relaxed">
+                    Edited against the base (first generated) image, not the original reference — used as-is, nothing added.
+                  </p>
+                </div>
               </div>
             )}
           </div>

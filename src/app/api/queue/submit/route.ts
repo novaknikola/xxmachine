@@ -122,8 +122,8 @@ export interface CopyPromptsJobInput {
   carousel?: {
     enabled: boolean
     count: 1 | 2 | 3 | 4
-    presetId?: string
-    grokSmart?: boolean
+    /** User-written pose-change prompt, edited against the base (first generated) image. */
+    posePrompt: string
   }
   seedreamResolution?: '1k' | '2k'
 }
@@ -1190,6 +1190,9 @@ export async function POST(req: NextRequest) {
     if (carousel?.enabled && ![1, 2, 3, 4].includes(carousel.count)) {
       return NextResponse.json({ error: 'carousel.count must be 1, 2, 3, or 4' }, { status: 400 })
     }
+    if (carousel?.enabled && !carousel.posePrompt?.trim()) {
+      return NextResponse.json({ error: 'carousel.posePrompt required when carousel is enabled' }, { status: 400 })
+    }
 
     // Budgeted by images produced, not by items: with carousel on, one item is
     // 1 + variants Seedream calls, so a flat item cap means wildly different
@@ -1224,7 +1227,7 @@ export async function POST(req: NextRequest) {
       characterId: characterId ?? null,
       characterName: characterName ?? null,
       carousel: carousel?.enabled
-        ? { enabled: true, count: carousel.count, presetId: carousel.presetId, grokSmart: carousel.grokSmart ?? false }
+        ? { enabled: true, count: carousel.count, posePrompt: carousel.posePrompt.trim() }
         : undefined,
       seedreamResolution: seedreamResolution === '2k' ? '2k' : '1k',
     }

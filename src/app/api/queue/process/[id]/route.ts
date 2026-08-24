@@ -1877,13 +1877,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             // was the base one — and the variants are what actually differ.
             const usedVariantPrompts: string[] = []
             if (carousel?.enabled) {
-              const variantPrompts = await resolveCarouselVariantPrompts({
-                presetId: carousel.presetId,
-                count: carousel.count,
-                scenePrompt: item.prompt,
-                grokSmart: carousel.grokSmart ?? false,
-                baseImageUrl: baseStoredUrl,
-              })
+              // No preset pool and no Grok analysis here — the user writes the exact pose-change
+              // prompt themselves, and every variant slide is that same prompt edited against the
+              // base image (baseStoredUrl below), never the original reference.
+              const variantPrompts = Array(carousel.count).fill(carousel.posePrompt)
 
               const variantResults = await Promise.allSettled(
                 variantPrompts.map(async (variantPrompt, vi) => {
