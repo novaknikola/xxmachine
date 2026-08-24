@@ -427,13 +427,39 @@ export async function processNewItems(userId: string, itemIds: string[]) {
 }
 
 export async function runDueProfileScans(baseUrl: string, cronSecret: string) {
+  // Claim atomically (SELECT+bump in one statement, FOR UPDATE SKIP LOCKED)
+  // instead of reading then updating last_scanned_at only on success. The old
+  // read-only SELECT let every overlapping tick (this self-fetches into
+  // /api/monitor/scan, which itself can run minutes of Apify polling — see
+  // below) grab the SAME "due" profiles and scan them again in parallel,
+  // multiplying Apify cost/load with nothing to show for it. Trade-off: a
+  // profile whose scan fails now waits the full 23h for retry instead of
+  // getting picked up again next minute — deliberate, since instant-retry is
+  // exactly what was piling ticks up.
+  //
+  // LIMIT dropped 10 -> 3 and the per-profile fetch now carries a hard 90s
+  // timeout: each /api/monitor/scan call can run up to two sequential Apify
+  // actor polls capped at 4 minutes each (see MAX_POLLS in
+  // instagram-scrape.ts), so 10 of them run back-to-back could take over an
+  // hour. That routinely blew past the 300s default headers timeout on the
+  // node-cron self-fetch in server.mjs that calls this whole tick, which is
+  // why "[cron] tick failed: HeadersTimeoutError" was showing up every
+  // minute and profiles hadn't actually been scanned in weeks despite being
+  // marked ACTIVE.
   const due = await rows<TrackedProfileRow>(
-    `SELECT * FROM tracked_profiles
-      WHERE status = 'ACTIVE'
-        AND platform = 'Instagram'
-        AND (last_scanned_at IS NULL OR last_scanned_at < now() - interval '23 hours')
-      ORDER BY last_scanned_at NULLS FIRST
-      LIMIT 10`,
+    `UPDATE tracked_profiles t
+        SET last_scanned_at = now()
+       FROM (
+         SELECT id FROM tracked_profiles
+          WHERE status = 'ACTIVE'
+            AND platform = 'Instagram'
+            AND (last_scanned_at IS NULL OR last_scanned_at < now() - interval '23 hours')
+          ORDER BY last_scanned_at NULLS FIRST
+          LIMIT 3
+          FOR UPDATE SKIP LOCKED
+       ) due
+      WHERE t.id = due.id
+      RETURNING t.*`,
   )
 
   const summary: { profileId: string; username: string; added: number; processed: number }[] = []
@@ -447,6 +473,7 @@ export async function runDueProfileScans(baseUrl: string, cronSecret: string) {
           'x-cron-secret': cronSecret,
         },
         body: JSON.stringify({ profile_id: profile.id, user_id: profile.user_id }),
+        signal: AbortSignal.timeout(90_000),
       })
       const data = await res.json()
       summary.push({

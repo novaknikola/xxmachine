@@ -44,12 +44,18 @@ export interface ApifyReel {
 }
 
 async function runApifyActor<T = ApifyReel>(input: object): Promise<T[]> {
+  // Explicit timeouts on every leg: none of these had one before, so a stuck
+  // TCP connection to Apify (not just a slow actor run) could hang past
+  // MAX_POLLS' own bookkeeping and stall whatever awaited this indefinitely —
+  // that chain is what starved the daily profile-scan cron (see
+  // runDueProfileScans in monitor/process-item.ts).
   const startRes = await fetch(
     `https://api.apify.com/v2/acts/${ACTOR_ID}/runs?token=${APIFY_TOKEN}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
+      signal: AbortSignal.timeout(30_000),
     }
   )
   const startData = await startRes.json()
@@ -58,7 +64,9 @@ async function runApifyActor<T = ApifyReel>(input: object): Promise<T[]> {
 
   for (let i = 0; i < MAX_POLLS; i++) {
     await new Promise(r => setTimeout(r, POLL_INTERVAL_MS))
-    const statusRes = await fetch(`https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY_TOKEN}`)
+    const statusRes = await fetch(`https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY_TOKEN}`, {
+      signal: AbortSignal.timeout(15_000),
+    })
     const statusData = await statusRes.json()
     const status: string = statusData?.data?.status
     if (status === 'SUCCEEDED') break
@@ -66,7 +74,8 @@ async function runApifyActor<T = ApifyReel>(input: object): Promise<T[]> {
   }
 
   const dataRes = await fetch(
-    `https://api.apify.com/v2/actor-runs/${runId}/dataset/items?token=${APIFY_TOKEN}&format=json`
+    `https://api.apify.com/v2/actor-runs/${runId}/dataset/items?token=${APIFY_TOKEN}&format=json`,
+    { signal: AbortSignal.timeout(30_000) },
   )
   return dataRes.json()
 }
