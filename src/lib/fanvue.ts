@@ -96,11 +96,17 @@ export async function refreshAccessToken(refreshToken: string): Promise<TokenSet
 
 // ─── Get token from cookies ───────────────────────────────────
 
+// Reads/writes the exact same fv_* cookies fanvue-server.ts uses. This used to be a separate
+// fanvue_* cookie triplet — harmless right after a connect (the callback dual-wrote both), but
+// each library refreshed independently afterward, and Fanvue rotates the refresh_token on every
+// use: whichever library refreshed first invalidated the other's copy, so requests through this
+// library (creators, sync, chat) would silently poison the fv_* refresh token that actual posting
+// (schedule route) depended on. One cookie pair, one refresh path, no more divergence.
 async function getValidToken(): Promise<string> {
   const cookieStore = await cookies()
-  const accessToken = cookieStore.get('fanvue_access_token')?.value
-  const refreshToken = cookieStore.get('fanvue_refresh_token')?.value
-  const expiresAt = Number(cookieStore.get('fanvue_expires_at')?.value ?? 0)
+  const accessToken = cookieStore.get('fv_access_token')?.value
+  const refreshToken = cookieStore.get('fv_refresh_token')?.value
+  const expiresAt = Number(cookieStore.get('fv_expires_at')?.value ?? 0)
 
   if (!accessToken) throw new Error('NOT_CONNECTED')
 
@@ -109,9 +115,9 @@ async function getValidToken(): Promise<string> {
     const tokens = await refreshAccessToken(refreshToken)
     const secure = process.env.NODE_ENV === 'production'
     const maxAge = 60 * 60 * 24 * 30
-    cookieStore.set('fanvue_access_token', tokens.access_token, { httpOnly: true, secure, maxAge })
-    cookieStore.set('fanvue_refresh_token', tokens.refresh_token, { httpOnly: true, secure, maxAge })
-    cookieStore.set('fanvue_expires_at', String(tokens.expires_at), { httpOnly: true, secure, maxAge })
+    cookieStore.set('fv_access_token', tokens.access_token, { httpOnly: true, secure, sameSite: 'lax', path: '/', maxAge })
+    cookieStore.set('fv_refresh_token', tokens.refresh_token, { httpOnly: true, secure, sameSite: 'lax', path: '/', maxAge })
+    cookieStore.set('fv_expires_at', String(tokens.expires_at), { httpOnly: false, secure, sameSite: 'lax', path: '/', maxAge })
     return tokens.access_token
   }
 
@@ -138,7 +144,7 @@ export async function fanvueFetch(path: string, options: RequestInit = {}): Prom
 export async function isConnected(): Promise<boolean> {
   try {
     const cookieStore = await cookies()
-    return !!cookieStore.get('fanvue_access_token')?.value
+    return !!cookieStore.get('fv_access_token')?.value
   } catch { return false }
 }
 
