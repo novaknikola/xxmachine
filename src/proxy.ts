@@ -39,6 +39,9 @@ const PUBLIC_API_PREFIXES = [
   // silent 401 here with zero server-side log output, since the request
   // never reached the route's own code at all).
   '/api/instagram/oauth/callback',
+  // Same class of bug, same fix — Fanvue redirects the browser back here with a
+  // one-time `code`, its own signature that this is a legitimate OAuth completion.
+  '/api/fanvue/callback',
   // Same class of bug, same silent-401-with-no-server-log symptom, found
   // live 2026-08-14: cron/tick's own internal loopback calls to these three
   // routes carry no session cookie and no secret header, so every due
