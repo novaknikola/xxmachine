@@ -46,7 +46,16 @@ const protocol = hasCerts ? 'https' : 'http'
 const host = hasCerts && existsSync('xmachine.local.pem') ? 'xmachine.local' : 'localhost'
 const base = `${protocol}://${host}:${port}`
 
-const app = next({ dev, dir: __dirname })
+// Told explicitly here because it's what Next falls back to when it can't otherwise
+// determine the request's real host — and behind this custom server + nginx, that fallback
+// is a hardcoded 'localhost', not nginx's forwarded Host header. Broke exactly one thing in
+// practice: the Fanvue OAuth callback's own redirect (`new URL(path, req.url)`), which always
+// landed on https://localhost:3000/... in production no matter what was configured anywhere
+// else. PUBLIC_HOSTNAME is unset in dev, so local behavior (xmachine.local/localhost) is
+// unchanged.
+const publicHostname = process.env.PUBLIC_HOSTNAME || host
+
+const app = next({ dev, dir: __dirname, hostname: publicHostname })
 const handle = app.getRequestHandler()
 
 await app.prepare()
