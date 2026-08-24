@@ -84,15 +84,37 @@ if (!process.env.CRON_SECRET) {
     '       analytics refresh will NOT run. Add CRON_SECRET to .env.local to enable them.',
   )
 } else {
+  // Without this guard, node-cron fires a new self-fetch every 60s regardless
+  // of whether the previous tick's request ever resolved. /api/cron/tick does
+  // real sequential work (profile scans, drive-archive uploads that hold a
+  // per-user pg_advisory_lock, pod health checks, queue dispatch) that can
+  // legitimately run past a minute — so a slow tick used to leave the next
+  // one (and the one after that, ...) stacking up concurrently on this same
+  // single Node process, each competing for the same DB locks and outbound
+  // connections. That pile-up is what surfaced as "HeadersTimeoutError" on
+  // completely unrelated self-fetches (queue/submit, telegram/webhook) once
+  // enough of them had queued up — it wasn't any single endpoint being slow,
+  // it was N overlapping copies of everything running at once.
+  let tickRunning = false
   cron.schedule('* * * * *', async () => {
+    if (tickRunning) {
+      console.warn('[cron] previous tick still in flight — skipping this minute')
+      return
+    }
+    tickRunning = true
     try {
       await fetch(`${base}/api/cron/tick`, {
         headers: { 'x-cron-secret': process.env.CRON_SECRET },
+        // Bounded below undici's own 300s default so a genuinely stuck tick
+        // releases the lock on its own instead of wedging the scheduler shut.
+        signal: AbortSignal.timeout(280_000),
       })
     } catch (err) {
       console.error('[cron] tick failed:', err)
+    } finally {
+      tickRunning = false
     }
   })
 
-  console.log('> Scheduler running (every minute)')
+  console.log('> Scheduler running (every minute, non-overlapping)')
 }
