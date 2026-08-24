@@ -196,7 +196,8 @@ export async function replicateCopyPasteItem(
     endFrame?: EndFrameMode
     repurposeCount?: number
     outputDriveFolderId?: string | null
-    /** Appended to the end of the rendered prompt for the video-edit call only. */
+    /** Appended to the keyframe (Seedream) edit prompt — the video-edit (Seedance) prompt is
+     *  now fixed and does not read this. See the finalPrompt comment further down for why. */
     customPrompt?: string | null
   },
 ) {
@@ -293,7 +294,10 @@ export async function replicateCopyPasteItem(
     if (!generatedImageUrl) {
       if (!firstFrameUrl) throw new Error('No source frame captured — re-run Classify')
       await query(`UPDATE discovery_items SET replicate_status = 'image_generating' WHERE id = $1`, [itemId])
-      const keyframePrompt = renderKeyframeEditPrompt(spec)
+      // Telegram's custom prompt now lands here, not on the Seedance call — live testing
+      // showed it actually needs to steer the identity swap itself (this step), while
+      // Seedance just needs to be told to use the resulting keyframe (see finalPrompt below).
+      const keyframePrompt = [renderKeyframeEditPrompt(spec), opts?.customPrompt?.trim()].filter(Boolean).join(' ')
       // Written before the call, not after: if the render fails or returns
       // something wrong, the prompt that caused it is the thing worth having.
       await query(`UPDATE discovery_items SET keyframe_prompt = $2 WHERE id = $1`, [itemId, keyframePrompt])
@@ -345,16 +349,26 @@ export async function replicateCopyPasteItem(
     }
     const lastImageUrl = wantEndFrame ? generatedEndImageUrl : null
     const referenceImageUrls = [generatedImageUrl, ...(lastImageUrl ? [lastImageUrl] : [])]
-    // reference_images is documented as soft "style or character guidance" for
-    // this model, not a hard constraint — it has been observed keeping the
-    // original video's face/identity instead of the keyframe's. This is a
-    // cheap nudge toward actually using it; appended here (not in
-    // buildSeedancePayload) so sent_prompt still records exactly what was sent.
-    const finalPrompt = [
-      renderedPrompt,
-      opts?.customPrompt?.trim(),
-      'Always use the reference image provided.',
-    ].filter(Boolean).join(' ')
+
+    // Previous approach — kept for reference, no longer sent. Built the Seedance prompt from
+    // the auto-generated scene/motion description (renderCopyPastePrompt), a front-loaded
+    // identity-lock instruction, and the user's Telegram custom text. reference_images alone
+    // is documented as soft "style or character guidance" for this model, not a hard
+    // constraint, and was repeatedly observed keeping the original video's face/identity
+    // instead of the keyframe's even with SEEDANCE_IDENTITY_LOCK front-loaded. Live testing
+    // (2026-08-24) found a short, fixed instruction below performs far more reliably —
+    // Seedance's video-edit model already preserves the source's motion/timing/camera on its
+    // own, so the long scene description wasn't needed and may have been diluting the lock:
+    //
+    // const finalPrompt = [
+    //   SEEDANCE_IDENTITY_LOCK,
+    //   renderedPrompt,
+    //   opts?.customPrompt?.trim(),
+    // ].filter(Boolean).join(' ')
+    const finalPrompt =
+      'Use @Image1 as the primary character and visual reference. Completely recreate the ' +
+      'original video using the character shown in @Image1 as the main subject. Remove text ' +
+      'on the screen. Remove captions.'
 
     await query(`UPDATE discovery_items SET replicate_status = 'video_generating' WHERE id = $1`, [itemId])
     const result = await generateSeedanceVideo({
