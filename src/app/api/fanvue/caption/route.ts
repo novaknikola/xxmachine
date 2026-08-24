@@ -5,27 +5,56 @@ import { one } from '@/lib/db'
 
 // Each caption call is an independent model invocation with no memory of the previous one, so
 // leaving "vary it" to the model produces near-identical output across a batch. Two axes of
-// repetition showed up in testing and both need forcing, not hoping:
-//  1. Semantic (what the question is ABOUT) — fixed by rotating CATEGORY.
-//  2. Structural (HOW the sentence opens) — even across different categories, the model kept
-//     defaulting to "What would you [...] while/if [detail]?" every time. Rotating STRUCTURE
-//     independently forces a different sentence shape regardless of category.
+// repetition need forcing, not hoping:
+//  1. Semantic (the narrative angle) — fixed by rotating CATEGORY.
+//  2. Form (statement vs question, how it opens) — rotating STRUCTURE independently forces a
+//     different shape regardless of angle.
+// Replaces an earlier version that forced every caption into a single-question mold (real
+// captions the user wanted mimicked are mostly NOT questions — see STYLE_REFERENCE below).
 const CAPTION_CATEGORIES = {
-  feeling: "Ask how she's feeling right now, in this exact moment.",
-  want_from_her: 'Ask what she wants someone to do to her right now, given her pose.',
-  want_to_do: "Ask what the fan would want to do to her right now, given her pose.",
-  discovery: 'Ask what the fan would do if he walked in and found her exactly like this.',
-  first_thought: 'Ask what the very first thing is that crosses his mind when he sees her like this.',
-  forgiveness: "Ask whether he'd forgive her for everything, just because of how she looks.",
-  one_wish: 'Ask what he would do to her if he could do just one single thing to her right now.',
+  secretive_reveal: "Frame this as something she wasn't planning to share, or wasn't supposed to be seen yet — an accidental or impulsive reveal.",
+  hesitant_share: 'Frame this as something she almost decided not to post, or took for herself but is sharing anyway.',
+  confident_mood: "A short statement about how she's feeling right now — confident, pretty, in a good mood — as the reason she's sharing this.",
+  engagement_question: 'A short, casual question inviting him to respond — asking if he wants more like this, or if he likes this side of her.',
+  playful_awareness: "A playful, knowing statement or question about exactly what he's noticing or staring at.",
+  permission_tease: 'A statement giving him permission to look, paired with a light, secretive reassurance.',
+  upsell_tease: "A statement teasing that there's more to see — a fuller set, a reason this one was saved for him.",
+  reward_gift: "Frame this photo as a small gift or reward she's giving him.",
+  knowing_inevitability: 'A short, confident statement that she just had to share this one with him — no explanation needed.',
+  first_reaction_prompt: 'Ask him to tell you his first reaction or thought the moment he saw this.',
 } as const
 
 const CAPTION_STRUCTURES = {
-  lead_detail: 'Open with the specific visual detail as a short phrase (not a full sentence), THEN ask the question. Do not start with "What".',
-  command_tease: 'Open with a short teasing address like "Tell me", "Be honest", or "Look at this and tell me" before the question. Do not start with "What".',
-  statement_then_question: 'Make one short declarative statement about the specific detail first, then a short separate question after it. Do not start with "What".',
-  direct_plain: 'Ask the question directly with no lead-in phrase at all — but it must still be anchored in a specific detail, not generic. Do not start with "What would" or "What do".',
+  statement_confession: "Write it as a first-person statement or confession — no question mark. A trailing '…' is welcome.",
+  playful_tease: 'Write it as a short, playful or secretive tease — a statement, not a question.',
+  short_question: 'Write it as one short, casual question — natural, the way someone would actually text it, not elaborate or detail-heavy.',
+  reward_framing: 'Write it as a statement that frames this photo as a gift, reward, or something earned — not a question.',
 } as const
+
+// Real examples of the target tone — not to be copied, just to give the model something
+// concrete to draw the register and rhythm from instead of an abstract description.
+const STYLE_REFERENCE = [
+  'You weren’t supposed to see this yet 👀',
+  'Be honest… how long did you stare? 🤭',
+  'I almost didn’t post this one…',
+  'Okay, I think this might be my favorite one yet 🫣',
+  'Should I post more like this?',
+  'There’s a reason I saved this one for you 😏',
+  'Just a little something to make your day better…',
+  'I know exactly which part you’re looking at 👀',
+  'You can look… I won’t tell anyone 🤫',
+  'This one hits different when you see the full set…',
+  'I wonder what you’d say if you were here right now.',
+  'I wasn’t planning on sending this… but here we are 😈',
+  'Just me, feeling way too confident today.',
+  'I felt pretty in this one, so I had to share it with you ❤️',
+  'A little private moment that I decided to make less private.',
+  'You know I had to show you this one.',
+  'Tell me your first thought when you opened this 👀',
+  'I took this for myself… but I think you’ll appreciate it too.',
+  'Do you like this side of me?',
+  'Okay… I think you deserve this one.',
+].map(l => `"${l}"`).join('\n')
 
 type CaptionCategory = keyof typeof CAPTION_CATEGORIES
 type CaptionStructure = keyof typeof CAPTION_STRUCTURES
@@ -54,25 +83,27 @@ const CONTENT_LEVEL_DESCRIPTIONS = `- "sfw": no nudity, safe-for-work.
 function buildSystemPrompt(category: CaptionCategory, structure: CaptionStructure): string {
   return `You do two things with the photo shown to you, and respond with a JSON object.
 
-TASK 1 — caption: write a short Fanvue post caption in the form of a single direct, provocative
-QUESTION addressed to the fan looking at the photo.
+TASK 1 — caption: write a short Fanvue post caption for this photo.
 
-This specific caption's question is about: ${CAPTION_CATEGORIES[category]}
-This specific caption's sentence shape: ${CAPTION_STRUCTURES[structure]}
+STYLE REFERENCE — real examples of the exact tone and format wanted. Do not copy these, write
+something new in the same spirit:
+${STYLE_REFERENCE}
 
-CRITICAL — anchoring: the question must be anchored in something specific and visible in THIS
-exact photo — her pose, her expression, what she's doing, where she is, an object or detail in
-frame, the mood of the moment. Weave that detail naturally into the sentence. If your draft could
-be pasted under a completely different photo unchanged, it has failed — look again and use
-something you actually see in this one.
+This specific caption's narrative angle: ${CAPTION_CATEGORIES[category]}
+This specific caption's form: ${CAPTION_STRUCTURES[structure]}
 
-CRITICAL — sentence shape: follow the sentence-shape instruction above exactly. Do not fall back
-to the generic pattern "What would you [...] while/if [detail]?" — that exact skeleton is banned
-regardless of which detail fills it in.
+CRITICAL — most of the reference lines above are NOT questions — they're statements, confessions,
+teases, or reveals about the photo or the moment of sharing it, not descriptions of the photo
+itself. Only write an actual question when the form instruction above specifically calls for one.
+Do not default back to a question just because it feels safer.
+
+CRITICAL — tone: short, natural, confiding — like a real text message to someone she's into, not a
+marketing caption. A trailing "…" is fine and used often in the reference. At most one emoji, and
+only if it fits naturally — several of the best reference lines use none at all.
 
 Caption rules:
-- Exactly one question (or lead-in + question per the sentence shape above), casual and teasing tone.
-- No hashtags, no emoji spam (at most one emoji), no explicit/graphic language.
+- One short sentence, sometimes two (a lead-in plus the line itself).
+- No hashtags, no emoji spam, no explicit/graphic language.
 - Never mention prices, PPV, or "unlock" in the caption text itself — that's handled separately.
 
 TASK 2 — contentLevel: classify the photo's explicitness into exactly one of these levels:

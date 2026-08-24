@@ -488,15 +488,15 @@ function FanvuePageInner() {
     captionCancelRef.current = false
     setCaptioning(true)
     // Each caption call is an independent model call with no memory of the last one — left to
-    // itself the model gravitates to near-identical phrasing across a batch, on TWO axes: what
-    // the question is about, and how the sentence opens (it kept defaulting to "What would you
-    // [...] while/if [detail]?" regardless of topic). Rotate both, independently and shuffled
-    // once per run, so neither axis can repeat back to back.
+    // itself the model gravitates to near-identical phrasing across a batch, on TWO axes: the
+    // narrative angle (category) and the form — statement vs question, how it opens (structure).
+    // Rotate both, independently and shuffled once per run, so neither axis repeats back to back.
     const categories = [
-      'feeling', 'want_from_her', 'want_to_do', 'discovery',
-      'first_thought', 'forgiveness', 'one_wish',
+      'secretive_reveal', 'hesitant_share', 'confident_mood', 'engagement_question',
+      'playful_awareness', 'permission_tease', 'upsell_tease', 'reward_gift',
+      'knowing_inevitability', 'first_reaction_prompt',
     ]
-    const structures = ['lead_detail', 'command_tease', 'statement_then_question', 'direct_plain']
+    const structures = ['statement_confession', 'playful_tease', 'short_question', 'reward_framing']
     for (const arr of [categories, structures]) {
       for (let i = arr.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1))
