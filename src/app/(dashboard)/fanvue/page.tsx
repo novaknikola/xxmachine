@@ -37,7 +37,9 @@ interface Creator {
 }
 
 interface BulkItem {
-  url: string
+  id: string
+  /** 1 image = a normal post; 2+ (via "Spoji u carousel") = one Fanvue multi-media post. */
+  urls: string[]
   caption: string
   price: string // dollars, as typed; empty = no PPV
   generating: boolean
@@ -48,6 +50,7 @@ interface QueueItem {
   creatorUuid: string
   creatorDisplayName: string | null
   imageUrl: string
+  extraImageUrls: string[] | null
   caption: string
   scheduledAt: string
   status: 'scheduled' | 'failed' | 'pending' | 'published'
@@ -137,6 +140,7 @@ function FanvuePageInner() {
   const [historyUrls, setHistoryUrls] = useState<string[]>([])
   const [bulkUrlsText, setBulkUrlsText] = useState('')
   const [bulkItems, setBulkItems] = useState<BulkItem[]>([])
+  const [selectedBulkIds, setSelectedBulkIds] = useState<Set<string>>(new Set())
   const [uploading, setUploading] = useState(false)
   const [captioning, setCaptioning] = useState(false)
   const [startAt, setStartAt] = useState(() => toLocalDatetimeValue(new Date(Date.now() + 10 * 60_000)))
@@ -407,14 +411,52 @@ function FanvuePageInner() {
 
   function addBulkUrls(urls: string[]) {
     setBulkItems(prev => {
-      const existing = new Set(prev.map(it => it.url))
-      const additions = urls.filter(u => u && !existing.has(u)).map(url => ({ url, caption: '', price: '', generating: false }))
+      const existing = new Set(prev.flatMap(it => it.urls))
+      const additions = urls.filter(u => u && !existing.has(u))
+        .map(url => ({ id: crypto.randomUUID(), urls: [url], caption: '', price: '', generating: false }))
       return [...prev, ...additions]
     })
   }
 
-  function removeBulkItem(url: string) {
-    setBulkItems(prev => prev.filter(it => it.url !== url))
+  function removeBulkItem(id: string) {
+    setBulkItems(prev => prev.filter(it => it.id !== id))
+    setSelectedBulkIds(prev => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+  }
+
+  function toggleBulkSelected(id: string) {
+    setSelectedBulkIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  /** Combines the selected items into one — their urls concatenated in list order, becoming a
+   *  single Fanvue post (a carousel) instead of one post per image. Keeps the first non-empty
+   *  caption/price found among them; the rest are discarded along with their own list rows. */
+  function mergeSelectedBulkItems() {
+    if (selectedBulkIds.size < 2) return
+    setBulkItems(prev => {
+      const selected = prev.filter(it => selectedBulkIds.has(it.id))
+      const firstIndex = prev.findIndex(it => selectedBulkIds.has(it.id))
+      const merged: BulkItem = {
+        id: crypto.randomUUID(),
+        urls: selected.flatMap(it => it.urls),
+        caption: selected.find(it => it.caption.trim())?.caption ?? '',
+        price: selected.find(it => it.price.trim())?.price ?? '',
+        generating: false,
+      }
+      const rest = prev.filter(it => !selectedBulkIds.has(it.id))
+      rest.splice(firstIndex, 0, merged)
+      return rest
+    })
+    setSelectedBulkIds(new Set())
   }
 
   function addLinkUrls() {
@@ -472,7 +514,7 @@ function FanvuePageInner() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              imageUrl: bulkItems[i].url,
+              imageUrl: bulkItems[i].urls[0],
               category: categories[i % categories.length],
               structure: structures[i % structures.length],
             }),
@@ -524,7 +566,7 @@ function FanvuePageInner() {
     }
     for (const it of bulkItems) {
       if (it.price.trim() && parseFloat(it.price) < 3) {
-        toast.error(`Cena mora biti bar $3.00 (${it.url.slice(-30)})`)
+        toast.error(`Cena mora biti bar $3.00 (${it.urls[0].slice(-30)})`)
         return
       }
     }
@@ -543,7 +585,7 @@ function FanvuePageInner() {
     const payload = JSON.stringify({
       creatorUuid: creator.uuid,
       creatorDisplayName: creator.displayName || creator.handle,
-      imageUrl: item.url,
+      imageUrls: item.urls,
       caption: item.caption,
       scheduledAt,
       price: priceToCents(item.price),
@@ -600,6 +642,7 @@ function FanvuePageInner() {
       else toast.error(`${failedCount}/${bulkItems.length} nije uspelo — proveri listu ispod`)
       setScheduleResult(results.join('\n'))
       setBulkItems([])
+      setSelectedBulkIds(new Set())
       loadQueue()
     } finally {
       setScheduling(false)
@@ -683,16 +726,16 @@ function FanvuePageInner() {
                 : (
                   <div className="grid grid-cols-4 gap-2 max-h-64 overflow-y-auto">
                     {historyUrls.map(url => {
-                      const selected = bulkItems.some(it => it.url === url)
+                      const owner = bulkItems.find(it => it.urls.includes(url))
                       return (
                         <button
                           key={url}
                           type="button"
-                          onClick={() => selected ? removeBulkItem(url) : addBulkUrls([url])}
-                          className={`relative aspect-square rounded-lg overflow-hidden border-2 ${selected ? 'border-primary' : 'border-transparent'}`}
+                          onClick={() => owner ? removeBulkItem(owner.id) : addBulkUrls([url])}
+                          className={`relative aspect-square rounded-lg overflow-hidden border-2 ${owner ? 'border-primary' : 'border-transparent'}`}
                         >
                           <img src={url} alt="" className="w-full h-full object-cover" />
-                          {selected && (
+                          {owner && (
                             <div className="absolute inset-0 bg-primary/30 flex items-center justify-center text-primary-foreground text-lg">✓</div>
                           )}
                         </button>
@@ -731,7 +774,7 @@ function FanvuePageInner() {
 
             {bulkItems.length > 0 && (
               <>
-                <div className="flex gap-2">
+                <div className="flex gap-2 items-center flex-wrap">
                   <Button size="sm" disabled={captioning} onClick={generateCaptions}>
                     {captioning ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Sparkles className="w-4 h-4 mr-2" />}
                     Generiši captions (Grok)
@@ -740,6 +783,12 @@ function FanvuePageInner() {
                     <Button size="sm" variant="destructive" onClick={stopCaptioning}>
                       <X className="w-4 h-4 mr-2" />
                       Stop
+                    </Button>
+                  )}
+                  {selectedBulkIds.size >= 2 && (
+                    <Button size="sm" variant="secondary" onClick={mergeSelectedBulkItems}>
+                      <Images className="w-3.5 h-3.5 mr-1.5" />
+                      Spoji u carousel ({selectedBulkIds.size})
                     </Button>
                   )}
                 </div>
@@ -759,12 +808,40 @@ function FanvuePageInner() {
 
                 <div className="space-y-3">
                   {bulkItems.map((it, i) => (
-                    <div key={it.url} className="flex gap-3 items-start border border-border/60 rounded-lg p-3">
-                      <img src={it.url} alt="" className="w-16 h-16 object-cover rounded shrink-0" />
+                    <div key={it.id} className="flex gap-3 items-start border border-border/60 rounded-lg p-3">
+                      <button
+                        type="button"
+                        onClick={() => toggleBulkSelected(it.id)}
+                        className="mt-1 shrink-0 text-muted-foreground hover:text-foreground"
+                        title="Izaberi za spajanje u carousel"
+                      >
+                        {selectedBulkIds.has(it.id) ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+                      </button>
+                      {it.urls.length > 1 ? (
+                        <div className="relative w-16 h-16 shrink-0">
+                          {it.urls.slice(0, 3).map((u, ui) => (
+                            <img
+                              key={u}
+                              src={u}
+                              alt=""
+                              className="absolute w-14 h-14 object-cover rounded border-2 border-background"
+                              style={{ left: ui * 6, top: ui * 6, zIndex: 3 - ui }}
+                            />
+                          ))}
+                          <span className="absolute -bottom-1 -right-1 z-10 text-[10px] bg-primary text-primary-foreground rounded-full w-4 h-4 flex items-center justify-center">
+                            {it.urls.length}
+                          </span>
+                        </div>
+                      ) : (
+                        <img src={it.urls[0]} alt="" className="w-16 h-16 object-cover rounded shrink-0" />
+                      )}
                       <div className="flex-1 space-y-1.5">
                         <div className="flex items-center justify-between">
-                          <p className="text-xs text-muted-foreground">{scheduledAtFor(i).toLocaleString()}</p>
-                          <button onClick={() => removeBulkItem(it.url)} className="text-muted-foreground hover:text-destructive">
+                          <p className="text-xs text-muted-foreground">
+                            {scheduledAtFor(i).toLocaleString()}
+                            {it.urls.length > 1 && <span className="ml-1.5 text-primary">· carousel ({it.urls.length})</span>}
+                          </p>
+                          <button onClick={() => removeBulkItem(it.id)} className="text-muted-foreground hover:text-destructive">
                             <X className="w-3.5 h-3.5" />
                           </button>
                         </div>
@@ -850,12 +927,20 @@ function FanvuePageInner() {
                       <button type="button" onClick={() => toggleQueueSelected(item.id)} className="shrink-0 text-muted-foreground hover:text-foreground">
                         {selectedQueueIds.has(item.id) ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
                       </button>
-                      <img src={item.imageUrl} alt="" className="w-12 h-12 object-cover rounded shrink-0" />
+                      <div className="relative shrink-0">
+                        <img src={item.imageUrl} alt="" className="w-12 h-12 object-cover rounded" />
+                        {!!item.extraImageUrls?.length && (
+                          <span className="absolute -bottom-1 -right-1 text-[10px] bg-primary text-primary-foreground rounded-full w-4 h-4 flex items-center justify-center">
+                            {item.extraImageUrls.length + 1}
+                          </span>
+                        )}
+                      </div>
                       <div className="flex-1 min-w-0">
                         <p className="text-sm truncate">{item.creatorDisplayName || item.creatorUuid}</p>
                         <p className="text-xs text-muted-foreground">
                           {new Date(item.scheduledAt).toLocaleString()}
                           {item.priceCents ? ` · $${(item.priceCents / 100).toFixed(2)}` : ''}
+                          {!!item.extraImageUrls?.length && ' · carousel'}
                         </p>
                         {item.error && <p className="text-xs text-destructive truncate">{item.error}</p>}
                       </div>

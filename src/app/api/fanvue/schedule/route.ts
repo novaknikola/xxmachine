@@ -7,7 +7,8 @@ import { createFanvuePost } from '@/lib/fanvue-post'
 interface CreateBody {
   creatorUuid?: string
   creatorDisplayName?: string
-  imageUrl?: string
+  /** 1 image = a normal post; 2+ = a Fanvue carousel (multi-media post). */
+  imageUrls?: string[]
   caption?: string
   scheduledAt?: string
   price?: number // cents; Fanvue's real minimum is 300
@@ -26,7 +27,8 @@ export async function GET(req: NextRequest) {
   const [items, totalRow] = await Promise.all([
     rows(
       `SELECT id, creator_uuid AS "creatorUuid", creator_display_name AS "creatorDisplayName",
-              image_url AS "imageUrl", caption, scheduled_at AS "scheduledAt", status, error,
+              image_url AS "imageUrl", extra_image_urls AS "extraImageUrls", caption,
+              scheduled_at AS "scheduledAt", status, error,
               published_at AS "publishedAt", post_uuid AS "postUuid", price_cents AS "priceCents",
               created_at AS "createdAt"
          FROM fanvue_scheduled_posts
@@ -62,8 +64,8 @@ export async function POST(req: NextRequest) {
   if (owner instanceof NextResponse) return owner
 
   const body = await req.json().catch(() => null) as CreateBody | null
-  if (!body?.creatorUuid || !body.imageUrl || !body.caption || !body.scheduledAt) {
-    return NextResponse.json({ error: 'missing_creatorUuid_imageUrl_caption_or_scheduledAt' }, { status: 400 })
+  if (!body?.creatorUuid || !body.imageUrls?.length || !body.caption || !body.scheduledAt) {
+    return NextResponse.json({ error: 'missing_creatorUuid_imageUrls_caption_or_scheduledAt' }, { status: 400 })
   }
   if (new Date(body.scheduledAt).getTime() <= Date.now()) {
     return NextResponse.json({ error: 'scheduledAt_must_be_in_the_future' }, { status: 400 })
@@ -77,11 +79,14 @@ export async function POST(req: NextRequest) {
     )
   }
 
+  const coverUrl = body.imageUrls[0]
+  const extraUrls = body.imageUrls.length > 1 ? body.imageUrls.slice(1) : null
+
   try {
     const postUuid = await createFanvuePost(
       accessToken,
       body.creatorUuid,
-      body.imageUrl,
+      body.imageUrls,
       body.caption,
       'subscribers',
       body.price,
@@ -89,10 +94,10 @@ export async function POST(req: NextRequest) {
     )
     const row = await one<{ id: string }>(
       `INSERT INTO fanvue_scheduled_posts
-        (creator_uuid, creator_display_name, image_url, caption, scheduled_at, price_cents, status, post_uuid)
-       VALUES ($1, $2, $3, $4, $5, $6, 'scheduled', $7)
+        (creator_uuid, creator_display_name, image_url, extra_image_urls, caption, scheduled_at, price_cents, status, post_uuid)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'scheduled', $8)
        RETURNING id`,
-      [body.creatorUuid, body.creatorDisplayName ?? null, body.imageUrl, body.caption, body.scheduledAt, body.price ?? null, postUuid],
+      [body.creatorUuid, body.creatorDisplayName ?? null, coverUrl, extraUrls, body.caption, body.scheduledAt, body.price ?? null, postUuid],
     )
     const res = NextResponse.json({ ok: true, id: row?.id, postUuid })
     applyCookies(res, cookieDeltas)
@@ -103,10 +108,10 @@ export async function POST(req: NextRequest) {
     // matches how every other failure in this pipeline stays visible instead of vanishing.
     await one(
       `INSERT INTO fanvue_scheduled_posts
-        (creator_uuid, creator_display_name, image_url, caption, scheduled_at, price_cents, status, error)
-       VALUES ($1, $2, $3, $4, $5, $6, 'failed', $7)
+        (creator_uuid, creator_display_name, image_url, extra_image_urls, caption, scheduled_at, price_cents, status, error)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'failed', $8)
        RETURNING id`,
-      [body.creatorUuid, body.creatorDisplayName ?? null, body.imageUrl, body.caption, body.scheduledAt, body.price ?? null, msg],
+      [body.creatorUuid, body.creatorDisplayName ?? null, coverUrl, extraUrls, body.caption, body.scheduledAt, body.price ?? null, msg],
     ).catch(() => {})
     const res = NextResponse.json({ error: 'schedule_failed', detail: msg }, { status: 502 })
     applyCookies(res, cookieDeltas)

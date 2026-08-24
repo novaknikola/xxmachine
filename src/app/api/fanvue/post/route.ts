@@ -63,7 +63,7 @@ export async function POST(req: NextRequest) {
     const postUuid = await createFanvuePost(
       accessToken,
       body.creatorUuid,
-      body.imageUrl,
+      [body.imageUrl],
       body.caption,
       body.audience ?? 'subscribers',
       body.price,

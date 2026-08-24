@@ -108,22 +108,10 @@ async function waitForMediaReady(
   throw new Error('media_processing_timeout')
 }
 
-/**
- * Uploads an image (fetched from `imageUrl`) into a creator's Fanvue media library via the
- * real S3 multipart flow, then creates a post attaching it. Images this size are always one
- * part, but the loop stays generic in case that assumption ever breaks.
- */
-export async function createFanvuePost(
-  accessToken: string,
-  creatorUuid: string,
-  imageUrl: string,
-  caption: string,
-  audience: 'subscribers' | 'followers-and-subscribers' = 'subscribers',
-  priceCents?: number,
-  /** ISO 8601 future datetime — when set, Fanvue holds and fires the post itself (shows in
-   *  their own scheduled-post queue) instead of the post going live immediately. */
-  publishAt?: string,
-): Promise<string> {
+/** Uploads one image (fetched from `imageUrl`) into a creator's Fanvue media library via the
+ *  real S3 multipart flow. Images this size are always one part, but the loop stays generic
+ *  in case that assumption ever breaks. Returns the Fanvue mediaUuid. */
+async function uploadFanvueImage(accessToken: string, creatorUuid: string, imageUrl: string): Promise<string> {
   const imgRes = await namedFetch('source_image_fetch', imageUrl)
   if (!imgRes.ok) throw new Error(`source_image_fetch_failed: ${imgRes.status}`)
   const bytes = Buffer.from(await imgRes.arrayBuffer())
@@ -148,13 +136,39 @@ export async function createFanvuePost(
 
   await completeUploadSession(accessToken, creatorUuid, session.uploadId, parts)
   await waitForMediaReady(accessToken, creatorUuid, session.mediaUuid)
+  return session.mediaUuid
+}
+
+/**
+ * Uploads one or more images and creates a single post attaching all of them — Fanvue's own
+ * multi-media posts double as carousels, so 2+ imageUrls just means more mediaUuids on the
+ * same post. Uploaded sequentially (not in parallel) to keep this predictable under Fanvue's
+ * per-agency rate limits, same as everywhere else this file talks to their API.
+ */
+export async function createFanvuePost(
+  accessToken: string,
+  creatorUuid: string,
+  imageUrls: string[],
+  caption: string,
+  audience: 'subscribers' | 'followers-and-subscribers' = 'subscribers',
+  priceCents?: number,
+  /** ISO 8601 future datetime — when set, Fanvue holds and fires the post itself (shows in
+   *  their own scheduled-post queue) instead of the post going live immediately. */
+  publishAt?: string,
+): Promise<string> {
+  if (!imageUrls.length) throw new Error('createFanvuePost_no_images')
+
+  const mediaUuids: string[] = []
+  for (const imageUrl of imageUrls) {
+    mediaUuids.push(await uploadFanvueImage(accessToken, creatorUuid, imageUrl))
+  }
 
   const postRes = await namedFetch('create_post', `${FANVUE_API_BASE}/creators/${creatorUuid}/posts`, {
     method: 'POST',
     headers: headers(accessToken),
     body: JSON.stringify({
       text: caption,
-      mediaUuids: [session.mediaUuid],
+      mediaUuids,
       audience,
       ...(priceCents ? { price: priceCents } : {}),
       ...(publishAt ? { publishAt } : {}),
