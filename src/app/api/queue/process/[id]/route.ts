@@ -1879,16 +1879,21 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             if (carousel?.enabled) {
               // No preset pool and no Grok analysis here — the user writes the exact pose-change
               // prompt themselves, and every variant slide is that same prompt edited against the
-              // base image (baseStoredUrl below), never the original reference.
-              const variantPrompts = Array(carousel.count).fill(carousel.posePrompt)
+              // base image, never the original reference. Sending only baseStoredUrl (not the
+              // scene/identity refs too) removes any ambiguity about which image to pose from —
+              // sending all three alongside a bare pose instruction let Seedream drift onto one
+              // of the original references instead of the freshly composed base image.
+              const wrappedPosePrompt =
+                `This is the exact photo to edit. Keep the same person — same face, hair, skin tone ` +
+                `and body — the same outfit, and the same environment and background. Change ONLY ` +
+                `the pose and camera framing as described: ${carousel.posePrompt}. Photorealistic, ` +
+                `natural skin texture, no beauty filter, no AI skin smoothing. Do not add any other people.`
+              const variantPrompts = Array(carousel.count).fill(wrappedPosePrompt)
 
               const variantResults = await Promise.allSettled(
                 variantPrompts.map(async (variantPrompt, vi) => {
                   const editUrls = await editImage({
-                    imageUrls: [
-                      baseStoredUrl,
-                      ...itemRefUrls.slice(0, SEEDREAM_MAX_IMAGES - 1),
-                    ],
+                    imageUrls: [baseStoredUrl],
                     prompt: variantPrompt,
                     size: dimension,
                     resolution: seedreamRes,
@@ -1901,11 +1906,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               )
               // Kept index-aligned with the images actually produced: a failed
               // variant contributes neither an image nor a prompt, so slide N
-              // in the grid always maps to prompt N here.
-              variantResults.forEach((r, vi) => {
+              // in the grid always maps to prompt N here. The batch view shows
+              // the user's own short text, not the wrapped instruction sent to Seedream.
+              variantResults.forEach(r => {
                 if (r.status === 'fulfilled') {
                   images.push(r.value)
-                  usedVariantPrompts.push(variantPrompts[vi])
+                  usedVariantPrompts.push(carousel.posePrompt)
                 }
               })
             }
