@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { one } from '@/lib/db'
 import { decrypt } from '@/lib/crypto'
-import { createSession, setSessionCookie } from '@/lib/session'
+import { createSession, setSessionCookie, isOwnerEmail } from '@/lib/session'
 import { clearTwoFactorCookie, readTwoFactorTicket } from '@/lib/two-factor-ticket'
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -62,6 +62,7 @@ export async function POST(req: NextRequest) {
         display_name: user.display_name,
         role: user.role,
         subscription_status: user.subscription_status,
+        isOwner: isOwnerEmail(user.email),
       },
     })
     setSessionCookie(res, signed)

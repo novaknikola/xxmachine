@@ -29,7 +29,7 @@ interface SessionRow {
 
 /** True only for the single hardcoded owner account — independent of `role`, since
  *  other accounts (e.g. team admins) must never see owner-only features like Fanvue. */
-function isOwnerEmail(email: string): boolean {
+export function isOwnerEmail(email: string): boolean {
   return !!process.env.OWNER_EMAIL && email === process.env.OWNER_EMAIL
 }
 
