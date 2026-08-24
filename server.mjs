@@ -54,8 +54,12 @@ const base = `${protocol}://${host}:${port}`
 // else. PUBLIC_HOSTNAME is unset in dev, so local behavior (xmachine.local/localhost) is
 // unchanged.
 const publicHostname = process.env.PUBLIC_HOSTNAME || host
+// Once hostname is set, Next always appends ":<port>" to this same reconstructed URL — with
+// no PUBLIC_HOSTNAME (dev) that's already the right port (3000); in production nginx always
+// terminates on 443, not the internal port this process actually listens on.
+const publicPort = process.env.PUBLIC_HOSTNAME ? 443 : port
 
-const app = next({ dev, dir: __dirname, hostname: publicHostname })
+const app = next({ dev, dir: __dirname, hostname: publicHostname, port: publicPort })
 const handle = app.getRequestHandler()
 
 await app.prepare()
