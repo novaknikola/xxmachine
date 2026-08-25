@@ -17,10 +17,16 @@ function base64url(input: Buffer | string): string {
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
 }
 
-let cachedToken: { token: string; expiresAt: number } | null = null
+const DEFAULT_SCOPE = 'https://www.googleapis.com/auth/drive'
 
-export async function getGoogleAccessToken(): Promise<string> {
-  if (cachedToken && Date.now() < cachedToken.expiresAt) return cachedToken.token
+// Keyed by scope: a Drive-scoped and a Sheets-scoped token must be cached
+// separately, or requesting one after the other would silently hand callers
+// a token minted for the wrong API.
+const cachedTokens = new Map<string, { token: string; expiresAt: number }>()
+
+export async function getGoogleAccessToken(scope: string = DEFAULT_SCOPE): Promise<string> {
+  const cached = cachedTokens.get(scope)
+  if (cached && Date.now() < cached.expiresAt) return cached.token
 
   const key = loadKey()
   const now = Math.floor(Date.now() / 1000)
@@ -28,7 +34,7 @@ export async function getGoogleAccessToken(): Promise<string> {
   const header = base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))
   const payload = base64url(JSON.stringify({
     iss: key.client_email,
-    scope: 'https://www.googleapis.com/auth/drive',
+    scope,
     aud: 'https://oauth2.googleapis.com/token',
     iat: now,
     exp: now + 3600,
@@ -52,6 +58,6 @@ export async function getGoogleAccessToken(): Promise<string> {
   const data = await res.json()
   if (!res.ok) throw new Error(data.error_description ?? data.error ?? 'Google token failed')
 
-  cachedToken = { token: data.access_token, expiresAt: now * 1000 + 3500 * 1000 }
+  cachedTokens.set(scope, { token: data.access_token, expiresAt: now * 1000 + 3500 * 1000 })
   return data.access_token
 }

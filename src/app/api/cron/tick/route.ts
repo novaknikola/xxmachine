@@ -426,6 +426,28 @@ export async function GET(req: NextRequest) {
     driveArchive = { error: err instanceof Error ? err.message : String(err) }
   }
 
+  // ── Isolated IG viral monitor (Sheet → scan → Telegram list) ──
+  // Fully separate module/tables (src/lib/viral-monitor) — this block is the
+  // only place it touches tick, same fire-and-forget reasoning as
+  // runDailyAutoSchedule above: a run scans every profile in the sheet and
+  // can run long, so it must not risk truncating the rest of this request.
+  let viralMonitor: 'started' | 'skipped' = 'skipped'
+  try {
+    const lastRun = await one<{ started_at: Date }>(
+      `SELECT started_at FROM viral_monitor_runs ORDER BY started_at DESC LIMIT 1`,
+    )
+    const hoursSinceLastRun = lastRun
+      ? (Date.now() - new Date(lastRun.started_at).getTime()) / 3_600_000
+      : Infinity
+    if (hoursSinceLastRun >= 23) {
+      const { runViralMonitorDaily } = await import('@/lib/viral-monitor/run')
+      runViralMonitorDaily().catch(err => console.error('[cron/tick] viral-monitor error:', err))
+      viralMonitor = 'started'
+    }
+  } catch (err) {
+    console.error('[cron/tick] viral-monitor guard error:', err)
+  }
+
   return NextResponse.json({
     posts: { processed: due.length, results: postResults.map(r => r.status) },
     reels: { processed: dueReels.length, results: reelResults.map(r => r.status) },
@@ -435,6 +457,7 @@ export async function GET(req: NextRequest) {
     stalledBatchesFinalized,
     monitor: monitorScans,
     driveArchive,
+    viralMonitor,
     autoSchedule: 'fire-and-forget — not awaited, check logs for its own [auto-schedule] lines',
   })
 }

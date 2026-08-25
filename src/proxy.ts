@@ -31,6 +31,9 @@ const PUBLIC_API_PREFIXES = [
   // Same class of bug, same fix — the pose-recreate bot's own webhook, secured
   // the same way (?secret=CRON_SECRET checked inside the route).
   '/api/telegram-recreate/webhook',
+  // Same class of bug, same fix — @igreplicatorbot's own webhook (viral
+  // monitor subscribe/unsubscribe), secured the same way.
+  '/api/viral-monitor/telegram-webhook',
   // Instagram redirects the browser here to finish OAuth with a one-time
   // `code` — Instagram's own signature that this is a legitimate completion
   // for this app, same trust model as the webhooks above. That browser has
