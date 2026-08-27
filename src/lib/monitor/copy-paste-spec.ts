@@ -94,7 +94,20 @@ export const NEGATIVE_PROMPT_TEMPLATE =
   'the on-camera subject does not speak other people\'s lines, ' +
   'no lip-syncing to off-screen dialogue, no mouthing words spoken by someone behind the camera, ' +
   // Skin marks belonging to the source subject were surviving the identity swap.
-  'no tattoos, no visible body ink, no piercings not present on the identity reference'
+  'no tattoos, no visible body ink, no piercings not present on the identity reference, ' +
+  // The source reel's burned-in IG caption/watermark was surviving straight through
+  // the keyframe edit into the video — unconditional, not just when a caption
+  // happens to get mentioned elsewhere in the spec.
+  'no on-screen text, no captions, no subtitles, no watermarks, no logos overlaid on the video'
+
+/**
+ * Unconditional: the source frame's burned-in Instagram caption/watermark must
+ * never survive into either keyframe edit. Shared because both keyframe prompts
+ * (start and end) edit directly off a source video frame that likely has one.
+ */
+const REMOVE_ONSCREEN_TEXT =
+  'Remove any on-screen text, captions, subtitles, or watermarks visible in image 1 — ' +
+  'the output must be clean with no overlaid text, logos, or watermarks anywhere in frame.'
 
 /**
  * Seedream tends to "tidy" an edited subject into a neutral upright pose, which
@@ -592,6 +605,7 @@ export function renderKeyframeEditPrompt(spec: CopyPasteSpec): string {
     // it can safely do is stop the edit from tidying the subject into a neutral
     // pose, which is what deletes the motion cue Seedance animates from.
     PRESERVE_MOTION_CUE,
+    REMOVE_ONSCREEN_TEXT,
     'Photorealistic, natural skin texture, no beauty filter, no AI skin smoothing.',
     'Do not add any other people. Do not change the composition, angle, or background.',
     // Negatives existed but only ever reached the video prompt, never the image
@@ -617,6 +631,7 @@ export function renderEndKeyframeEditPrompt(spec: CopyPasteSpec): string {
     'The person must look IDENTICAL to the person in image 3 — same face, same hair colour and styling, same wardrobe, same skin tone and lighting. Only the pose and framing differ.',
     locked?.wardrobe && `Wardrobe: ${locked.wardrobe}.`,
     PRESERVE_MOTION_CUE,
+    REMOVE_ONSCREEN_TEXT,
     'Photorealistic, natural skin texture, no beauty filter, no AI skin smoothing.',
     'Do not add any other people. Do not change the composition, angle, or background.',
   ].filter(Boolean)
