@@ -15,6 +15,9 @@ import { getUserApiKey } from '@/lib/user-config'
 import { notifyReplicationDone, notifyReplicationFailed } from './notify'
 import { archiveDiscoveryItem } from '@/lib/drive-archive/from-discovery-item'
 import type { DiscoveryItemRow, EndFrameMode, TrackedProfileRow } from './types'
+import { resolveVideoUrlViaRapidApi, resolveVideoUrlsViaApify } from '@/lib/instagram-scrape'
+import { resolveKey } from '@/lib/user-keys'
+import { isPlayableVideoUrl } from './video-url'
 
 /**
  * Floor for frames sampled per clip — denser sampling catches background gag
@@ -85,6 +88,43 @@ async function enqueueRepurpose(opts: {
 }
 
 /**
+ * Re-resolves one reel's video URL directly from Instagram, bypassing
+ * whatever is cached on the row. Instagram's CDN links are signed and expire
+ * (observed ~34h lifetime on a real URL) — a link cached days or weeks ago
+ * 403s by the time this item is (re-)analyzed. Mirrors the same Apify →
+ * RapidAPI fallback chain enqueueReelUrlsForUser uses to resolve a link the
+ * first time, so classifyDiscoveryItem can self-heal a dead cached link
+ * instead of failing outright the first time that happens.
+ */
+async function reresolveVideoUrl(opts: {
+  userId: string
+  shortCode: string
+  permalink: string
+}): Promise<string | null> {
+  if (process.env.APIFY_API_KEY) {
+    try {
+      const byCode = await resolveVideoUrlsViaApify([opts.permalink])
+      const match = byCode.get(opts.shortCode.toLowerCase())
+      if (match?.videoUrl && isPlayableVideoUrl(match.videoUrl)) return match.videoUrl
+    } catch {
+      /* fall through to RapidAPI */
+    }
+  }
+
+  const rapidApiKey = await resolveKey(opts.userId, 'RAPIDAPI_KEY')
+  if (rapidApiKey) {
+    try {
+      const r = await resolveVideoUrlViaRapidApi(opts.permalink, rapidApiKey)
+      if (isPlayableVideoUrl(r.videoUrl)) return r.videoUrl
+    } catch {
+      /* nothing left to try */
+    }
+  }
+
+  return null
+}
+
+/**
  * Analysis-only step: probes the source clip and produces the CopyPasteSpec +
  * rendered prompt so they can be reviewed/edited before paying for a Seedance call.
  * Requires a source video — Copy-Paste has no still-image path.
@@ -115,13 +155,32 @@ export async function classifyDiscoveryItem(
   )
 
   try {
+    let videoUrl = item.video_url
     // Transcript first: its line times decide where extra frames go, so that
     // speech attribution has a frame at the moment each line was spoken.
-    const transcript = await transcribeSourceSpeech(item.video_url)
-    const probe = await probeSourceVideo(item.video_url, PROBE_FRAME_COUNT, transcript.lineTimes)
+    let transcript = await transcribeSourceSpeech(videoUrl)
+    let probe = await probeSourceVideo(videoUrl, PROBE_FRAME_COUNT, transcript.lineTimes)
+
+    // A cached CDN link can go stale between when it was first resolved and
+    // when this item is (re-)analyzed. Re-resolve once from Instagram before
+    // giving up, instead of failing an otherwise-fine reel over a dead link
+    // left over from an earlier attempt — see reresolveVideoUrl.
+    if (!probe) {
+      const fresh = await reresolveVideoUrl({
+        userId,
+        shortCode: item.content_id,
+        permalink: item.content_url,
+      })
+      if (fresh && fresh !== videoUrl) {
+        videoUrl = fresh
+        await query(`UPDATE discovery_items SET video_url = $2 WHERE id = $1`, [itemId, videoUrl])
+        transcript = await transcribeSourceSpeech(videoUrl)
+        probe = await probeSourceVideo(videoUrl, PROBE_FRAME_COUNT, transcript.lineTimes)
+      }
+    }
     if (!probe) throw new Error('Could not read source video')
 
-    const spec = await extractCopyPasteSpec(probe, item.video_url, transcript)
+    const spec = await extractCopyPasteSpec(probe, videoUrl, transcript)
     const renderedPrompt = renderCopyPastePrompt(spec)
 
     // A prompt the user typed outlives a re-analysis. They can take the new one
