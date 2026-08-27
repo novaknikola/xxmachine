@@ -71,8 +71,9 @@ export async function enqueueDiscoveryReels(
     const existing = await one<{
       id: string
       replicate_status: string
+      reference_image_url: string | null
     }>(
-      `SELECT id, replicate_status FROM discovery_items
+      `SELECT id, replicate_status, reference_image_url FROM discovery_items
         WHERE user_id = $1 AND content_id = $2`,
       [userId, contentId],
     )
@@ -86,6 +87,16 @@ export async function enqueueDiscoveryReels(
         ids.push(existing.id)
         continue
       }
+      // A new reference photo is a new identity request — a finished render made
+      // from the OLD photo does not answer it. Without this, resubmitting the
+      // same reel with a different photo silently returns the old video
+      // untouched: replicateCopyPasteItem short-circuits on any existing
+      // kling_video_url to avoid double-billing a retried job, and that check
+      // can't tell a genuine retry apart from a new identity landing on the same
+      // deduped row. Same clearing this table already does for an explicit
+      // `reset` re-analysis (see classifyDiscoveryItem).
+      const referencePhotoChanged =
+        referenceImageUrl !== null && referenceImageUrl !== existing.reference_image_url
       await query(
         `UPDATE discovery_items SET
            admin_status = 'APPROVED',
@@ -105,7 +116,13 @@ export async function enqueueDiscoveryReels(
            likes = greatest(likes, $8),
            comments = greatest(comments, $9),
            posted_at = coalesce($10::timestamptz, posted_at),
-           reference_image_url = coalesce($11, reference_image_url)
+           reference_image_url = coalesce($11, reference_image_url),
+           kling_video_url         = CASE WHEN $12::bool THEN NULL ELSE kling_video_url END,
+           video_model             = CASE WHEN $12::bool THEN NULL ELSE video_model END,
+           generated_image_url     = CASE WHEN $12::bool THEN NULL ELSE generated_image_url END,
+           generated_end_image_url = CASE WHEN $12::bool THEN NULL ELSE generated_end_image_url END,
+           keyframe_prompt         = CASE WHEN $12::bool THEN NULL ELSE keyframe_prompt END,
+           end_keyframe_prompt     = CASE WHEN $12::bool THEN NULL ELSE end_keyframe_prompt END
          WHERE id = $1 AND user_id = $2`,
         [
           existing.id,
@@ -119,6 +136,7 @@ export async function enqueueDiscoveryReels(
           comments,
           postedIso,
           referenceImageUrl,
+          referencePhotoChanged,
         ],
       )
       refreshed++
