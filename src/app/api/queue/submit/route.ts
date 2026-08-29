@@ -308,6 +308,32 @@ async function requireUserDriveUploadToken(userId: string): Promise<string | Nex
   }
 }
 
+/**
+ * Claim a just-inserted pending job and fire its worker over loopback right
+ * away, instead of leaving it for the once-a-minute cron sweep — same pattern
+ * copy_paste_v2 and copy_prompts_generate already use. Loopback on purpose:
+ * going through the public URL would put nginx's proxy_read_timeout between
+ * us and a job that can run for minutes. Fire-and-forget; the atomic
+ * pending→processing claim means a racing cron tick just no-ops.
+ */
+async function fireQueueWorkerNow(jobId: string): Promise<void> {
+  const secret = process.env.CRON_SECRET
+  if (!secret) return
+  const claimed = await one<{ id: string }>(
+    `UPDATE generation_queue
+        SET status = 'processing', started_at = now(), attempts = attempts + 1
+      WHERE id = $1 AND status = 'pending'
+      RETURNING id`,
+    [jobId],
+  ).catch(() => null)
+  if (!claimed) return
+  const internalBase = `http://127.0.0.1:${process.env.PORT ?? 3000}`
+  fetch(`${internalBase}/api/queue/process/${jobId}`, {
+    method: 'POST',
+    headers: { 'x-cron-secret': secret },
+  }).catch(err => console.error(`[queue/submit] fire worker ${jobId}:`, err))
+}
+
 // Only RunPod's own HTTP proxy domain is accepted — hard SSRF guard, no exceptions.
 const RUNPOD_POD_URL_RE = /^https:\/\/[a-z0-9-]+-\d+\.proxy\.runpod\.net\/?$/i
 
@@ -473,6 +499,10 @@ export async function POST(req: NextRequest) {
         [user.id, body.job_type, JSON.stringify(input), count],
       )
       ids.push(row!.id)
+      // Single-upload submissions (Run/Queue from the web UI) start now. A
+      // Drive-folder fan-out can be dozens of jobs — those stay on cron so they
+      // don't all hit ffmpeg on this box at once.
+      if (!inputFolder) await fireQueueWorkerNow(row!.id)
     }
 
     // `id` stays the response shape every existing caller reads.
@@ -551,6 +581,7 @@ export async function POST(req: NextRequest) {
         [user.id, body.job_type, JSON.stringify(input), count],
       )
       ids.push(row!.id)
+      if (!inputFolder) await fireQueueWorkerNow(row!.id)
     }
 
     return NextResponse.json({ id: ids[0], ids })

@@ -10,6 +10,7 @@ import {
   Upload, X, ListTodo,
 } from 'lucide-react'
 import { uploadQueueInput } from '@/lib/upload-queue-input'
+import { pollQueueJob } from '@/lib/poll-queue-job'
 
 interface VideoVariant {
   id: string
@@ -53,33 +54,6 @@ const EFFECT_LABELS: Record<keyof VideoEffects, string> = {
 
 const PRESETS = [10, 20, 50, 100] as const
 
-/**
- * A many-variant immediate run holds one HTTP connection open through several
- * sequential ffmpeg passes — long enough that an ordinary network blip (wifi
- * flake, laptop sleep) drops it with a bare "Failed to fetch" and no server
- * response to explain it. Retry the whole request a couple of times before
- * surfacing that to the user, same as uploadQueueInput does for uploads.
- */
-async function postVideoReproduce(fd: FormData): Promise<{ results?: Array<{ id: string; seed: number }>; error?: string }> {
-  const MAX_ATTEMPTS = 3
-  let lastErr: unknown
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      const res = await fetch('/api/video-reproduce', { method: 'POST', body: fd })
-      const contentType = res.headers.get('content-type') || ''
-      const data = contentType.includes('application/json')
-        ? await res.json()
-        : { error: (await res.text()).slice(0, 500) || `Non-JSON response (${res.status})` }
-      if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`)
-      return data
-    } catch (err) {
-      lastErr = err
-      if (attempt < MAX_ATTEMPTS) await new Promise(r => setTimeout(r, 1500 * attempt))
-    }
-  }
-  throw lastErr instanceof Error ? lastErr : new Error('Request failed')
-}
-
 export function VideoReproduceTab() {
   const router = useRouter()
   const [sources, setSources] = useState<Array<{ id: string; file: File; name: string }>>([])
@@ -105,7 +79,15 @@ export function VideoReproduceTab() {
     setEffects(prev => ({ ...prev, [key]: !prev[key] }))
   }
 
-  // Immediate mode: max 10, blocking, results shown inline
+  // Immediate mode: max 10 per source, results shown inline. Submitted through
+  // the same queue path Queue mode uses (short upload, short submit, then
+  // polled to completion) instead of one long blocking POST — that request
+  // held a single connection open through the whole upload plus every
+  // sequential ffmpeg pass, and a client network that couldn't sustain it
+  // killed the request outright (nginx logged bare 499s: the browser side
+  // closing the socket, not a server error or crash). No request in this path
+  // stays open more than a couple of seconds, so there is nothing left for a
+  // flaky connection to drop mid-flight.
   async function runImmediate() {
     if (!sources.length) { toast.error('Upload at least one video'); return }
     if (count > 10) { toast.error('Immediate mode supports max 10 variants — use Queue for more'); return }
@@ -114,44 +96,68 @@ export function VideoReproduceTab() {
     setRunning(true)
     setProgress({ done: 0, total })
     setVariants([])
-    let done = 0
+    let doneItems = 0
+    let succeeded = 0
 
-    for (const src of sources) {
+    for (let srcIdx = 0; srcIdx < sources.length; srcIdx++) {
+      const src = sources[srcIdx]!
       if (abortRef.current) break
-      const fd = new FormData()
-      fd.append('file', src.file)
-      fd.append('count', String(count))
-      fd.append('seed', String(Math.floor(Math.random() * 0xffffff)))
-      Object.entries(effects).forEach(([k, v]) => fd.append(k, String(v)))
+      const baseDone = srcIdx * count
 
       try {
-        const data = await postVideoReproduce(fd)
-        const results = Array.isArray(data.results) ? data.results : []
-        if (results.length === 0) {
-          throw new Error(data.error ?? 'No video variations were generated.')
-        }
+        toast.loading(`Uploading ${src.name}…`, { id: `run-${src.id}` })
+        const { videoUrl, videoName } = await uploadQueueInput(src.file)
+        const baseSeed = Math.floor(Math.random() * 0xffffff)
 
-        for (const r of results) {
+        const submitRes = await fetch('/api/queue/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            job_type: 'video_repurpose',
+            input: { videoUrl, videoName, count, baseSeed, effects },
+          }),
+        })
+        const submitData = await submitRes.json().catch(() => ({}))
+        if (!submitRes.ok) throw new Error((submitData as { error?: string }).error ?? 'Submit failed')
+        const jobId = (submitData as { id?: string }).id
+        if (!jobId) throw new Error('Submit did not return a job id')
+        toast.dismiss(`run-${src.id}`)
+
+        const job = await pollQueueJob(
+          jobId,
+          d => setProgress({ done: baseDone + d, total }),
+          () => abortRef.current,
+        )
+        doneItems = baseDone + count
+        if (!job) break // stopped by the user
+
+        const rawUrls = job.output?.urls ?? []
+        rawUrls.forEach((url, i) => {
+          if (url.startsWith('error:')) return
+          succeeded++
           setVariants(prev => [...prev, {
-            id: r.id,
+            id: `${jobId}-${i}`,
             sourceName: src.name,
-            seed: r.seed,
-            streamUrl: `/api/video-reproduce?id=${r.id}`,
+            seed: baseSeed + i * 1337,
+            streamUrl: url,
           }])
-          done++
-          setProgress({ done, total })
+        })
+        if (!rawUrls.some(u => !u.startsWith('error:'))) {
+          const firstError = rawUrls.find(u => u.startsWith('error:'))
+          throw new Error(firstError ? firstError.replace(/^error:/, '') : 'No video variations were generated.')
         }
       } catch (err) {
+        toast.dismiss(`run-${src.id}`)
         toast.error(`${src.name}: ${err instanceof Error ? err.message : 'error'}`)
-        done += count
-        setProgress({ done, total })
+        doneItems = baseDone + count
       }
+      setProgress({ done: doneItems, total })
     }
 
     setRunning(false)
-    if (!abortRef.current && done > 0) {
-      toast.success(`${done} video variations ready`)
-    } else if (!abortRef.current && done === 0) {
+    if (!abortRef.current && succeeded > 0) {
+      toast.success(`${succeeded} video variations ready`)
+    } else if (!abortRef.current && succeeded === 0) {
       toast.error('No video variations were generated. Please check the errors above.')
     }
   }
@@ -239,6 +245,22 @@ export function VideoReproduceTab() {
         action: { label: 'Open Queue', onClick: () => router.push('/captions?tab=queue') },
         duration: 6000,
       })
+    }
+  }
+
+  // A plain <a download> only forces a save for a same-origin href — streamUrl
+  // is now a Supabase storage URL, so fetch it to a blob first (same trick
+  // downloadAll already uses for the ZIP).
+  async function downloadVariant(v: VideoVariant, i: number) {
+    try {
+      const blob = await fetch(v.streamUrl).then(r => r.blob())
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = `video_${i + 1}.mp4`
+      a.click()
+      URL.revokeObjectURL(a.href)
+    } catch {
+      toast.error('Download failed')
     }
   }
 
@@ -498,10 +520,11 @@ export function VideoReproduceTab() {
                     className="w-full rounded-lg border border-border bg-black aspect-[9/16] object-contain" />
                   <div className="flex items-center justify-between">
                     <p className="text-[9px] text-muted-foreground font-mono">#{i + 1} · {v.seed.toString(16).slice(-6)}</p>
-                    <a href={v.streamUrl} download={`video_${i + 1}.mp4`}
+                    <button
+                      onClick={() => downloadVariant(v, i)}
                       className="text-muted-foreground hover:text-foreground transition-colors">
                       <Download className="w-3.5 h-3.5" />
-                    </a>
+                    </button>
                   </div>
                 </div>
               ))}

@@ -116,5 +116,5 @@ export function proxy(req: NextRequest) {
 export const config = {
   // Exclude routes that handle large multipart uploads directly (proxy would buffer them).
   // Auth for these routes is handled inside the route handlers themselves.
-  matcher: ['/((?!_next/static|_next/image|favicon.ico|api/video-reproduce|api/queue/upload-input|api/edit-image|api/grok/analyze-poses).*)'],
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|api/queue/upload-input|api/edit-image|api/grok/analyze-poses).*)'],
 }

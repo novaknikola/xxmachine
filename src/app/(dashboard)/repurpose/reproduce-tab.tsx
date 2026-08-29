@@ -10,6 +10,7 @@ import {
   Play, Square, Loader2, Download, Trash2, FolderDown, Upload, X, RefreshCw, ListTodo,
 } from 'lucide-react'
 import { uploadQueueInput } from '@/lib/upload-queue-input'
+import { pollQueueJob } from '@/lib/poll-queue-job'
 import {
   DEFAULT_REPRODUCE,
   type ReproduceSettings, type ReproduceVariant, type EffectRange,
@@ -51,7 +52,12 @@ export function ReproduceTab() {
     setSettings(prev => ({ ...prev, [key]: { ...(prev[key] as object), ...patch } }))
   }
 
-  // Immediate mode: max 10 per source, blocking, results shown inline
+  // Immediate mode: max 10 per source, results shown inline. Submitted through
+  // the same queue path Queue mode uses (short upload, short submit, then
+  // polled to completion) instead of one long blocking POST — see the video
+  // tab's runImmediate for why that mattered (nginx logged bare 499s: the
+  // browser side dropping the connection mid-request on a flaky network, not
+  // a server error). No request here stays open more than a couple seconds.
   async function runImmediate() {
     if (!sources.length) { toast.error('Upload at least one image'); return }
     if (settings.count > 10) { toast.error('Immediate mode supports max 10 variants — use Queue for more'); return }
@@ -60,45 +66,60 @@ export function ReproduceTab() {
     setRunning(true)
     setProgress({ done: 0, total })
     setVariants([])
-    let done = 0
+    let doneItems = 0
     let succeeded = 0
 
-    for (const src of sources) {
+    for (let srcIdx = 0; srcIdx < sources.length; srcIdx++) {
+      const src = sources[srcIdx]!
       if (abortRef.current) break
-      const fd = new FormData()
-      fd.append('file', src.file)
-      fd.append('settings', JSON.stringify(settings))
-      fd.append('count', String(settings.count))
-      fd.append('seed', String(Math.floor(Math.random() * 0xffffff)))
+      const baseDone = srcIdx * settings.count
 
       try {
-        const res = await fetch('/api/image-reproduce', { method: 'POST', body: fd })
-        const contentType = res.headers.get('content-type') || ''
-        const data = contentType.includes('application/json')
-          ? await res.json()
-          : { error: (await res.text()).slice(0, 500) || `Non-JSON response (${res.status})` }
+        toast.loading(`Uploading ${src.file.name}…`, { id: `run-${src.id}` })
+        const { videoUrl: imageUrl, videoName: imageName } = await uploadQueueInput(src.file)
+        const baseSeed = Math.floor(Math.random() * 0xffffff)
 
-        if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`)
+        const submitRes = await fetch('/api/queue/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            job_type: 'image_repurpose',
+            input: { imageUrl, imageName, count: settings.count, baseSeed, settings },
+          }),
+        })
+        const submitData = await submitRes.json().catch(() => ({}))
+        if (!submitRes.ok) throw new Error((submitData as { error?: string }).error ?? 'Submit failed')
+        const jobId = (submitData as { id?: string }).id
+        if (!jobId) throw new Error('Submit did not return a job id')
+        toast.dismiss(`run-${src.id}`)
 
-        const results = Array.isArray(data.results) ? data.results : []
-        if (results.length === 0) {
-          throw new Error(data.error ?? 'No image variations were generated.')
-        }
+        const job = await pollQueueJob(
+          jobId,
+          d => setProgress({ done: baseDone + d, total }),
+          () => abortRef.current,
+        )
+        doneItems = baseDone + settings.count
+        if (!job) break // stopped by the user
 
-        for (const r of results) {
-          setVariants(prev => [...prev, {
-            id: r.id, sourceId: src.id, sourceName: src.file.name,
-            url: `/api/image-reproduce?id=${r.id}`, seed: r.seed,
-          }])
-          done++
+        const rawUrls = job.output?.urls ?? []
+        rawUrls.forEach((url, i) => {
+          if (url.startsWith('error:')) return
           succeeded++
-          setProgress({ done, total })
+          setVariants(prev => [...prev, {
+            id: `${jobId}-${i}`, sourceId: src.id, sourceName: src.file.name,
+            url, seed: baseSeed + i * 1337,
+          }])
+        })
+        if (!rawUrls.some(u => !u.startsWith('error:'))) {
+          const firstError = rawUrls.find(u => u.startsWith('error:'))
+          throw new Error(firstError ? firstError.replace(/^error:/, '') : 'No image variations were generated.')
         }
       } catch (err) {
+        toast.dismiss(`run-${src.id}`)
         toast.error(`${src.file.name}: ${err instanceof Error ? err.message : 'error'}`)
-        done += settings.count
-        setProgress({ done, total })
+        doneItems = baseDone + settings.count
       }
+      setProgress({ done: doneItems, total })
     }
 
     setRunning(false)
@@ -191,6 +212,22 @@ export function ReproduceTab() {
         action: { label: 'Open Queue', onClick: () => router.push('/captions?tab=queue') },
         duration: 6000,
       })
+    }
+  }
+
+  // A plain <a download> only forces a save for a same-origin href — v.url is
+  // now a Supabase storage URL, so fetch it to a blob first (same trick
+  // downloadZip already uses).
+  async function downloadVariant(v: ReproduceVariant, i: number) {
+    try {
+      const blob = await fetch(v.url).then(r => r.blob())
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = `var_${i + 1}_s${v.seed}.jpg`
+      a.click()
+      URL.revokeObjectURL(a.href)
+    } catch {
+      toast.error('Download failed')
     }
   }
 
@@ -460,11 +497,11 @@ export function ReproduceTab() {
                     <p className="text-[9px] text-muted-foreground/50 mt-0.5 text-center font-mono truncate">
                       #{i + 1} · {v.seed.toString(16).slice(-6)}
                     </p>
-                    <a href={v.url} download={`var_${i + 1}_s${v.seed}.jpg`}
-                      onClick={e => e.stopPropagation()}
+                    <button
+                      onClick={e => { e.stopPropagation(); downloadVariant(v, i) }}
                       className="absolute top-1 left-1 w-5 h-5 rounded bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                       <Download className="w-2.5 h-2.5" />
-                    </a>
+                    </button>
                   </div>
                 ))}
               </div>
