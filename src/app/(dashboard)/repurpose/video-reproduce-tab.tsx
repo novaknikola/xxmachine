@@ -53,6 +53,33 @@ const EFFECT_LABELS: Record<keyof VideoEffects, string> = {
 
 const PRESETS = [10, 20, 50, 100] as const
 
+/**
+ * A many-variant immediate run holds one HTTP connection open through several
+ * sequential ffmpeg passes — long enough that an ordinary network blip (wifi
+ * flake, laptop sleep) drops it with a bare "Failed to fetch" and no server
+ * response to explain it. Retry the whole request a couple of times before
+ * surfacing that to the user, same as uploadQueueInput does for uploads.
+ */
+async function postVideoReproduce(fd: FormData): Promise<{ results?: Array<{ id: string; seed: number }>; error?: string }> {
+  const MAX_ATTEMPTS = 3
+  let lastErr: unknown
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch('/api/video-reproduce', { method: 'POST', body: fd })
+      const contentType = res.headers.get('content-type') || ''
+      const data = contentType.includes('application/json')
+        ? await res.json()
+        : { error: (await res.text()).slice(0, 500) || `Non-JSON response (${res.status})` }
+      if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`)
+      return data
+    } catch (err) {
+      lastErr = err
+      if (attempt < MAX_ATTEMPTS) await new Promise(r => setTimeout(r, 1500 * attempt))
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('Request failed')
+}
+
 export function VideoReproduceTab() {
   const router = useRouter()
   const [sources, setSources] = useState<Array<{ id: string; file: File; name: string }>>([])
@@ -98,14 +125,7 @@ export function VideoReproduceTab() {
       Object.entries(effects).forEach(([k, v]) => fd.append(k, String(v)))
 
       try {
-        const res = await fetch('/api/video-reproduce', { method: 'POST', body: fd })
-        const contentType = res.headers.get('content-type') || ''
-        const data = contentType.includes('application/json')
-          ? await res.json()
-          : { error: (await res.text()).slice(0, 500) || `Non-JSON response (${res.status})` }
-
-        if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`)
-
+        const data = await postVideoReproduce(fd)
         const results = Array.isArray(data.results) ? data.results : []
         if (results.length === 0) {
           throw new Error(data.error ?? 'No video variations were generated.')
