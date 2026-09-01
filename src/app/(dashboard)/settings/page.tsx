@@ -21,6 +21,8 @@ import {
   Upload,
   Image as ImageIcon,
   ShieldCheck,
+  Puzzle,
+  Copy,
 } from 'lucide-react'
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -557,6 +559,8 @@ function ContentEngineTab() {
 
       <DefaultReferencePhoto />
 
+      <ExtensionTokenCard />
+
       <div className="glass-card rounded-2xl p-5 space-y-3 text-xs text-muted-foreground">
         <p className="font-semibold text-foreground text-sm">Where to find the keys</p>
         <ul className="space-y-1.5">
@@ -683,6 +687,133 @@ function DefaultReferencePhoto() {
           <span className="text-xs opacity-60">JPEG, PNG or WebP</span>
         </button>
       )}
+    </div>
+  )
+}
+
+// ─── Browser extension token ───────────────────────────────────────
+
+/**
+ * The extension pairs with a bearer token instead of the dashboard's httpOnly
+ * session cookie — a cross-site request from the extension's own origin
+ * can't carry that cookie. The raw token is shown once, at generation time,
+ * and never stored — only its hash lives server-side.
+ */
+function ExtensionTokenCard() {
+  const [status, setStatus] = useState<{ isSet: boolean; createdAt: string | null } | null>(null)
+  const [token, setToken] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [origin, setOrigin] = useState('')
+
+  useEffect(() => {
+    setOrigin(window.location.origin)
+    fetch('/api/settings/extension-token')
+      .then(r => r.json())
+      .then(setStatus)
+      .catch(() => setStatus({ isSet: false, createdAt: null }))
+  }, [])
+
+  function copy(text: string) {
+    navigator.clipboard.writeText(text)
+      .then(() => toast.success('Copied'))
+      .catch(() => toast.error('Copy failed'))
+  }
+
+  async function generate() {
+    setBusy(true)
+    try {
+      const res = await fetch('/api/settings/extension-token', { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to generate token')
+      setToken(data.token as string)
+      setStatus({ isSet: true, createdAt: new Date().toISOString() })
+      toast.success('New token generated — copy it now, it will not be shown again')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to generate token')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function revoke() {
+    setBusy(true)
+    try {
+      const res = await fetch('/api/settings/extension-token', { method: 'DELETE' })
+      if (!res.ok) throw new Error('Failed to revoke')
+      setStatus({ isSet: false, createdAt: null })
+      setToken(null)
+      toast.success('Token revoked — the extension stops working until you paste a new one')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to revoke')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="glass-card rounded-2xl p-6 space-y-4">
+      <div>
+        <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+          <Puzzle className="w-4 h-4 text-primary" /> Browser extension
+        </h3>
+        <p className="text-xs text-muted-foreground mt-0.5">
+          Pairs the XXmachine Clipper extension so it can save any image you click on any site
+          straight into the Pinterest tab&apos;s &quot;Browser Clips&quot; board. Paste both values
+          below into the extension&apos;s options page.
+        </p>
+      </div>
+
+      <div className="space-y-1.5">
+        <label className="text-xs text-muted-foreground">Site URL</label>
+        <div className="flex gap-2">
+          <Input readOnly value={origin} className="bg-secondary/50 border-border font-mono text-xs" />
+          <Button size="sm" variant="outline" className="h-9 shrink-0" onClick={() => copy(origin)}>
+            <Copy className="w-3.5 h-3.5" />
+          </Button>
+        </div>
+      </div>
+
+      {token ? (
+        <div className="space-y-1.5">
+          <label className="text-xs text-amber-400">Access token — copy it now, shown only once</label>
+          <div className="flex gap-2">
+            <Input readOnly value={token} className="bg-secondary/50 border-border font-mono text-xs" />
+            <Button size="sm" variant="outline" className="h-9 shrink-0" onClick={() => copy(token)}>
+              <Copy className="w-3.5 h-3.5" />
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          {status?.isSet ? (
+            <>
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              A token is set{status.createdAt ? ` (generated ${new Date(status.createdAt).toLocaleDateString()})` : ''}.
+              Generating a new one replaces it — you&apos;ll need to re-paste it into the extension.
+            </>
+          ) : (
+            <><Circle className="w-3.5 h-3.5 shrink-0" /> No token yet — generate one and paste it into the extension.</>
+          )}
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        <Button size="sm" disabled={busy} onClick={generate} className="h-8">
+          {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" /> : null}
+          {status?.isSet ? 'Regenerate token' : 'Generate token'}
+        </Button>
+        {status?.isSet && (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={revoke}
+            className="h-8 text-destructive hover:text-destructive"
+          >
+            Revoke
+          </Button>
+        )}
+      </div>
     </div>
   )
 }

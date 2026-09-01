@@ -32,7 +32,9 @@ export async function GET(req: NextRequest) {
   const boardId = params.get('boardId')?.trim() ?? ''
   const q = params.get('q')?.trim() ?? ''
 
-  const conditions = ['b.user_id = $1', 'b.is_active', 'p.is_active']
+  // Browser-clipped images live in the same tables but get their own "Browser"
+  // tab (browser-clips-tab.tsx) — keep them out of the Pinterest tab entirely.
+  const conditions = ['b.user_id = $1', "b.board_key <> 'browser-clips'", 'b.is_active', 'p.is_active']
   const values: unknown[] = [auth.id]
 
   if (boardId) {

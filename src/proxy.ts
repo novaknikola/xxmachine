@@ -58,6 +58,10 @@ const PUBLIC_API_PREFIXES = [
   '/api/publish/now',
   '/api/instagram/publish-reel',
   '/api/instagram/refresh-token',
+  // The browser extension has no dashboard session cookie to send (it's a
+  // cross-site request from the extension's own origin) — it authenticates
+  // itself with a bearer token instead, checked inside the route.
+  '/api/extension/',
 ]
 
 export function proxy(req: NextRequest) {

@@ -5,8 +5,9 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { BrowseTab } from './browse-tab'
 import { BatchesTab } from './batches-tab'
 import { PinterestTab } from './pinterest-tab'
+import { BrowserClipsTab } from './browser-clips-tab'
 
-const TABS = ['browse', 'pinterest', 'batches'] as const
+const TABS = ['browse', 'pinterest', 'browser', 'batches'] as const
 type Tab = typeof TABS[number]
 
 function isTab(v: string | null): v is Tab {
@@ -45,6 +46,12 @@ function CopyPromptsPageInner() {
             Pinterest
           </button>
           <button
+            onClick={() => changeTab('browser')}
+            className={`px-4 py-1.5 transition-colors ${tab === 'browser' ? 'bg-primary text-primary-foreground font-medium' : 'text-muted-foreground hover:bg-secondary'}`}
+          >
+            Browser
+          </button>
+          <button
             onClick={() => changeTab('batches')}
             className={`px-4 py-1.5 transition-colors ${tab === 'batches' ? 'bg-primary text-primary-foreground font-medium' : 'text-muted-foreground hover:bg-secondary'}`}
           >
@@ -55,6 +62,7 @@ function CopyPromptsPageInner() {
       <div className="flex-1 overflow-hidden">
         {tab === 'browse' && <BrowseTab />}
         {tab === 'pinterest' && <PinterestTab />}
+        {tab === 'browser' && <BrowserClipsTab />}
         {tab === 'batches' && <BatchesTab />}
       </div>
     </div>
