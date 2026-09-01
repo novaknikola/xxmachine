@@ -43,6 +43,11 @@ export interface SeedanceI2VJobInput {
   /** Drive folder these land in. */
   folderName: string
   generateAudio?: boolean
+  /**
+   * When set, used verbatim for every item instead of the auto-generated
+   * Grok-vision + motion-table prompt — also skips that vision call entirely.
+   */
+  customPrompt?: string | null
 }
 
 export interface InfiniteTalkItem {
@@ -1031,7 +1036,7 @@ export async function POST(req: NextRequest) {
   }
 
   if (body.job_type === 'seedance_i2v') {
-    const { items, duration, resolution, folderName, generateAudio } = body.input ?? {}
+    const { items, duration, resolution, folderName, generateAudio, customPrompt } = body.input ?? {}
 
     if (!Array.isArray(items) || items.length === 0) {
       return NextResponse.json({ error: 'Pick at least one image' }, { status: 400 })
@@ -1055,6 +1060,10 @@ export async function POST(req: NextRequest) {
     if (!String(folderName ?? '').trim()) {
       return NextResponse.json({ error: 'folderName required' }, { status: 400 })
     }
+    const trimmedPrompt = String(customPrompt ?? '').trim()
+    if (trimmedPrompt.length > 2000) {
+      return NextResponse.json({ error: 'Custom prompt is too long (max 2000 characters)' }, { status: 400 })
+    }
 
     const input: SeedanceI2VJobInput = {
       items: items.map((it: SeedanceI2VItem) => ({
@@ -1065,6 +1074,7 @@ export async function POST(req: NextRequest) {
       resolution,
       folderName: String(folderName).trim(),
       generateAudio: generateAudio === true,
+      customPrompt: trimmedPrompt || null,
     }
 
     const row = await one<{ id: string }>(

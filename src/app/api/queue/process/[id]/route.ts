@@ -1691,7 +1691,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
     // ── seedance_i2v — stills to 9:16 clips on RunPod ──────────────────────
     if (job.job_type === 'seedance_i2v') {
-      const { items, duration, resolution, folderName, generateAudio } =
+      const { items, duration, resolution, folderName, generateAudio, customPrompt } =
         job.input as unknown as SeedanceI2VJobInput
       if (!items?.length) throw new Error('No items in job input')
 
@@ -1721,9 +1721,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         const results = await Promise.all(batch.map(async (i): Promise<SeedanceRow> => {
           const item = items[i]
           try {
-            // One cheap vision call decides the shot type; the motion itself
-            // comes from a table, not from the model — see seedance-prompt.ts.
-            const composed = await promptForImage(item.imageUrl)
+            // A user-supplied prompt is used verbatim and skips the vision
+            // call entirely — otherwise one cheap vision call decides the
+            // shot type, and the motion itself comes from a table, not the
+            // model — see seedance-prompt.ts.
+            const composed = customPrompt
+              ? { prompt: customPrompt, shotType: 'custom', cameraFixed: true }
+              : await promptForImage(item.imageUrl)
 
             const video = await generateSeedanceVideo({
               imageUrl: item.imageUrl,

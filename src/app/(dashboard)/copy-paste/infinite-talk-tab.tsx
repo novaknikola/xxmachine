@@ -119,10 +119,11 @@ export function InfiniteTalkTab() {
     try {
       const id = folder.match(/[-\w]{25,}/)?.[0] ?? folder
       const res = await fetch(`/api/drive/images?folderId=${encodeURIComponent(id)}`)
-      const data = await res.json() as { urls?: string[]; error?: string }
+      const data = await res.json() as { urls?: string[]; error?: string; skipped?: number }
       if (!res.ok) throw new Error(data.error ?? 'Could not read that folder')
       const n = add(data.urls ?? [], 'drive')
-      toast.success(n ? `${n} image${n === 1 ? '' : 's'} from Drive` : 'No new images there')
+      const skipped = data.skipped ? ` (${data.skipped} failed to load)` : ''
+      toast.success(n ? `${n} image${n === 1 ? '' : 's'} from Drive${skipped}` : 'No new images there')
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Drive read failed')
     } finally {

@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -34,6 +35,7 @@ export function ImageToVideoTab() {
   const [duration, setDuration] = useState('5')
   const [resolution, setResolution] = useState<'480p' | '720p'>('720p')
   const [folderName, setFolderName] = useState('')
+  const [customPrompt, setCustomPrompt] = useState('')
   const [driveFolder, setDriveFolder] = useState('')
   const [loadingDrive, setLoadingDrive] = useState(false)
   const [loadingHistory, setLoadingHistory] = useState(false)
@@ -90,10 +92,11 @@ export function ImageToVideoTab() {
       // what people actually do.
       const id = folder.match(/[-\w]{25,}/)?.[0] ?? folder
       const res = await fetch(`/api/drive/images?folderId=${encodeURIComponent(id)}`)
-      const data = await res.json() as { urls?: string[]; error?: string }
+      const data = await res.json() as { urls?: string[]; error?: string; skipped?: number }
       if (!res.ok) throw new Error(data.error ?? 'Could not read that folder')
       const n = add(data.urls ?? [], 'drive')
-      toast.success(n ? `${n} image${n === 1 ? '' : 's'} from Drive` : 'No new images in that folder')
+      const skipped = data.skipped ? ` (${data.skipped} failed to load)` : ''
+      toast.success(n ? `${n} image${n === 1 ? '' : 's'} from Drive${skipped}` : 'No new images in that folder')
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Drive read failed')
     } finally {
@@ -131,6 +134,7 @@ export function ImageToVideoTab() {
             duration: Number(duration),
             resolution,
             folderName: folderName.trim(),
+            customPrompt: customPrompt.trim() || undefined,
           },
         }),
       })
@@ -258,11 +262,23 @@ export function ImageToVideoTab() {
           </div>
 
           <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
-            Every clip is 9:16. The prompt is written per image from a quick look at the
-            still — who is in frame, what she is wearing, and whether it is a gym, mirror,
-            portrait or ordinary shot. The movement itself is fixed per shot type: look at
-            camera, slight head tilt, soft smile or wink.
+            Every clip is 9:16. By default the prompt is written per image from a quick
+            look at the still — who is in frame, what she is wearing, and whether it is a
+            gym, mirror, portrait or ordinary shot. The movement itself is fixed per shot
+            type: look at camera, slight head tilt, soft smile or wink. Set a custom
+            prompt below to override this for the whole batch.
           </p>
+
+          <div className="space-y-1.5">
+            <Label className="text-xs text-muted-foreground">Custom prompt (optional)</Label>
+            <Textarea
+              value={customPrompt}
+              onChange={e => setCustomPrompt(e.target.value)}
+              placeholder="Leave empty to auto-generate a prompt per image. Fill in to use this exact prompt for every clip in this batch instead."
+              className="text-sm min-h-20"
+              maxLength={2000}
+            />
+          </div>
 
           <div className="flex items-center justify-between gap-3 flex-wrap pt-1">
             <p className={`text-xs ${images.length > MAX_ITEMS ? 'text-destructive' : 'text-muted-foreground'}`}>
