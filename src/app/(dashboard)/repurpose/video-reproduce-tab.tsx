@@ -3,6 +3,7 @@
 import { useState, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { toast } from 'sonner'
 import {
@@ -11,6 +12,7 @@ import {
 } from 'lucide-react'
 import { uploadQueueInput } from '@/lib/upload-queue-input'
 import { pollQueueJob } from '@/lib/poll-queue-job'
+import { DEFAULT_VIDEO_RANGES, type VideoEffectRanges, type VideoEffectRange } from '@/lib/video-effect-ranges'
 
 interface VideoVariant {
   id: string
@@ -54,10 +56,21 @@ const EFFECT_LABELS: Record<keyof VideoEffects, string> = {
 
 const PRESETS = [10, 20, 50, 100] as const
 
+/** Effects with a user-adjustable min/max — flipH and fade stay plain toggles. */
+const RANGE_EFFECTS: Array<{ key: keyof VideoEffectRanges; label: string; step: number }> = [
+  { key: 'brightness', label: 'Brightness range', step: 0.01 },
+  { key: 'contrast', label: 'Contrast range', step: 0.01 },
+  { key: 'saturation', label: 'Saturation range', step: 0.01 },
+  { key: 'hue', label: 'Hue shift range (°)', step: 1 },
+  { key: 'speed', label: 'Speed range', step: 0.01 },
+  { key: 'crop', label: 'Crop range (0-1)', step: 0.01 },
+]
+
 export function VideoReproduceTab() {
   const router = useRouter()
   const [sources, setSources] = useState<Array<{ id: string; file: File; name: string }>>([])
   const [effects, setEffects] = useState<VideoEffects>(DEFAULT_EFFECTS)
+  const [ranges, setRanges] = useState<VideoEffectRanges>(DEFAULT_VIDEO_RANGES)
   const [count, setCount] = useState(10)
   const [variants, setVariants] = useState<VideoVariant[]>([])
   const [running, setRunning] = useState(false)
@@ -77,6 +90,10 @@ export function VideoReproduceTab() {
 
   function toggleEffect(key: keyof VideoEffects) {
     setEffects(prev => ({ ...prev, [key]: !prev[key] }))
+  }
+
+  function patchRange(key: keyof VideoEffectRanges, patch: Partial<VideoEffectRange>) {
+    setRanges(prev => ({ ...prev, [key]: { ...prev[key], ...patch } }))
   }
 
   // Immediate mode: max 10 per source, results shown inline. Submitted through
@@ -114,7 +131,7 @@ export function VideoReproduceTab() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             job_type: 'video_repurpose',
-            input: { videoUrl, videoName, count, baseSeed, effects },
+            input: { videoUrl, videoName, count, baseSeed, effects, effectRanges: ranges },
           }),
         })
         const submitData = await submitRes.json().catch(() => ({}))
@@ -186,6 +203,7 @@ export function VideoReproduceTab() {
               count,
               baseSeed: Math.floor(Math.random() * 0xffffff),
               effects,
+              effectRanges: ranges,
             },
           }),
         })
@@ -223,6 +241,7 @@ export function VideoReproduceTab() {
               count,
               baseSeed: Math.floor(Math.random() * 0xffffff),
               effects,
+              effectRanges: ranges,
               outputDriveFolderId: outputFolderId.trim() || null,
             },
           }),
@@ -412,17 +431,38 @@ export function VideoReproduceTab() {
             <CardHeader className="pb-3">
               <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">Effects</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-2">
-              {(Object.keys(DEFAULT_EFFECTS) as Array<keyof VideoEffects>).map(key => (
-                <label key={key} className="flex items-center gap-2 cursor-pointer">
-                  <input type="checkbox" checked={effects[key]}
-                    onChange={() => toggleEffect(key)}
-                    className="accent-primary" />
-                  <span className="text-xs font-medium">{EFFECT_LABELS[key]}</span>
-                </label>
-              ))}
+            <CardContent className="space-y-3">
+              {(Object.keys(DEFAULT_EFFECTS) as Array<keyof VideoEffects>).map(key => {
+                const range = RANGE_EFFECTS.find(r => r.key === key)
+                return (
+                  <div key={key} className="space-y-1.5">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox" checked={effects[key]}
+                        onChange={() => toggleEffect(key)}
+                        className="accent-primary" />
+                      <span className="text-xs font-medium">{EFFECT_LABELS[key]}</span>
+                    </label>
+                    {range && effects[key] && (
+                      <div className="grid grid-cols-2 gap-2 pl-6">
+                        <div className="space-y-0.5">
+                          <p className="text-[10px] text-muted-foreground">{range.label} — min</p>
+                          <Input type="number" step={range.step} value={ranges[range.key].min}
+                            onChange={e => patchRange(range.key, { min: Number(e.target.value) })}
+                            className="h-7 text-xs" />
+                        </div>
+                        <div className="space-y-0.5">
+                          <p className="text-[10px] text-muted-foreground">{range.label} — max</p>
+                          <Input type="number" step={range.step} value={ranges[range.key].max}
+                            onChange={e => patchRange(range.key, { max: Number(e.target.value) })}
+                            className="h-7 text-xs" />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
               <p className="text-[10px] text-muted-foreground pt-1">
-                FFmpeg processes each variant with unique randomized parameters.
+                FFmpeg processes each variant with unique randomized parameters within these ranges.
               </p>
             </CardContent>
           </Card>

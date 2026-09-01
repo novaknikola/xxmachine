@@ -5,6 +5,7 @@ import { listDriveFiles, listDriveImages } from '@/lib/google-drive'
 import { getUserGoogleAccessToken } from '@/lib/drive-archive/user-google-auth'
 import { sanitizeArchiveLabel } from '@/lib/drive-archive/label'
 import type { VideoEffectOpts } from '@/lib/video-ffmpeg'
+import type { VideoEffectRanges } from '@/lib/video-effect-ranges'
 import type { ReproduceSettings } from '@/app/(dashboard)/repurpose/reproduce-logic'
 import type { CaptionStyle, CaptionCustomStyle } from '@/lib/captions'
 import { dedupeCaptions } from '@/lib/caption-shuffle'
@@ -159,6 +160,8 @@ export interface VideoRepurposeJobInput {
   count: number
   baseSeed: number
   effects: VideoEffectOpts
+  /** Per-effect min/max override. Missing = video-ffmpeg's built-in defaults. */
+  effectRanges?: VideoEffectRanges
   /**
    * Opt-in so the existing Repurpose page keeps behaving exactly as before.
    * Set by the Copy-Paste chain, which does want its variants in Drive.
@@ -425,7 +428,7 @@ export async function POST(req: NextRequest) {
 
   if (body.job_type === 'video_repurpose') {
     const {
-      videoUrl, videoName, count, baseSeed, effects, archiveToDrive, characterKey,
+      videoUrl, videoName, count, baseSeed, effects, effectRanges, archiveToDrive, characterKey,
       inputDriveFolderId, outputDriveFolderId, seriesLabel,
     } = body.input ?? {}
     const inputFolder = String(inputDriveFolderId ?? '').trim()
@@ -491,6 +494,7 @@ export async function POST(req: NextRequest) {
         count,
         baseSeed: baseSeed ?? Math.floor(Math.random() * 0xffffff),
         effects: effectsInput,
+        effectRanges,
         archiveToDrive: archiveToDrive === true,
         characterKey: characterKey ?? null,
         seriesLabel: sanitizeArchiveLabel(seriesLabel) || null,

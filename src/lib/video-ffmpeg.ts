@@ -4,6 +4,7 @@ import { existsSync, unlinkSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
+import { DEFAULT_VIDEO_RANGES, type VideoEffectRanges } from './video-effect-ranges'
 
 const execFileAsync = promisify(execFile)
 
@@ -43,16 +44,20 @@ function lerp(rng: () => number, min: number, max: number) {
   return min + rng() * (max - min)
 }
 
-export function randomVideoSettings(seed: number, opts: VideoEffectOpts): VideoSettings {
+export function randomVideoSettings(
+  seed: number,
+  opts: VideoEffectOpts,
+  ranges: VideoEffectRanges = DEFAULT_VIDEO_RANGES,
+): VideoSettings {
   const rng = seededRandom(seed)
   return {
-    brightness: opts.brightness ? lerp(rng, -0.07, 0.07) : 0,
-    contrast:   opts.contrast   ? lerp(rng, 0.88, 1.12)  : 1,
-    saturation: opts.saturation ? lerp(rng, 0.82, 1.25)  : 1,
-    hue:        opts.hue        ? lerp(rng, -10, 10)      : 0,
+    brightness: opts.brightness ? lerp(rng, ranges.brightness.min, ranges.brightness.max) : 0,
+    contrast:   opts.contrast   ? lerp(rng, ranges.contrast.min, ranges.contrast.max)      : 1,
+    saturation: opts.saturation ? lerp(rng, ranges.saturation.min, ranges.saturation.max)  : 1,
+    hue:        opts.hue        ? lerp(rng, ranges.hue.min, ranges.hue.max)                : 0,
     flipH:      opts.flipH      && rng() > 0.5,
-    cropPct:    opts.crop       ? lerp(rng, 0.01, 0.07)   : 0,
-    speed:      opts.speed      ? lerp(rng, 0.97, 1.03)   : 1.0,
+    cropPct:    opts.crop       ? lerp(rng, ranges.crop.min, ranges.crop.max)              : 0,
+    speed:      opts.speed      ? lerp(rng, ranges.speed.min, ranges.speed.max)            : 1.0,
     fade:       opts.fade,
   }
 }
@@ -155,8 +160,9 @@ export async function processVideoVariant(
   seed: number,
   opts: VideoEffectOpts,
   fadeDuration?: number,
+  ranges?: VideoEffectRanges,
 ): Promise<string | null> {
-  const settings = randomVideoSettings(seed, opts)
+  const settings = randomVideoSettings(seed, opts, ranges)
   const vf = buildVideoFilter(settings, fadeDuration)
   const af = buildAudioFilter(settings)
   const outputPath = join(tmpdir(), `vr_${randomUUID()}.mp4`)
