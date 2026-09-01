@@ -17,7 +17,7 @@ import { maxItemsForJob } from '@/lib/queue-limits'
 import { SEEDREAM_MAX_IMAGES } from '@/lib/wavespeed'
 import { withTriggerWord, buildStyledScenePrompt } from '@/lib/character-prompt'
 import { DIMENSIONS, type Character } from '@/lib/types'
-import { Loader2, Upload, Wand2, X } from 'lucide-react'
+import { Loader2, Sparkles, Upload, Wand2, X } from 'lucide-react'
 import type { ScrapedPromptItem } from './browse-tab'
 
 interface GenerationPanelProps {
@@ -49,14 +49,15 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
   const [sceneRefUrlsRaw, setSceneRefUrlsRaw] = useState('')
   const [pinPrompt, setPinPrompt] = useState(DEFAULT_SCENE_EDIT_PROMPT)
   const [submitting, setSubmitting] = useState(false)
+  const [analyzedPrompts, setAnalyzedPrompts] = useState<Record<string, string>>({})
+  const [analyzing, setAnalyzing] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Pins arrive with an image but no prompt of their own, so the batch needs
-  // one prompt describing what to do with every selected scene.
+  // either a shared instruction (Seedream) or a per-image Grok description
+  // (LoRA + Turbo) to know what's actually in the photo.
   const pinBatch = items.length > 0 && items.every(it => it.sceneRefUrl)
-  // A pin batch is a Seedream edit by definition -- LoRA + Turbo ignores
-  // reference images entirely, so the choice is not offered for pins.
-  const effMode: Mode = pinBatch ? 'seedream-edit' : mode
+  const effMode: Mode = mode
 
   useEffect(() => {
     if (!open) return
@@ -64,7 +65,44 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
       .then(res => res.json())
       .then((data: Character[]) => setCharacters(Array.isArray(data) ? data : []))
       .catch(() => toast.error('Failed to load characters'))
+    // A pin batch defaults to Seedream Edit (identity swap via the pin image
+    // itself) — the safer, previously-only option. LoRA + Turbo is still
+    // reachable by switching the toggle, using Grok-analyzed scene prompts
+    // instead of the image. Reset per open so a stale analysis from a
+    // previous selection never leaks into a new one.
+    setAnalyzedPrompts({})
+    if (pinBatch) setMode('seedream-edit')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
+
+  /** Grok describes each photo's pose/framing/background/lighting individually — items
+   *  that already carry their own prompt (real scraped prompts) are left alone. */
+  async function analyzeWithGrok() {
+    const targets = items.filter(it => it.sceneRefUrl && !it.prompt?.trim() && !analyzedPrompts[it.id])
+    if (!targets.length) return
+    setAnalyzing(true)
+    try {
+      const res = await fetch('/api/grok/analyze-scene', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageUrls: targets.map(it => it.sceneRefUrl) }),
+      })
+      const data = await res.json() as { prompts?: string[]; error?: string }
+      if (!res.ok) throw new Error(data.error ?? 'Analysis failed')
+      const prompts = data.prompts ?? []
+      setAnalyzedPrompts(prev => {
+        const next = { ...prev }
+        targets.forEach((it, i) => { if (prompts[i]) next[it.id] = prompts[i] })
+        return next
+      })
+      const failed = targets.length - prompts.filter(Boolean).length
+      toast.success(`Analyzed ${targets.length - failed}/${targets.length} image${targets.length === 1 ? '' : 's'}${failed ? ` — ${failed} failed, try again` : ''}`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Analysis failed')
+    } finally {
+      setAnalyzing(false)
+    }
+  }
 
 
   const character = characters.find(c => c.id === characterId)
@@ -133,10 +171,17 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
         toast.error('This character has no trained LoRA — pick Seedream Edit instead')
         return
       }
+      if (pinBatch) {
+        const missing = items.filter(it => !it.prompt?.trim() && !analyzedPrompts[it.id])
+        if (missing.length) {
+          toast.error(`${missing.length} image${missing.length === 1 ? '' : 's'} still need a scene description — click "Analyze with Grok"`)
+          return
+        }
+      }
     }
     // Any of the three sources is a valid Seedream reference, so a character
     // without stored face refs is no longer a dead end here.
-    if (pinBatch && !pinPrompt.trim()) {
+    if (pinBatch && effMode === 'seedream-edit' && !pinPrompt.trim()) {
       toast.error('Describe what to generate from the selected pins')
       return
     }
@@ -161,22 +206,28 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
         : undefined
 
       const composedItems = items.map(it => {
+        // A pin/clip carries no prompt of its own — fall back to whatever
+        // Grok analyzed for its specific photo, so LoRA + Turbo (which never
+        // sees the image itself) still knows what scene to generate.
+        const effectivePrompt = it.prompt?.trim() || analyzedPrompts[it.id] || ''
         // A scene-edit prompt addresses the reference images by position and
         // states the identity itself, so it is sent verbatim. Prepending the
         // character's style prefix would push "Image 1 is..." off the front and
-        // argue with the hair and wardrobe the prompt already pins down.
-        const styled = pinBatch
-          ? pinPrompt.trim()
-          : buildStyledScenePrompt(character, it.prompt)
+        // argue with the hair and wardrobe the prompt already pins down. The
+        // Grok scene description (if any) is appended as extra detail, not a
+        // replacement — the identity-swap instructions still lead.
+        const styled = pinBatch && isSeedream
+          ? pinPrompt.trim() + (analyzedPrompts[it.id] ? `\nScene detail: ${analyzedPrompts[it.id]}` : '')
+          : buildStyledScenePrompt(character, effectivePrompt)
         // A trigger word only means anything to a LoRA — injecting it into a
         // Seedream prompt just adds a stray token like "sofia_lora".
         return {
           promptId: it.id,
           prompt: isSeedream ? styled : withTriggerWord(styled, triggerWord),
-          // Each pin generates against its own scene, so refs go per item
-          // rather than being merged into one shared set. The worker sends
-          // these before the job-level character refs — see DEFAULT_SCENE_EDIT_PROMPT.
-          referenceImageUrls: it.sceneRefUrl ? [it.sceneRefUrl] : undefined,
+          // Reference images are a Seedream concept (image-to-image edit) —
+          // LoRA + Turbo is pure text-to-image from the trained model and
+          // never looks at the source photo, so sending it would be dead weight.
+          referenceImageUrls: (isSeedream && it.sceneRefUrl) ? [it.sceneRefUrl] : undefined,
         }
       })
 
@@ -209,6 +260,7 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
       for (const ref of uploadedRefs) URL.revokeObjectURL(ref.previewUrl)
       setUploadedRefs([])
       setSceneRefUrlsRaw('')
+      setAnalyzedPrompts({})
 
       toast.success(`Queued ${items.length} item${items.length === 1 ? '' : 's'}`, {
         action: {
@@ -265,7 +317,61 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
             )}
           </div>
 
+          <div className="space-y-1.5">
+            <p className="text-xs font-medium text-muted-foreground">Mode</p>
+            <div className="flex rounded-lg border border-border overflow-hidden text-sm">
+              <button
+                onClick={() => setMode('turbo-lora')}
+                className={`flex-1 px-3 py-2 transition-colors ${effMode === 'turbo-lora' ? 'bg-primary text-primary-foreground font-medium' : 'text-muted-foreground hover:bg-secondary'}`}
+              >
+                LoRA + Turbo
+              </button>
+              <button
+                onClick={() => setMode('seedream-edit')}
+                className={`flex-1 px-3 py-2 transition-colors ${effMode === 'seedream-edit' ? 'bg-primary text-primary-foreground font-medium' : 'text-muted-foreground hover:bg-secondary'}`}
+              >
+                Seedream Edit
+              </button>
+            </div>
+            {effMode === 'turbo-lora' && character && !character.loraUrl && (
+              <p className="text-[11px] text-destructive">This character has no trained LoRA.</p>
+            )}
+            {effMode === 'turbo-lora' && pinBatch && (
+              <p className="text-[10px] text-muted-foreground/60">
+                Text-to-image from the LoRA — the pin/clip photo itself isn&apos;t sent, only its Grok-analyzed
+                scene description below (plus the trigger word) drive the result.
+              </p>
+            )}
+          </div>
+
           {pinBatch && (
+            <div className="space-y-1.5 rounded-xl border border-border p-3">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-medium">Scene analysis (Grok)</p>
+                <span className="text-[10px] text-muted-foreground">
+                  {items.filter(it => it.prompt?.trim() || analyzedPrompts[it.id]).length}/{items.length} described
+                </span>
+              </div>
+              <p className="text-[10px] text-muted-foreground/60 leading-relaxed">
+                Describes each selected photo&apos;s pose, framing, background and lighting individually —
+                {effMode === 'turbo-lora'
+                  ? ' this is the only thing that tells LoRA + Turbo what scene to generate.'
+                  : ' appended as extra detail under the identity-swap prompt below.'}
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full h-8 text-xs"
+                onClick={() => void analyzeWithGrok()}
+                disabled={analyzing || items.every(it => it.prompt?.trim() || analyzedPrompts[it.id])}
+              >
+                {analyzing ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 mr-1.5" />}
+                Analyze {items.filter(it => !it.prompt?.trim() && !analyzedPrompts[it.id]).length} image{items.filter(it => !it.prompt?.trim() && !analyzedPrompts[it.id]).length === 1 ? '' : 's'} with Grok
+              </Button>
+            </div>
+          )}
+
+          {pinBatch && effMode === 'seedream-edit' && (
             <div className="space-y-1.5">
               <p className="text-xs font-medium text-muted-foreground">
                 Prompt <span className="opacity-60">(applied to every selected pin)</span>
@@ -292,29 +398,6 @@ export function GenerationPanel({ open, onOpenChange, items, onSubmitted }: Gene
                   </button>
                 )}
               </div>
-            </div>
-          )}
-
-          {!pinBatch && (
-            <div className="space-y-1.5">
-              <p className="text-xs font-medium text-muted-foreground">Mode</p>
-              <div className="flex rounded-lg border border-border overflow-hidden text-sm">
-                <button
-                  onClick={() => setMode('turbo-lora')}
-                  className={`flex-1 px-3 py-2 transition-colors ${effMode === 'turbo-lora' ? 'bg-primary text-primary-foreground font-medium' : 'text-muted-foreground hover:bg-secondary'}`}
-                >
-                  LoRA + Turbo
-                </button>
-                <button
-                  onClick={() => setMode('seedream-edit')}
-                  className={`flex-1 px-3 py-2 transition-colors ${effMode === 'seedream-edit' ? 'bg-primary text-primary-foreground font-medium' : 'text-muted-foreground hover:bg-secondary'}`}
-                >
-                  Seedream Edit
-                </button>
-              </div>
-              {effMode === 'turbo-lora' && character && !character.loraUrl && (
-                <p className="text-[11px] text-destructive">This character has no trained LoRA.</p>
-              )}
             </div>
           )}
 
