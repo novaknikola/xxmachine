@@ -36,6 +36,7 @@ export function ImageToVideoTab() {
   const [resolution, setResolution] = useState<'480p' | '720p'>('720p')
   const [folderName, setFolderName] = useState('')
   const [customPrompt, setCustomPrompt] = useState('')
+  const [generateAudio, setGenerateAudio] = useState(false)
   const [driveFolder, setDriveFolder] = useState('')
   const [loadingDrive, setLoadingDrive] = useState(false)
   const [loadingHistory, setLoadingHistory] = useState(false)
@@ -135,6 +136,7 @@ export function ImageToVideoTab() {
             resolution,
             folderName: folderName.trim(),
             customPrompt: customPrompt.trim() || undefined,
+            generateAudio,
           },
         }),
       })
@@ -279,6 +281,18 @@ export function ImageToVideoTab() {
               maxLength={2000}
             />
           </div>
+
+          <label className="flex items-center gap-2 cursor-pointer w-fit">
+            <input
+              type="checkbox"
+              checked={generateAudio}
+              onChange={e => setGenerateAudio(e.target.checked)}
+              className="w-4 h-4 rounded accent-primary"
+            />
+            <span className="text-xs text-muted-foreground">
+              Generate audio — Seedance-composed ambient sound/breathing synced to the clip
+            </span>
+          </label>
 
           <div className="flex items-center justify-between gap-3 flex-wrap pt-1">
             <p className={`text-xs ${images.length > MAX_ITEMS ? 'text-destructive' : 'text-muted-foreground'}`}>
