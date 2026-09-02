@@ -12,6 +12,7 @@ import { dedupeCaptions } from '@/lib/caption-shuffle'
 import { SEEDREAM_MAX_IMAGES } from '@/lib/wavespeed'
 import { maxItemsForJob, MAX_SEEDREAM_SLIDES_PER_JOB } from '@/lib/queue-limits'
 import { normalizeContentFormat, type ContentFormat } from '@/lib/drive-archive/content-format'
+import { internalBaseUrl } from '@/lib/internal-url'
 
 export interface BulkImageJobItem {
   prompt: string
@@ -335,7 +336,7 @@ async function fireQueueWorkerNow(jobId: string): Promise<void> {
     [jobId],
   ).catch(() => null)
   if (!claimed) return
-  const internalBase = `http://127.0.0.1:${process.env.PORT ?? 3000}`
+  const internalBase = internalBaseUrl()
   fetch(`${internalBase}/api/queue/process/${jobId}`, {
     method: 'POST',
     headers: { 'x-cron-secret': secret },
@@ -1176,7 +1177,7 @@ export async function POST(req: NextRequest) {
         [row.id],
       ).catch(() => null)
       if (claimed) {
-        const internalBase = `http://127.0.0.1:${process.env.PORT ?? 3000}`
+        const internalBase = internalBaseUrl()
         fetch(`${internalBase}/api/queue/process/${row.id}`, {
           method: 'POST',
           headers: { 'x-cron-secret': secret },
@@ -1295,7 +1296,7 @@ export async function POST(req: NextRequest) {
         [row.id],
       ).catch(() => null)
       if (claimed) {
-        const internalBase = `http://127.0.0.1:${process.env.PORT ?? 3000}`
+        const internalBase = internalBaseUrl()
         fetch(`${internalBase}/api/queue/process/${row.id}`, {
           method: 'POST',
           headers: { 'x-cron-secret': secret },

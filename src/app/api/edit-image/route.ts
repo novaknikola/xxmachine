@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { editImage, type SeedreamResolution } from '@/lib/wavespeed'
+import { editImage, finalizeWithSkinEnhance, type SeedreamResolution } from '@/lib/wavespeed'
 import { requireUser } from '@/lib/session'
 import { persistGeneration } from '@/lib/persist-generation'
 import { getUserApiKey } from '@/lib/user-config'
@@ -144,7 +144,7 @@ export async function POST(req: NextRequest) {
       }
 
       const size = parseSize(body.size)
-      const urls = await editImage({
+      const editedUrls = await editImage({
         imageUrls,
         prompt,
         size,
@@ -152,6 +152,11 @@ export async function POST(req: NextRequest) {
         apiKey,
         signal: abort,
       })
+      // Exactly one skin-enhance pass per finished image — this is the final
+      // delivered output, not an intermediate feeding back into another edit.
+      const urls = await Promise.all(
+        editedUrls.map(u => finalizeWithSkinEnhance(u, size, apiKey, abort)),
+      )
 
       if (body.saveHistory && urls.length) {
         await saveToHistory({
@@ -235,7 +240,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No input images' }, { status: 400 })
     }
 
-    const urls = await editImage({ imageUrls, prompt, size, resolution, apiKey, signal: abort })
+    const editedUrls = await editImage({ imageUrls, prompt, size, resolution, apiKey, signal: abort })
+    const urls = await Promise.all(
+      editedUrls.map(u => finalizeWithSkinEnhance(u, size, apiKey, abort)),
+    )
 
     if (saveHistory && urls.length) {
       await saveToHistory({

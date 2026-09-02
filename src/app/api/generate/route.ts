@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireUser } from '@/lib/session'
 import { persistGeneration } from '@/lib/persist-generation'
 import { getUserApiKey } from '@/lib/user-config'
+import { finalizeWithSkinEnhance } from '@/lib/wavespeed'
 
 const MODEL = 'wavespeed-ai/z-image/turbo-lora'
 const API_BASE = 'https://api.wavespeed.ai/api/v2'
@@ -100,6 +101,14 @@ export async function POST(req: NextRequest) {
       const urls = await pollResult(requestId, apiKey, abort)
       allUrls.push(...urls)
     }
+
+    // Skin-enhance pass — every generated image gets re-rendered through
+    // Z-Image Turbo img2img at low strength for realistic skin texture.
+    // Runs exactly once per final image, never fed back into another gen step.
+    const enhancedUrls = await Promise.all(
+      allUrls.map(url => finalizeWithSkinEnhance(url, size, apiKey, abort)),
+    )
+    allUrls.splice(0, allUrls.length, ...enhancedUrls)
 
     // Persist to History (direct DB + storage — no self-HTTP to BASE_URL).
     if (allUrls.length) {

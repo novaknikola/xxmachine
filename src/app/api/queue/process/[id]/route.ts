@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { one, query } from '@/lib/db'
-import { generateImage, editImage, SEEDREAM_MAX_IMAGES } from '@/lib/wavespeed'
+import { generateImage, editImage, finalizeWithSkinEnhance, SEEDREAM_MAX_IMAGES } from '@/lib/wavespeed'
 import { resolveCarouselVariantPrompts } from '@/lib/carousel-variants'
 import { buildCarouselBasePrompt, DEFAULT_CAROUSEL_PRESET_ID } from '@/lib/carousel-presets'
 import { uploadImageFromUrl, uploadBuffer } from '@/lib/supabase-storage'
@@ -259,11 +259,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           })
 
           for (let u = 0; u < urls.length; u++) {
+            const enhanced = await finalizeWithSkinEnhance(urls[u], item.dimension, apiKey, AbortSignal.timeout(130_000))
             try {
-              const stored = await uploadImageFromUrl(urls[u], `queue/${id}/${i + 1}_${u + 1}.jpg`)
+              const stored = await uploadImageFromUrl(enhanced, `queue/${id}/${i + 1}_${u + 1}.jpg`)
               allOutputUrls.push(stored)
             } catch {
-              allOutputUrls.push(urls[u])
+              allOutputUrls.push(enhanced)
             }
           }
         } catch (err) {
@@ -1394,7 +1395,11 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               ? [...item.referenceImageUrls, ...(referenceImageUrls ?? [])]
               : [...(referenceImageUrls ?? [])]
 
-            let baseStoredUrl: string
+            // rawBaseStoredUrl is the un-enhanced Seedream/Z-Image output, kept as the
+            // reference every variant edits against — variants must never chain off an
+            // already skin-enhanced image, or the enhance pass stacks generation over
+            // generation. baseStoredUrl (enhanced) is only for the slide that ships.
+            let rawBaseStoredUrl: string
             if (seedreamOnly) {
               const baseUrls = await editImage({
                 imageUrls: itemRefUrls.slice(0, SEEDREAM_MAX_IMAGES),
@@ -1405,7 +1410,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                 signal: AbortSignal.timeout(600_000),
               })
               if (!baseUrls.length) throw new Error('No base image returned from Seedream')
-              baseStoredUrl = await uploadImageFromUrl(baseUrls[0], `queue/${id}/${i + 1}_base.jpg`)
+              rawBaseStoredUrl = await uploadImageFromUrl(baseUrls[0], `queue/${id}/${i + 1}_base_raw.jpg`)
             } else {
               const baseUrls = await generateImage({
                 prompt: baseGenerationPrompt,
@@ -1417,8 +1422,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                 signal: AbortSignal.timeout(130_000),
               })
               if (!baseUrls.length) throw new Error('No base image returned')
-              baseStoredUrl = await uploadImageFromUrl(baseUrls[0], `queue/${id}/${i + 1}_base.jpg`)
+              rawBaseStoredUrl = await uploadImageFromUrl(baseUrls[0], `queue/${id}/${i + 1}_base_raw.jpg`)
             }
+
+            const enhancedBase = await finalizeWithSkinEnhance(
+              rawBaseStoredUrl, item.dimension, apiKey, AbortSignal.timeout(600_000),
+            )
+            const baseStoredUrl = await uploadImageFromUrl(enhancedBase, `queue/${id}/${i + 1}_base.jpg`)
 
             const images: string[] = [baseStoredUrl]
             const variantPrompts = await resolveCarouselVariantPrompts({
@@ -1426,14 +1436,14 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               count: variantsExtra,
               scenePrompt: baseGenerationPrompt,
               grokSmart: grokSmart ?? false,
-              baseImageUrl: baseStoredUrl,
+              baseImageUrl: rawBaseStoredUrl,
             })
 
             const variantResults = await Promise.allSettled(
               variantPrompts.map(async (variantPrompt, vi) => {
                 const editUrls = await editImage({
                   imageUrls: [
-                    baseStoredUrl,
+                    rawBaseStoredUrl,
                     // Base slide takes one of Seedream's image slots.
                     ...itemRefUrls.slice(0, SEEDREAM_MAX_IMAGES - 1),
                   ],
@@ -1444,7 +1454,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                   signal: AbortSignal.timeout(600_000),
                 })
                 if (!editUrls.length) throw new Error('No variant image returned')
-                return uploadImageFromUrl(editUrls[0], `queue/${id}/${i + 1}_v${vi + 1}.jpg`)
+                const enhancedVariant = await finalizeWithSkinEnhance(
+                  editUrls[0], item.dimension, apiKey, AbortSignal.timeout(600_000),
+                )
+                return uploadImageFromUrl(enhancedVariant, `queue/${id}/${i + 1}_v${vi + 1}.jpg`)
               }),
             )
             for (const r of variantResults) {
@@ -1848,7 +1861,11 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               ? [...item.referenceImageUrls, ...(referenceImageUrls ?? [])]
               : [...(referenceImageUrls ?? [])]
 
-            let baseStoredUrl: string
+            // rawBaseStoredUrl is the un-enhanced output, used as the reference for
+            // every variant — variants must edit off the raw base, never off an
+            // already skin-enhanced image, or the enhance pass stacks generation
+            // over generation. baseStoredUrl (enhanced) is only for the shipped slide.
+            let rawBaseStoredUrl: string
             if (mode === 'seedream-edit') {
               const baseUrls = await editImage({
                 imageUrls: itemRefUrls.slice(0, SEEDREAM_MAX_IMAGES),
@@ -1859,7 +1876,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                 signal: AbortSignal.timeout(600_000),
               })
               if (!baseUrls.length) throw new Error('No base image returned from Seedream')
-              baseStoredUrl = await uploadImageFromUrl(baseUrls[0], `queue/${id}/${i + 1}_base.jpg`)
+              rawBaseStoredUrl = await uploadImageFromUrl(baseUrls[0], `queue/${id}/${i + 1}_base_raw.jpg`)
             } else {
               const baseUrls = await generateImage({
                 prompt: item.prompt,
@@ -1871,8 +1888,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                 signal: AbortSignal.timeout(130_000),
               })
               if (!baseUrls.length) throw new Error('No base image returned')
-              baseStoredUrl = await uploadImageFromUrl(baseUrls[0], `queue/${id}/${i + 1}_base.jpg`)
+              rawBaseStoredUrl = await uploadImageFromUrl(baseUrls[0], `queue/${id}/${i + 1}_base_raw.jpg`)
             }
+
+            const enhancedBase = await finalizeWithSkinEnhance(
+              rawBaseStoredUrl, dimension, apiKey, AbortSignal.timeout(600_000),
+            )
+            const baseStoredUrl = await uploadImageFromUrl(enhancedBase, `queue/${id}/${i + 1}_base.jpg`)
 
             const images: string[] = [baseStoredUrl]
             // Recorded alongside the images so the batch view can show which
@@ -1883,7 +1905,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             if (carousel?.enabled) {
               // No preset pool and no Grok analysis here — the user writes the exact pose-change
               // prompt themselves, and every variant slide is that same prompt edited against the
-              // base image, never the original reference. Sending only baseStoredUrl (not the
+              // base image, never the original reference. Sending only rawBaseStoredUrl (not the
               // scene/identity refs too) removes any ambiguity about which image to pose from —
               // sending all three alongside a bare pose instruction let Seedream drift onto one
               // of the original references instead of the freshly composed base image.
@@ -1897,7 +1919,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               const variantResults = await Promise.allSettled(
                 variantPrompts.map(async (variantPrompt, vi) => {
                   const editUrls = await editImage({
-                    imageUrls: [baseStoredUrl],
+                    imageUrls: [rawBaseStoredUrl],
                     prompt: variantPrompt,
                     size: dimension,
                     resolution: seedreamRes,
@@ -1905,7 +1927,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                     signal: AbortSignal.timeout(600_000),
                   })
                   if (!editUrls.length) throw new Error('No variant image returned')
-                  return uploadImageFromUrl(editUrls[0], `queue/${id}/${i + 1}_v${vi + 1}.jpg`)
+                  const enhancedVariant = await finalizeWithSkinEnhance(
+                    editUrls[0], dimension, apiKey, AbortSignal.timeout(600_000),
+                  )
+                  return uploadImageFromUrl(enhancedVariant, `queue/${id}/${i + 1}_v${vi + 1}.jpg`)
                 }),
               )
               // Kept index-aligned with the images actually produced: a failed

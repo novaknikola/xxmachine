@@ -18,6 +18,7 @@ import type { DiscoveryItemRow, EndFrameMode, TrackedProfileRow } from './types'
 import { resolveVideoUrlViaRapidApi, resolveVideoUrlsViaApify } from '@/lib/instagram-scrape'
 import { resolveKey } from '@/lib/user-keys'
 import { isPlayableVideoUrl } from './video-url'
+import { internalBaseUrl } from '@/lib/internal-url'
 
 /**
  * Floor for frames sampled per clip — denser sampling catches background gag
@@ -81,7 +82,7 @@ async function enqueueRepurpose(opts: {
     [job.id],
   ).catch(() => null)
   if (!claimed) return
-  fetch(`http://127.0.0.1:${process.env.PORT ?? 3000}/api/queue/process/${job.id}`, {
+  fetch(`${internalBaseUrl()}/api/queue/process/${job.id}`, {
     method: 'POST',
     headers: { 'x-cron-secret': secret },
   }).catch(err => console.error('[monitor/replicate] fire repurpose worker:', err))

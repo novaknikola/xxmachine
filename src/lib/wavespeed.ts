@@ -180,3 +180,74 @@ export async function editImage(input: EditImageInput): Promise<string[]> {
 
   return pollEditResult(requestId, apiKey, signal)
 }
+
+// ─── Skin enhance (Z-Image Turbo image-to-image) ────────────────────────────
+//
+// Post-processing pass applied to every generated image: re-renders it through
+// Z-Image Turbo's img2img endpoint at a low strength to add realistic skin
+// texture/pores without altering pose, framing, or identity.
+
+const SKIN_ENHANCE_URL = 'https://api.wavespeed.ai/api/v3/wavespeed-ai/z-image-turbo/image-to-image'
+
+const SKIN_ENHANCE_PROMPT =
+  'Ultrarealistic skin with hyper-detailed pores and natural skin texture, emphasizing realistic skin imperfections, subtle lighting reflections, and lifelike surface details, rendered in photorealistic style with accurate proportions and natural lighting, capturing every minute skin detail with high fidelity.'
+
+const SKIN_ENHANCE_STRENGTH = 0.11
+
+export interface EnhanceSkinInput {
+  /** Publicly reachable source image URL. */
+  imageUrl: string
+  /** Ratio key (e.g. '9:16') or raw 'W*H' string — should match the source image's size. */
+  size?: string
+  apiKey: string
+  signal?: AbortSignal
+}
+
+export async function enhanceSkin(input: EnhanceSkinInput): Promise<string[]> {
+  const { imageUrl, size, apiKey, signal } = input
+
+  const body: Record<string, unknown> = {
+    prompt: SKIN_ENHANCE_PROMPT,
+    image: imageUrl,
+    strength: SKIN_ENHANCE_STRENGTH,
+    output_format: 'png',
+  }
+  const resolvedSize = size ? (DIMENSION_MAP[size] ?? size) : undefined
+  if (resolvedSize) body.size = resolvedSize
+
+  const initRes = await fetch(SKIN_ENHANCE_URL, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  })
+  const initData = await initRes.json()
+  if (initData.code && initData.code !== 200) {
+    throw new Error(initData.message ?? JSON.stringify(initData))
+  }
+  const requestId = initData?.data?.id ?? initData?.id
+  if (!requestId) throw new Error('No request ID returned')
+
+  return pollEditResult(requestId, apiKey, signal)
+}
+
+/**
+ * Applies the skin-enhance pass to exactly one already-finished image. Call this
+ * once per final delivered image — never on an intermediate result that will be
+ * fed back into another Seedream/Z-Image generation step, or the pass stacks.
+ * Best-effort: a failed enhance falls back to the original URL.
+ */
+export async function finalizeWithSkinEnhance(
+  url: string,
+  size: string | undefined,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  try {
+    const outputs = await enhanceSkin({ imageUrl: url, size, apiKey, signal })
+    return outputs[0] || url
+  } catch (err) {
+    console.error('[wavespeed] skin-enhance failed, keeping original:', err)
+    return url
+  }
+}
