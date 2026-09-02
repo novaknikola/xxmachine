@@ -23,7 +23,7 @@ export async function GET(req: NextRequest) {
   const boards = await rows<BoardRow>(
     `SELECT id, board_key, owner, slug, title, board_url, pin_count, synced_at, last_error
        FROM pinterest_boards
-      WHERE user_id = $1 AND is_active AND board_key <> 'browser-clips'
+      WHERE user_id = $1 AND is_active AND board_key NOT LIKE 'browser-clips%'
       ORDER BY synced_at DESC NULLS LAST, created_at DESC`,
     [auth.id],
   )

@@ -14,11 +14,12 @@ interface ClipRow {
 
 /**
  * Images saved through the browser extension — same pinterest_pins table as
- * the Pinterest tab, but scoped to the one auto-created "Browser Clips" board
- * (see src/app/api/extension/clip/route.ts) and never mixed into that tab.
- * Removing a clip and "Save to stories"/"Generate" reuse the existing
- * pinterest_pins/pinterest_stories routes — a pin id works there regardless
- * of which board it came from.
+ * the Pinterest tab, but scoped to `browser-clips*` boards (see
+ * src/app/api/extension/clip/route.ts) and never mixed into that tab.
+ * `?boardId=` narrows to one folder; omitted, every browser-clips board for
+ * the user is shown together. Removing a clip and "Save to stories"/"Generate"
+ * reuse the existing pinterest_pins/pinterest_stories routes — a pin id works
+ * there regardless of which board it came from.
  */
 export async function GET(req: NextRequest) {
   const auth = await requireUser(req)
@@ -28,10 +29,15 @@ export async function GET(req: NextRequest) {
   const page = Math.max(1, Number(params.get('page') ?? 1) || 1)
   const pageSize = Math.min(120, Math.max(1, Number(params.get('pageSize') ?? 48) || 48))
   const q = params.get('q')?.trim() ?? ''
+  const boardId = params.get('boardId')?.trim() ?? ''
 
-  const conditions = ["b.user_id = $1", "b.board_key = 'browser-clips'", 'b.is_active', 'p.is_active']
+  const conditions = ["b.user_id = $1", "b.board_key LIKE 'browser-clips%'", 'b.is_active', 'p.is_active']
   const values: unknown[] = [auth.id]
 
+  if (boardId) {
+    values.push(boardId)
+    conditions.push(`p.board_id = $${values.length}`)
+  }
   if (q) {
     values.push(`%${q}%`)
     conditions.push(`p.title ILIKE $${values.length}`)

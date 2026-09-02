@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
 import { Pagination } from '@/components/ui/pagination'
-import { BookImage, CheckSquare, Loader2, Puzzle, Search, Trash2, Wand2 } from 'lucide-react'
+import { BookImage, CheckSquare, Loader2, Puzzle, RefreshCw, Search, Trash2, Wand2 } from 'lucide-react'
 import { GenerationPanel } from './generation-panel'
 import type { ScrapedPromptItem } from './browse-tab'
 
@@ -21,13 +21,23 @@ interface Clip {
   image_url_hd: string
 }
 
+interface Folder {
+  id: string
+  board_key: string
+  title: string | null
+  pin_count: number
+}
+
 /**
  * Images saved through the XXmachine Clipper browser extension (hover any
- * image on any site, or right-click → "Sačuvaj sliku u XXmachine"). Same
- * underlying pinterest_pins storage as the Pinterest tab, but kept on its own
- * tab per the user's request — clips should not show up mixed into Pinterest.
+ * image on any site, or right-click → "Sačuvaj sliku u XXmachine", or grab a
+ * whole page's images at once into a named folder). Same underlying
+ * pinterest_pins storage as the Pinterest tab, but kept on its own tab per
+ * the user's request — clips should not show up mixed into Pinterest.
  */
 export function BrowserClipsTab() {
+  const [folders, setFolders] = useState<Folder[]>([])
+  const [folderId, setFolderId] = useState('')
   const [clips, setClips] = useState<Clip[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -39,11 +49,19 @@ export function BrowserClipsTab() {
   const [storyFolder, setStoryFolder] = useState('')
   const [savingStories, setSavingStories] = useState(false)
 
+  const loadFolders = useCallback(async () => {
+    const res = await fetch('/api/pinterest/browser-clips/folders')
+    if (!res.ok) return
+    const data = await res.json() as { folders: Folder[] }
+    setFolders(data.folders ?? [])
+  }, [])
+
   const loadClips = useCallback(async () => {
     setLoading(true)
     try {
       const params = new URLSearchParams({ page: String(page), pageSize: String(PAGE_SIZE) })
       if (search) params.set('q', search)
+      if (folderId) params.set('boardId', folderId)
       const res = await fetch(`/api/pinterest/browser-clips?${params}`)
       const data = await res.json() as { pins: Clip[]; total: number; error?: string }
       if (!res.ok) throw new Error(data.error ?? 'Failed to load clips')
@@ -54,8 +72,9 @@ export function BrowserClipsTab() {
     } finally {
       setLoading(false)
     }
-  }, [page, search])
+  }, [page, search, folderId])
 
+  useEffect(() => { void loadFolders() }, [loadFolders])
   useEffect(() => { void loadClips() }, [loadClips])
 
   /** Flagged inactive, not deleted — same convention as the Pinterest tab's removePins. */
@@ -74,6 +93,7 @@ export function BrowserClipsTab() {
     })
     toast.success(`Removed ${data.removed} image${data.removed === 1 ? '' : 's'}`)
     await loadClips()
+    await loadFolders()
   }
 
   async function saveToStories() {
@@ -136,6 +156,26 @@ export function BrowserClipsTab() {
   return (
     <div className="flex flex-col h-full overflow-hidden">
       <div className="shrink-0 border-b border-border px-5 py-3 space-y-3">
+        {folders.length > 1 && (
+          <div className="flex gap-1.5 flex-wrap items-center">
+            <button
+              onClick={() => { setFolderId(''); setPage(1) }}
+              className={`px-2.5 py-1 rounded-md text-xs border transition-colors ${folderId === '' ? 'bg-primary text-primary-foreground border-primary' : 'border-border text-muted-foreground hover:bg-secondary'}`}
+            >
+              All folders
+            </button>
+            {folders.map(f => (
+              <button
+                key={f.id}
+                onClick={() => { setFolderId(f.id); setPage(1) }}
+                className={`px-2.5 py-1 rounded-md text-xs border transition-colors ${folderId === f.id ? 'bg-primary text-primary-foreground border-primary' : 'border-border text-muted-foreground hover:bg-secondary'}`}
+              >
+                {f.title ?? f.board_key}
+                <span className="opacity-60"> · {f.pin_count}</span>
+              </button>
+            ))}
+          </div>
+        )}
         <div className="flex gap-2 items-center">
           <div className="relative flex-1">
             <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
@@ -148,6 +188,14 @@ export function BrowserClipsTab() {
             />
           </div>
           <Button variant="outline" size="sm" onClick={() => { setSearch(q.trim()); setPage(1) }}>Search</Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => { void loadFolders(); void loadClips() }}
+            title="Refresh — picks up new clips saved from the extension"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+          </Button>
           <Button variant="ghost" size="sm" onClick={selectPage} disabled={!clips.length}>Select page</Button>
           <span className="text-xs text-muted-foreground shrink-0">{total} images</span>
         </div>

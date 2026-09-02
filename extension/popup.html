@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <title>XXmachine Clipper</title>
 <style>
-  body { font: 13px system-ui, sans-serif; background: #0b0f14; color: #e5e7eb; margin: 0; padding: 16px; width: 220px; }
+  body { font: 13px system-ui, sans-serif; background: #0b0f14; color: #e5e7eb; margin: 0; padding: 16px; width: 260px; }
   h1 { font-size: 14px; margin: 0 0 10px; }
   .row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
   .dot { width: 8px; height: 8px; border-radius: 999px; background: #4b5563; flex-shrink: 0; }
@@ -13,12 +13,29 @@
   a.opts { display: block; margin-top: 12px; color: #4ade80; text-decoration: none; font-size: 12px; }
   a.opts:hover { text-decoration: underline; }
   .count { color: #9ca3af; font-size: 12px; }
+  hr { border: none; border-top: 1px solid #1f2937; margin: 14px 0; }
+  label { display: block; font-size: 11px; color: #9ca3af; margin: 0 0 4px; }
+  input { width: 100%; box-sizing: border-box; background: #161b22; border: 1px solid #30363d; color: #e5e7eb; border-radius: 8px; padding: 7px 8px; font: 12px system-ui, sans-serif; margin-bottom: 8px; }
+  input:focus { outline: none; border-color: #16a34a; }
+  button.bulk { width: 100%; background: #16a34a; color: #fff; border: none; border-radius: 8px; padding: 9px; font: 600 12px system-ui, sans-serif; cursor: pointer; }
+  button.bulk:disabled { opacity: .5; cursor: default; }
+  #bulkStatus { margin-top: 8px; font-size: 11px; min-height: 14px; color: #9ca3af; }
+  #bulkStatus.ok { color: #4ade80; }
+  #bulkStatus.err { color: #f87171; }
 </style>
 </head>
 <body>
   <h1>XXmachine Clipper</h1>
   <div class="row"><span id="dot" class="dot"></span><span id="statusText">Provera…</span></div>
   <div class="count" id="count"></div>
+
+  <hr />
+
+  <label for="folderName">Naziv foldera (opciono)</label>
+  <input id="folderName" placeholder="npr. Karly bundle" />
+  <button class="bulk" id="grabAll">Sačuvaj sve slike sa stranice</button>
+  <div id="bulkStatus"></div>
+
   <a class="opts" href="#" id="openOptions">Otvori podešavanja</a>
   <script src="popup.js"></script>
 </body>

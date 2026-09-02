@@ -163,9 +163,29 @@ btn.addEventListener('click', e => {
   )
 })
 
-// Feedback for the right-click "Sačuvaj sliku u XXmachine" context menu path.
-chrome.runtime.onMessage.addListener(msg => {
-  if (msg?.type !== 'XM_CLIP_RESULT') return
-  if (msg.ok) showToast(msg.alreadySaved ? 'Već sačuvano u XXmachine.' : 'Sačuvano u XXmachine.', true)
-  else showToast(msg.error || 'Greška pri čuvanju slike.', false)
+// Feedback for the right-click "Sačuvaj sliku u XXmachine" context menu path,
+// and for the popup's bulk "grab all images on this page" action.
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === 'XM_CLIP_RESULT') {
+    if (msg.ok) showToast(msg.alreadySaved ? 'Već sačuvano u XXmachine.' : 'Sačuvano u XXmachine.', true)
+    else showToast(msg.error || 'Greška pri čuvanju slike.', false)
+    return
+  }
+
+  // The popup can't see the page's DOM itself — it asks the content script to
+  // scan for eligible images (same size/http(s) rule as the hover button) and
+  // hand back the deduped list.
+  if (msg?.type === 'XM_SCAN_PAGE_IMAGES') {
+    const seen = new Set()
+    const urls = []
+    document.querySelectorAll('img').forEach(img => {
+      if (!isEligible(img)) return
+      const src = img.currentSrc || img.src
+      if (!/^https?:\/\//i.test(src) || seen.has(src)) return
+      seen.add(src)
+      urls.push(src)
+    })
+    sendResponse({ urls })
+    return
+  }
 })
