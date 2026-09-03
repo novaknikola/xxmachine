@@ -1,23 +1,16 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
-
-const TEST_KEY_HEX = 'a'.repeat(64)
-const TEST_KEY = Buffer.from(TEST_KEY_HEX, 'hex')
-
-process.env.ENCRYPTION_KEY = TEST_KEY_HEX
-
-const { looksEncrypted, encryptIgSecret, decryptIgSecret, encryptIgSecretOrNull } =
-  await import('./secrets.ts')
-const {
+import { looksEncrypted, encryptIgSecret, decryptIgSecret, encryptIgSecretOrNull } from './secrets'
+import {
   issueOAuthState,
   consumeOAuthState,
   createMemoryStateStore,
   formatSignedState,
   OAuthStateError,
   OAUTH_STATE_TTL_MS,
-} = await import('./oauth-state.ts')
-const {
+} from './oauth-state'
+import {
   assertSameIgUser,
   IgUserOverwriteError,
   IgUserConflictError,
@@ -27,9 +20,11 @@ const {
   nextRefreshAt,
   REFRESH_BEFORE_EXPIRY_MS,
   buildRefreshUrl,
-} = await import('./tokens.ts')
-const { isUnsupportedRequest, classifyMetaError, oauthErrorForUi, TESTER_REQUIRED_MESSAGE } =
-  await import('./oauth-errors.ts')
+} from './tokens'
+import { isUnsupportedRequest, classifyMetaError, oauthErrorForUi, TESTER_REQUIRED_MESSAGE } from './oauth-errors'
+
+const TEST_KEY_HEX = process.env.ENCRYPTION_KEY!
+const TEST_KEY = Buffer.from(TEST_KEY_HEX, 'hex')
 
 describe('token encryption', () => {
   it('never writes plaintext and round-trips', () => {
@@ -162,7 +157,7 @@ describe('tester / refresh helpers', () => {
     const classified = classifyMetaError(raw)
     assert.equal(classified.code, 'tester_required')
     assert.match(classified.userMessage, /Instagram Tester/i)
-    assert.doesNotMatch(classified.userMessage, /verb|HTTP GET|wrong method/i)
+    assert.match(classified.userMessage, /not a refresh-token/i)
     assert.equal(oauthErrorForUi('tester_required'), TESTER_REQUIRED_MESSAGE)
   })
 
