@@ -18,6 +18,20 @@ import { fileURLToPath } from 'url'
 import pg from 'pg'
 import http from 'http'
 import net from 'net'
+import { createDecipheriv } from 'node:crypto'
+
+const ENCRYPTED_RE = /^[0-9a-f]{24}:[0-9a-f]{32}:[0-9a-f]+$/i
+
+function decryptIgSecretOrPlain(stored) {
+  if (!stored || !ENCRYPTED_RE.test(stored)) return stored
+  const raw = process.env.ENCRYPTION_KEY
+  if (!raw) throw new Error('ENCRYPTION_KEY env var is not set')
+  const key = Buffer.from(raw, 'hex')
+  const [ivHex, tagHex, dataHex] = stored.split(':')
+  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(ivHex, 'hex'))
+  decipher.setAuthTag(Buffer.from(tagHex, 'hex'))
+  return decipher.update(Buffer.from(dataHex, 'hex')) + decipher.final('utf8')
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '..')
@@ -186,7 +200,7 @@ try {
     )
     if (!acc) throw new Error(`Account not found: ${accountId}`)
     ig_username = acc.ig_username
-    ig_password = acc.ig_password
+    ig_password = decryptIgSecretOrPlain(acc.ig_password)
     proxy = noProxy ? null : parseProxy(acc.proxy_url)
     console.log(`[open-browser] Account mode: @${ig_username}, proxy: ${noProxy ? 'skipped (--no-proxy)' : acc.proxy_url || 'none'}`)
   } else {

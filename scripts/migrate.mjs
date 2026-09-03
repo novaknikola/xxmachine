@@ -73,6 +73,27 @@ async function run() {
 
   if (ran === 0) console.log('Nothing to do — schema is up to date.')
   else console.log(`Done. Applied ${ran} migration(s).`)
+
+  // AES-GCM encrypt leftover plaintext IG secrets (tokens / passwords / TOTP).
+  // SQL cannot do this; new writes go through src/lib/instagram/secrets.ts.
+  try {
+    const table = await pool.query(
+      `SELECT 1 FROM information_schema.tables WHERE table_name = 'instagram_accounts'`,
+    )
+    if (table.rowCount && process.env.ENCRYPTION_KEY) {
+      const { encryptInstagramSecrets } = await import('./encrypt-instagram-secrets.mjs')
+      const stats = await encryptInstagramSecrets(pool)
+      console.log(
+        `✓ instagram secret encrypt: ${stats.updated} row(s) migrated, ${stats.alreadyEncryptedFields} field(s) already ciphertext`,
+      )
+    } else if (table.rowCount && !process.env.ENCRYPTION_KEY) {
+      console.warn('! ENCRYPTION_KEY is not set — skipped Instagram secret encryption. New tokens will refuse to write plaintext.')
+    }
+  } catch (err) {
+    console.error('✗ instagram secret encrypt:', err.message)
+    process.exit(1)
+  }
+
   await pool.end()
 }
 
