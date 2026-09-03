@@ -150,14 +150,20 @@ export async function GET() {
       )
       if (firstConnected.rows.length > 0) {
         const { ig_access_token, ig_username } = firstConnected.rows[0]
+        const { decryptIgSecretOrNull } = await import('@/lib/instagram/secrets')
+        const token = decryptIgSecretOrNull(ig_access_token)
+        if (!token) {
+          checks.push({ name: `IG API live test (@${ig_username})`, ok: false, error: 'Stored token could not be decrypted' })
+        } else {
         const testRes = await fetch(
-          `https://graph.instagram.com/me?fields=id,username&access_token=${ig_access_token}`
+          `https://graph.instagram.com/me?fields=id,username&access_token=${encodeURIComponent(token)}`
         )
         const testData = await testRes.json()
         if (testRes.ok) {
           checks.push({ name: `IG API live test (@${ig_username})`, ok: true, value: `Graph API returned id=${testData.id}` })
         } else {
           checks.push({ name: `IG API live test (@${ig_username})`, ok: false, error: testData.error?.message ?? JSON.stringify(testData) })
+        }
         }
       }
     } catch (err) {

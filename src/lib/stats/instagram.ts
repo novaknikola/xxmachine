@@ -1,4 +1,5 @@
 import { rows, query } from '@/lib/db'
+import { decryptIgSecretOrNull } from '@/lib/instagram/secrets'
 
 interface InstagramAccount {
   id: string
@@ -34,7 +35,21 @@ export async function fetchInstagramStats(): Promise<StatRow[]> {
   const results: StatRow[] = []
 
   for (const account of accounts) {
-    const token = account.ig_access_token!
+    const token = decryptIgSecretOrNull(account.ig_access_token)
+    if (!token) {
+      results.push({
+        account_id: account.id,
+        account_name: account.name,
+        followers: null,
+        posts_count: null,
+        views_30d: null,
+        reach_30d: null,
+        impressions_30d: null,
+        raw: {},
+        error: 'Stored access token could not be decrypted',
+      })
+      continue
+    }
     try {
       // Get user ID and basic profile
       const me = await igGet('/me?fields=id,username,followers_count,media_count', token)

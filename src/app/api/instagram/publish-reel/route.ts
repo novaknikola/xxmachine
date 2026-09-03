@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { one } from '@/lib/db'
 import { getGoogleAccessToken } from '@/lib/google-auth'
+import { decryptIgSecretOrNull } from '@/lib/instagram/secrets'
+import { publishingBlockedReason } from '@/lib/instagram/tokens'
 import { getIgClient } from '@/lib/ig-private-api'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
@@ -193,9 +195,13 @@ export async function POST(req: NextRequest) {
       ig_access_token: string | null
       ig_user_id: string | null
       ig_session: object | null
+      ig_publish_paused: boolean | null
+      ig_token_status: string | null
+      ig_token_status_reason: string | null
     }>(
       `SELECT q.id, q.drive_file_id, q.filename, q.caption, q.account_id,
-              a.ig_access_token, a.ig_user_id, a.ig_session
+              a.ig_access_token, a.ig_user_id, a.ig_session,
+              a.ig_publish_paused, a.ig_token_status, a.ig_token_status_reason
        FROM instagram_queue q JOIN instagram_accounts a ON a.id = q.account_id
        WHERE q.id=$1 AND q.status='pending'`,
       [queueItemId]
@@ -203,7 +209,17 @@ export async function POST(req: NextRequest) {
 
     if (!item) return NextResponse.json({ error: 'Queue item not found or not pending' }, { status: 404 })
 
-    const useGraphApi = !!(item.ig_access_token && item.ig_user_id)
+    const blocked = publishingBlockedReason(item)
+    if (blocked) {
+      await one(
+        `UPDATE instagram_queue SET status='failed', error_message=$1 WHERE id=$2`,
+        [blocked, queueItemId],
+      )
+      return NextResponse.json({ error: blocked }, { status: 409 })
+    }
+
+    const graphToken = decryptIgSecretOrNull(item.ig_access_token)
+    const useGraphApi = !!(graphToken && item.ig_user_id)
     const usePrivateApi = !useGraphApi && !!item.ig_session
 
     if (!useGraphApi && !usePrivateApi) {
@@ -239,13 +255,13 @@ export async function POST(req: NextRequest) {
   const publicVideoUrl = await uploadToSupabasePublic(transcodedBuffer, queueItemId)
   const containerId = await createReelContainerFromUrl(
     item.ig_user_id!,
-    item.ig_access_token!,
+    graphToken!,
     publicVideoUrl,
     item.caption ?? ''
   )
   console.log(`[publish-reel] container_id: ${containerId}`)
-  await waitForContainer(containerId, item.ig_access_token!)
-  mediaId = await publishContainer(item.ig_user_id!, containerId, item.ig_access_token!)
+  await waitForContainer(containerId, graphToken!)
+  mediaId = await publishContainer(item.ig_user_id!, containerId, graphToken!)
       } else {
         console.log('[publish-reel] Publishing via Private API (ig_session)...')
         mediaId = await publishViaPrivateApi(item.account_id, tempTranscodedPath!, item.caption ?? '')

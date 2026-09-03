@@ -1,7 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { rows, one } from '@/lib/db'
+import { requireUser } from '@/lib/session'
+import { encryptIgSecretOrNull } from '@/lib/instagram/secrets'
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const auth = await requireUser(req)
+  if (auth instanceof NextResponse) return auth
+
   try {
     const accounts = await rows<{
       id: string
@@ -11,16 +16,18 @@ export async function GET() {
       google_drive_folder_id: string | null
       token_expires_at: string | null
       has_password: boolean
-connected: boolean
-graph_connected: boolean
-browser_connected: boolean
-assigned_sheet_name: string | null
-published_count: number
-pending_count: number
-failed_count: number
+      connected: boolean
+      graph_connected: boolean
+      browser_connected: boolean
+      assigned_sheet_name: string | null
+      published_count: number
+      pending_count: number
+      failed_count: number
+      token_status: string
+      token_status_reason: string | null
+      publish_paused: boolean
     }>(
-
-  `SELECT a.id, a.name, a.ig_username,
+      `SELECT a.id, a.name, a.ig_username,
           (a.ig_access_token IS NOT NULL OR a.ig_session IS NOT NULL) AS connected,
           (a.ig_access_token IS NOT NULL AND a.ig_user_id IS NOT NULL) AS graph_connected,
           (a.ig_session IS NOT NULL) AS browser_connected,
@@ -28,6 +35,9 @@ failed_count: number
           a.proxy_url,
           a.google_drive_folder_id,
           (a.ig_password IS NOT NULL) AS has_password,
+          COALESCE(a.ig_token_status, 'active') AS token_status,
+          a.ig_token_status_reason AS token_status_reason,
+          COALESCE(a.ig_publish_paused, FALSE) AS publish_paused,
           (SELECT m.sheet_name FROM content_source_mappings m
            WHERE m.instagram_account_id = a.id ORDER BY m.sheet_name LIMIT 1) AS assigned_sheet_name,
           COALESCE(q.published_count, 0) AS published_count,
@@ -42,8 +52,10 @@ failed_count: number
      FROM instagram_queue
      GROUP BY account_id
    ) q ON q.account_id = a.id
-   ORDER BY a.name`
-)
+   WHERE a.user_id = $1 OR a.user_id IS NULL
+   ORDER BY a.name`,
+      [auth.id],
+    )
 
     return NextResponse.json(accounts)
   } catch (err) {
@@ -52,13 +64,23 @@ failed_count: number
 }
 
 export async function POST(req: NextRequest) {
+  const auth = await requireUser(req)
+  if (auth instanceof NextResponse) return auth
+
   try {
     const { name, igUsername, igPassword, igTotpSecret, proxyUrl } = await req.json()
     if (!name) return NextResponse.json({ error: 'name required' }, { status: 400 })
     const row = await one<{ id: string }>(
-      `INSERT INTO instagram_accounts (name, ig_username, ig_password, ig_totp_secret, proxy_url)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-      [name, igUsername ?? null, igPassword ?? null, igTotpSecret ?? null, proxyUrl ?? null]
+      `INSERT INTO instagram_accounts (name, ig_username, ig_password, ig_totp_secret, proxy_url, user_id)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [
+        name,
+        igUsername ?? null,
+        encryptIgSecretOrNull(igPassword),
+        encryptIgSecretOrNull(igTotpSecret),
+        proxyUrl ?? null,
+        auth.id,
+      ],
     )
     return NextResponse.json({ id: row!.id })
   } catch (err) {
@@ -67,6 +89,9 @@ export async function POST(req: NextRequest) {
 }
 
 export async function PATCH(req: NextRequest) {
+  const auth = await requireUser(req)
+  if (auth instanceof NextResponse) return auth
+
   try {
     const { id, name, proxyUrl, driveFolderId, igUsername, igPassword, igTotpSecret } = await req.json()
     if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 })
@@ -78,8 +103,17 @@ export async function PATCH(req: NextRequest) {
         ig_username = COALESCE($4, ig_username),
         ig_password = COALESCE($5, ig_password),
         ig_totp_secret = COALESCE($6, ig_totp_secret)
-       WHERE id=$7`,
-      [name ?? null, proxyUrl ?? null, driveFolderId ?? null, igUsername ?? null, igPassword ?? null, igTotpSecret ?? null, id]
+       WHERE id=$7 AND (user_id=$8 OR user_id IS NULL)`,
+      [
+        name ?? null,
+        proxyUrl ?? null,
+        driveFolderId ?? null,
+        igUsername ?? null,
+        igPassword ? encryptIgSecretOrNull(igPassword) : null,
+        igTotpSecret ? encryptIgSecretOrNull(igTotpSecret) : null,
+        id,
+        auth.id,
+      ],
     )
     return NextResponse.json({ ok: true })
   } catch (err) {
@@ -88,9 +122,15 @@ export async function PATCH(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const auth = await requireUser(req)
+  if (auth instanceof NextResponse) return auth
+
   try {
     const { id } = await req.json()
-    await one(`DELETE FROM instagram_accounts WHERE id=$1`, [id])
+    await one(
+      `DELETE FROM instagram_accounts WHERE id=$1 AND (user_id=$2 OR user_id IS NULL)`,
+      [id, auth.id],
+    )
     return NextResponse.json({ ok: true })
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 })

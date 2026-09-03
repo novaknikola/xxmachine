@@ -5,6 +5,7 @@ export const maxDuration = 300
 import { NextRequest } from 'next/server'
 import { one } from '@/lib/db'
 import { getIgClient, saveIgSession, loginIgClient } from '@/lib/ig-private-api'
+import { decryptIgSecretOrNull } from '@/lib/instagram/secrets'
 
 function friendlyError(msg: string): string {
   if (msg.includes('tunneling socket') || msg.includes('socket hang up') || msg.includes('ECONNREFUSED'))
@@ -46,7 +47,9 @@ export async function POST(req: NextRequest) {
         }>(`SELECT id, name, ig_username, ig_password, ig_totp_secret FROM instagram_accounts WHERE id=$1`, [accountId])
 
         if (!acc) { send({ type: 'error', accountId, message: 'Account not found' }); failed++; continue }
-        if (!acc.ig_username || !acc.ig_password) {
+        const password = decryptIgSecretOrNull(acc.ig_password)
+        const totpSecret = decryptIgSecretOrNull(acc.ig_totp_secret)
+        if (!acc.ig_username || !password) {
           send({ type: 'error', accountId, name: acc.name, message: 'Missing credentials' })
           failed++; continue
         }
@@ -57,7 +60,7 @@ export async function POST(req: NextRequest) {
           const ig = await getIgClient(accountId)
           send({ type: 'progress', accountId, name: acc.name, step: 'login' })
 
-          const loggedIn = await loginIgClient(ig, acc.ig_username, acc.ig_password, acc.ig_totp_secret)
+          const loggedIn = await loginIgClient(ig, acc.ig_username, password, totpSecret)
           await saveIgSession(accountId, ig)
           await one(`UPDATE instagram_accounts SET ig_username=$1 WHERE id=$2`, [loggedIn.username, accountId])
 

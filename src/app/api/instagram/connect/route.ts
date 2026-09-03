@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { one } from '@/lib/db'
 import { getIgClient, saveIgSession, loginIgClient } from '@/lib/ig-private-api'
+import { decryptIgSecretOrNull } from '@/lib/instagram/secrets'
 
 export async function POST(req: NextRequest) {
   try {
@@ -21,7 +22,10 @@ export async function POST(req: NextRequest) {
     const hasBrowserSession = !!acc.ig_session &&
       typeof (acc.ig_session as Record<string, unknown>).sessionid === 'string'
 
-    if (!acc.ig_username || !acc.ig_password) {
+    const password = decryptIgSecretOrNull(acc.ig_password)
+    const totpSecret = decryptIgSecretOrNull(acc.ig_totp_secret)
+
+    if (!acc.ig_username || !password) {
       if (!hasBrowserSession) {
         return NextResponse.json({ error: 'Missing credentials — set ig_username and ig_password first' }, { status: 400 })
       }
@@ -50,7 +54,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, username: user.username })
     }
 
-    const loggedIn = await loginIgClient(ig, acc.ig_username, acc.ig_password, acc.ig_totp_secret)
+    const loggedIn = await loginIgClient(ig, acc.ig_username, password, totpSecret)
     await saveIgSession(accountId, ig)
     await one(
       `UPDATE instagram_accounts SET ig_username=$1 WHERE id=$2`,
