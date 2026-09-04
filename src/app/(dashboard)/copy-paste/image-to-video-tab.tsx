@@ -278,7 +278,6 @@ export function ImageToVideoTab() {
               onChange={e => setCustomPrompt(e.target.value)}
               placeholder="Leave empty to auto-generate a prompt per image. Fill in to use this exact prompt for every clip in this batch instead."
               className="text-sm min-h-20"
-              maxLength={2000}
             />
           </div>
 

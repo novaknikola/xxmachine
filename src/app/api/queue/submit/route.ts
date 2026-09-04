@@ -1066,9 +1066,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'folderName required' }, { status: 400 })
     }
     const trimmedPrompt = String(customPrompt ?? '').trim()
-    if (trimmedPrompt.length > 2000) {
-      return NextResponse.json({ error: 'Custom prompt is too long (max 2000 characters)' }, { status: 400 })
-    }
 
     const input: SeedanceI2VJobInput = {
       items: items.map((it: SeedanceI2VItem) => ({
