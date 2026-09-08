@@ -93,48 +93,6 @@ export async function uploadToDriveFolder(
   return { id: data.id, link: data.webViewLink ?? `https://drive.google.com/file/d/${data.id}/view` }
 }
 
-/**
- * Creates a native Google Doc from plain text (Drive auto-converts on
- * upload when the metadata mimeType is google-apps.document but the body
- * is sent as text/plain) — the teacher gets an editable Doc, not a raw .txt.
- */
-export async function createGoogleDocInFolder(
-  folderId: string,
-  title: string,
-  text: string,
-  accessToken?: string,
-): Promise<{ id: string; link: string }> {
-  const token = await resolveAccessToken(accessToken)
-  const boundary = `xm_${Math.random().toString(36).slice(2)}`
-  const metadata = JSON.stringify({
-    name: title,
-    parents: [folderId],
-    mimeType: 'application/vnd.google-apps.document',
-  })
-
-  const body = Buffer.concat([
-    Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n`),
-    Buffer.from(`--${boundary}\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n`),
-    Buffer.from(text, 'utf-8'),
-    Buffer.from(`\r\n--${boundary}--`),
-  ])
-
-  const res = await fetch(
-    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,webViewLink',
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': `multipart/related; boundary=${boundary}`,
-      },
-      body,
-    },
-  )
-  const data = await res.json()
-  if (!res.ok) throw new Error(data.error?.message ?? 'Drive doc create failed')
-  return { id: data.id, link: data.webViewLink ?? `https://docs.google.com/document/d/${data.id}/edit` }
-}
-
 /** Creates a Drive folder under parentId (use "root" for My Drive). */
 export async function createDriveFolder(
   name: string,
