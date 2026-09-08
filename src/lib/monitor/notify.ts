@@ -1,6 +1,6 @@
 import { one } from '@/lib/db'
 import { sendPhoto, sendText, sendVideo } from '@/lib/telegram'
-import { sanitizeDriveKey } from '@/lib/drive-archive/paths'
+import { archiveDateKey, sanitizeDriveKey } from '@/lib/drive-archive/paths'
 
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -68,12 +68,17 @@ async function driveFolderLink(userId: string, profile: string): Promise<string 
   // character_key is stored sanitized (lowercased, non-alphanumerics collapsed),
   // so the raw profile handle has to be put through the same function or the
   // lookup silently finds nothing.
+  //
+  // Scoped to today's date_key: without it, before the async archive queue has
+  // processed this run's uploads, this silently fell back to whatever folder
+  // this character last used — even one weeks old — instead of the "not
+  // uploaded yet, omit the link" behavior the caller expects.
   const row = await one<{ folder_id: string }>(
     `SELECT folder_id FROM drive_folders
-      WHERE user_id = $1 AND character_key = $2
-      ORDER BY date_key DESC
+      WHERE user_id = $1 AND character_key = $2 AND date_key = $3
+      ORDER BY created_at DESC
       LIMIT 1`,
-    [userId, sanitizeDriveKey(profile)],
+    [userId, sanitizeDriveKey(profile), archiveDateKey()],
   )
   return row?.folder_id ? `https://drive.google.com/drive/folders/${row.folder_id}` : null
 }
