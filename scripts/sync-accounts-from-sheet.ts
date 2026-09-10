@@ -28,6 +28,7 @@ import { launchMetaAdminBrowser } from '../src/lib/meta-admin/browser'
 import { loginToMeta } from '../src/lib/meta-admin/login'
 import { addInstagramTester, MetaRateLimitedError } from '../src/lib/meta-admin/testers'
 import { connectAccountViaOAuth } from '../src/lib/instagram/auto-oauth-connect'
+import { encryptIgSecretOrNull } from '../src/lib/instagram/secrets'
 
 const SPREADSHEET_ID = '1jkurYqie-ZcuZRVCnSkSfpwWEotQG_wjs_NGJDwYWxU'
 const GOOGLE_USER_ID = 'f469a1b8-67fc-4103-8c6c-89e2873a1c7a' // novakovicbbrs@gmail.com
@@ -176,9 +177,9 @@ async function main() {
       if (!r.accountId) {
         const proxy = buildProxyUrl(r.username)
         const inserted = await one<{ id: string }>(
-          `INSERT INTO instagram_accounts (name, ig_username, ig_password, ig_totp_secret, proxy_url)
-           VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-          [r.username, r.username, r.password, r.totp, proxy],
+          `INSERT INTO instagram_accounts (name, ig_username, ig_password, ig_totp_secret, proxy_url, user_id)
+           VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+          [r.username, r.username, encryptIgSecretOrNull(r.password), encryptIgSecretOrNull(r.totp), proxy, GOOGLE_USER_ID],
         )
         r.accountId = inserted!.id
         console.log(`Imported ${r.username} -> ${r.accountId}`)

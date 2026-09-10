@@ -1,38 +1,45 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { one } from '@/lib/db'
+import { getSessionUser } from '@/lib/session'
+import { refreshAccountToken, refreshDueTokens } from '@/lib/instagram/tokens'
+
+const CRON_SECRET = process.env.CRON_SECRET
 
 export async function POST(req: NextRequest) {
   try {
-    const { accountId } = await req.json()
-    if (!accountId) return NextResponse.json({ error: 'accountId required' }, { status: 400 })
+    const body = await req.json().catch(() => ({})) as { accountId?: string }
+    const accountId = body.accountId
 
-    const account = await one<{ ig_access_token: string | null }>(
-      `SELECT ig_access_token FROM instagram_accounts WHERE id=$1`,
-      [accountId]
-    )
-    if (!account?.ig_access_token) {
-      return NextResponse.json({ error: 'Account not connected via OAuth' }, { status: 400 })
+    if (!accountId) {
+      if (!CRON_SECRET || req.headers.get('x-cron-secret') !== CRON_SECRET) {
+        return NextResponse.json({ error: 'accountId required' }, { status: 400 })
+      }
+      const result = await refreshDueTokens()
+      return NextResponse.json({ ok: true, ...result })
     }
 
-    const res = await fetch(
-      `https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=${account.ig_access_token}`
-    )
-    const data = await res.json()
-    if (!res.ok || !data.access_token) {
-      throw new Error(data.error?.message ?? 'Refresh failed')
+    const user = await getSessionUser(req)
+    if (user) {
+      const owned = await one<{ id: string }>(
+        `SELECT id FROM instagram_accounts WHERE id=$1 AND (user_id=$2 OR user_id IS NULL)`,
+        [accountId, user.id],
+      )
+      if (!owned) return NextResponse.json({ error: 'Account not found' }, { status: 404 })
+    } else if (!CRON_SECRET || req.headers.get('x-cron-secret') !== CRON_SECRET) {
+      // Public allowlist on this route is for cron loopback; interactive refresh needs a session.
+      return NextResponse.json({ error: 'unauthenticated' }, { status: 401 })
     }
 
-    const expiresIn: number = data.expires_in ?? 5184000
-    const expiresAt = new Date(Date.now() + expiresIn * 1000)
-
-    await one(
-      `UPDATE instagram_accounts SET ig_access_token=$1, ig_token_expires_at=$2 WHERE id=$3`,
-      [data.access_token, expiresAt.toISOString(), accountId]
-    )
-
-    return NextResponse.json({ ok: true, expiresAt: expiresAt.toISOString() })
+    const result = await refreshAccountToken(accountId)
+    if (!result.ok) {
+      const status = result.code === 'tester_required' || result.code === 'reconnect_required' || result.code === 'expired'
+        ? 409
+        : 500
+      return NextResponse.json({ error: result.error, code: result.code }, { status })
+    }
+    return NextResponse.json({ ok: true, expiresAt: result.expiresAt })
   } catch (err) {
-    console.error('[instagram/refresh-token]', err)
+    console.error('[instagram/refresh-token]', err instanceof Error ? err.message : err)
     return NextResponse.json({ error: String(err) }, { status: 500 })
   }
 }

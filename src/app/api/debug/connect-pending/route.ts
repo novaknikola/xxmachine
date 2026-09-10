@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { rows } from '@/lib/db'
 import { getIgClient, saveIgSession, loginIgClient } from '@/lib/ig-private-api'
 import { one } from '@/lib/db'
+import { decryptIgSecretOrNull } from '@/lib/instagram/secrets'
 
 export const maxDuration = 300
 
@@ -23,13 +24,15 @@ export async function POST() {
   const results: Array<{ name: string; username: string; ok: boolean; error?: string }> = []
 
   for (const acc of pending) {
-    if (!acc.ig_username || !acc.ig_password) {
+    const password = decryptIgSecretOrNull(acc.ig_password)
+    const totpSecret = decryptIgSecretOrNull(acc.ig_totp_secret)
+    if (!acc.ig_username || !password) {
       results.push({ name: acc.name, username: acc.ig_username ?? '?', ok: false, error: 'Missing credentials' })
       continue
     }
     try {
       const ig = await getIgClient(acc.id)
-      const loggedIn = await loginIgClient(ig, acc.ig_username, acc.ig_password, acc.ig_totp_secret)
+      const loggedIn = await loginIgClient(ig, acc.ig_username, password, totpSecret)
       await saveIgSession(acc.id, ig)
       await one(`UPDATE instagram_accounts SET ig_username=$1 WHERE id=$2`, [loggedIn.username, acc.id])
       results.push({ name: acc.name, username: loggedIn.username, ok: true })

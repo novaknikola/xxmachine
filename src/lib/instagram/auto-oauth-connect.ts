@@ -2,6 +2,9 @@ import fs from 'fs'
 import path from 'path'
 import { one } from '@/lib/db'
 import { getCharacterBrowserConfig, launchWithConfig } from '@/lib/browser-launcher'
+import { decryptIgSecretOrNull } from '@/lib/instagram/secrets'
+import { issueOAuthState } from '@/lib/instagram/oauth-state'
+import { getInstagramAppCredentials } from '@/lib/instagram/app-credentials'
 import { autoLoginInstagram, acceptInstagramTesterInvite, authorizeMetaOAuth } from '@/lib/ig-auto-login'
 
 const DEBUG_DIR = '/root/ig-oauth-debug'
@@ -11,10 +14,9 @@ async function debugScreenshot(page: import('playwright-core').Page, accountId: 
   await page.screenshot({ path: path.join(DEBUG_DIR, `${accountId}-${Date.now()}-${name}.png`), fullPage: true }).catch(() => {})
 }
 
-function buildOAuthUrl(accountId: string): string {
-  const appId = process.env.INSTAGRAM_APP_ID
+function buildOAuthUrl(appId: string, state: string): string {
   const redirectUri = process.env.INSTAGRAM_REDIRECT_URI
-  if (!appId || !redirectUri) throw new Error('INSTAGRAM_APP_ID / INSTAGRAM_REDIRECT_URI not set')
+  if (!redirectUri) throw new Error('INSTAGRAM_REDIRECT_URI not set')
 
   const params = new URLSearchParams({
     client_id: appId,
@@ -22,7 +24,7 @@ function buildOAuthUrl(accountId: string): string {
     scope: 'instagram_business_basic,instagram_business_content_publish,instagram_business_manage_insights',
     response_type: 'code',
     force_reauth: 'true',
-    state: accountId,
+    state,
   })
   return `https://www.instagram.com/oauth/authorize?${params.toString()}`
 }
@@ -37,16 +39,25 @@ function buildOAuthUrl(accountId: string): string {
  * run is diagnosable if they're wrong, same as the meta-admin login work.
  */
 export async function connectAccountViaOAuth(accountId: string): Promise<{ username: string }> {
-  const acc = await one<{ ig_username: string | null; ig_password: string | null; ig_totp_secret: string | null }>(
-    `SELECT ig_username, ig_password, ig_totp_secret FROM instagram_accounts WHERE id=$1`,
+  const acc = await one<{
+    ig_username: string | null
+    ig_password: string | null
+    ig_totp_secret: string | null
+    user_id: string | null
+  }>(
+    `SELECT ig_username, ig_password, ig_totp_secret, user_id FROM instagram_accounts WHERE id=$1`,
     [accountId],
   )
-  if (!acc?.ig_username || !acc.ig_password) throw new Error('Account has no ig_username/ig_password saved')
+  const password = decryptIgSecretOrNull(acc?.ig_password)
+  if (!acc?.ig_username || !password) throw new Error('Account has no ig_username/ig_password saved')
+  if (!acc.user_id) throw new Error('Account has no user_id — cannot start OAuth')
+  const { appId } = await getInstagramAppCredentials(acc.user_id)
+  const state = await issueOAuthState({ accountId, userId: acc.user_id })
 
   const config = await getCharacterBrowserConfig(accountId)
   const { context, page } = await launchWithConfig(config)
 
-  const creds = { username: acc.ig_username, password: acc.ig_password, totpSecret: acc.ig_totp_secret }
+  const creds = { username: acc.ig_username, password, totpSecret: decryptIgSecretOrNull(acc.ig_totp_secret) }
 
   try {
     try {
@@ -78,7 +89,7 @@ export async function connectAccountViaOAuth(accountId: string): Promise<{ usern
     await acceptInstagramTesterInvite(page).catch(() => {})
     await debugScreenshot(page, accountId, '01b-after-tester-invite-check')
 
-    const oauthUrl = buildOAuthUrl(accountId)
+    const oauthUrl = buildOAuthUrl(appId, state)
     await authorizeMetaOAuth(page, oauthUrl, creds)
     await debugScreenshot(page, accountId, '02-after-authorize')
 

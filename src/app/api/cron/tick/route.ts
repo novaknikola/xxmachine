@@ -8,6 +8,7 @@ import { processDriveExports } from '@/lib/drive-archive/process'
 import { internalBaseUrl } from '@/lib/internal-url'
 import { syncPoseLibraryFromPinterest, reapStaleAdhocJobs } from '@/lib/pose-recreate-sync'
 import { notifyMonitorUser } from '@/lib/monitor/notify'
+import { refreshDueTokens } from '@/lib/instagram/tokens'
 
 const CRON_SECRET = process.env.CRON_SECRET
 const QUEUE_CONCURRENCY = 2
@@ -61,14 +62,10 @@ export async function GET(req: NextRequest) {
     ),
   )
 
-  // Instagram token refresh (tokens expiring within 7 days)
-  if (dueReels.length > 0 || Math.random() < 0.1) {
-    fetch(`${base}/api/instagram/refresh-token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    }).catch(() => {})
-  }
+  // Instagram token refresh around day 45 of the 60-day life.
+  // Staggered batch (not one cron slot for 100+ accounts). Fire-and-forget
+  // so a slow Meta round-trip cannot truncate the rest of this tick.
+  refreshDueTokens().catch(err => console.error('[cron/tick] ig token refresh:', err))
 
   // Facebook Reels queue (Video Reels API) — same due-item model as the
   // Instagram queue above, separate table/route since Facebook publishing

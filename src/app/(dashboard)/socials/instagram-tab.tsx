@@ -17,6 +17,7 @@ import {
 } from '@/components/ui/select'
 import { toast } from 'sonner'
 import { prettyAccountName } from '@/lib/utils'
+import { oauthErrorForUi, tokenStatusLabel, type TokenStatus } from '@/lib/instagram/oauth-errors'
 import {
   Clapperboard,
   HardDrive,
@@ -76,6 +77,9 @@ browser_connected?: boolean
   published_count?: number
   pending_count?: number
   failed_count?: number
+  token_status?: TokenStatus | string
+  token_status_reason?: string | null
+  publish_paused?: boolean
 }
 
 interface QueueItem {
@@ -145,7 +149,7 @@ export function InstagramTab() {
   const [showAddForm, setShowAddForm] = useState(false)
   const [addForm, setAddForm] = useState({ name: '', username: '', password: '', totp: '', proxy: '' })
   const [addingAccount, setAddingAccount] = useState(false)
-  const [openBrowserRunning, setOpenBrowserRunning] = useState(false)
+  const [connectingNew, setConnectingNew] = useState(false)
   const [sheetSync, setSheetSync] = useState<{
     running: boolean
     startedAt: string | null
@@ -178,7 +182,7 @@ export function InstagramTab() {
       loadAccounts()
       window.history.replaceState({}, '', window.location.pathname)
     } else if (params.get('instagram_error')) {
-      toast.error(`Instagram error: ${params.get('instagram_error')}`)
+      toast.error(oauthErrorForUi(params.get('instagram_error')))
       window.history.replaceState({}, '', window.location.pathname)
     } else if (params.get('google_connected')) {
       toast.success('Google Drive connected!')
@@ -230,9 +234,14 @@ export function InstagramTab() {
   }, [])
   
   function connectWithInstagramApi(id = accountId) {
-  if (!id) return
-  window.location.href = `/api/instagram/oauth?accountId=${id}`
-}
+    if (!id) return
+    window.location.href = `/api/instagram/oauth?accountId=${id}`
+  }
+
+  function connectNewAccountInBrowser() {
+    setConnectingNew(true)
+    window.location.href = '/api/instagram/oauth'
+  }
   async function refreshToken() {
     if (!accountId) return
     setRefreshingToken(true)
@@ -678,32 +687,16 @@ export function InstagramTab() {
 
           {tab === 'queue' && (
             <>
-              {/* Connect new account via browser — always accessible */}
+              {/* Connect new account — opens Instagram login in THIS browser (phone-safe). */}
               <Button
                 variant="outline"
                 className="w-full border-pink-500/40 text-pink-400 hover:bg-pink-500/10 text-xs"
-                disabled={openBrowserRunning}
-                onClick={async () => {
-                  setOpenBrowserRunning(true)
-                  toast.info('Opening Chrome... log in to Instagram, window closes automatically.', { duration: 15000 })
-                  try {
-                    await fetch('/api/instagram/open-browser', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) })
-                    const poll = setInterval(async () => {
-                      const s = await fetch('/api/instagram/open-browser').then(r => r.json())
-                      if (!s.active) {
-                        clearInterval(poll)
-                        setOpenBrowserRunning(false)
-                        if (s.done) { toast.success('Account connected!'); loadAccounts() }
-                        else if (s.error) toast.error(s.error)
-                        else toast.info('Browser closed without login')
-                      }
-                    }, 3000)
-                  } catch { setOpenBrowserRunning(false) }
-                }}
+                disabled={connectingNew}
+                onClick={connectNewAccountInBrowser}
               >
-                {openBrowserRunning
-                  ? <><Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" />Browser open — log in...</>
-                  : <><Monitor className="w-3.5 h-3.5 mr-2" />Connect new account via Browser</>
+                {connectingNew
+                  ? <><Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" />Opening Instagram…</>
+                  : <><Link2 className="w-3.5 h-3.5 mr-2" />Connect new account</>
                 }
               </Button>
 
@@ -729,6 +722,20 @@ export function InstagramTab() {
                 return (
                   <div className="space-y-2">
                     <p className="text-xs font-medium text-muted-foreground">Instagram Auth</p>
+                    {acc?.graph_connected && (
+                      <div className={`flex items-center gap-1.5 text-xs rounded-lg px-3 py-2 ${
+                        acc.token_status === 'reconnect_required' || acc.token_status === 'expired' || acc.publish_paused
+                          ? 'text-destructive bg-destructive/10'
+                          : acc.token_status === 'refreshing'
+                            ? 'text-yellow-400 bg-yellow-500/10'
+                            : 'text-green-400 bg-green-500/10'
+                      }`}>
+                        {tokenStatusLabel(acc.token_status)}
+                      </div>
+                    )}
+                    {(acc?.token_status_reason && (acc.publish_paused || acc.token_status === 'reconnect_required' || acc.token_status === 'expired')) && (
+                      <p className="text-[11px] text-destructive leading-relaxed">{acc.token_status_reason}</p>
+                    )}
                     {daysLeft !== null && daysLeft <= 7 && (
                       <div className="flex items-center gap-1.5 text-xs text-yellow-400 bg-yellow-500/10 rounded-lg px-3 py-2">
                         <AlertTriangle className="w-3.5 h-3.5 shrink-0" />

@@ -1,5 +1,8 @@
 export const runtime = 'nodejs'
 
+// Admin / bulk helper only. The production /socials "Connect new account" and
+// Reconnect buttons open /api/instagram/oauth in the end user's browser.
+
 import { NextRequest, NextResponse } from 'next/server'
 import { spawn, ChildProcess } from 'child_process'
 import path from 'path'

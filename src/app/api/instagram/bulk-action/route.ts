@@ -13,7 +13,12 @@ export async function POST(req: NextRequest) {
 
     if (action === 'disconnect') {
       await query(
-        `UPDATE instagram_accounts SET ig_session = NULL, ig_access_token = NULL WHERE id IN (${ids})`,
+        `UPDATE instagram_accounts SET ig_session = NULL, ig_access_token = NULL,
+            ig_token_status = 'reconnect_required',
+            ig_token_status_reason = 'Disconnected',
+            ig_publish_paused = TRUE,
+            ig_token_app_id = NULL
+         WHERE id IN (${ids})`,
         accountIds,
       )
     } else if (action === 'clear-proxy') {
@@ -23,7 +28,12 @@ export async function POST(req: NextRequest) {
       )
     } else if (action === 'disconnect-and-clear-proxy') {
       await query(
-        `UPDATE instagram_accounts SET ig_session = NULL, ig_access_token = NULL, proxy_url = NULL WHERE id IN (${ids})`,
+        `UPDATE instagram_accounts SET ig_session = NULL, ig_access_token = NULL, proxy_url = NULL,
+            ig_token_status = 'reconnect_required',
+            ig_token_status_reason = 'Disconnected',
+            ig_publish_paused = TRUE,
+            ig_token_app_id = NULL
+         WHERE id IN (${ids})`,
         accountIds,
       )
     } else if (action === 'delete') {
