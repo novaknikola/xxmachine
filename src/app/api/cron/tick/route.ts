@@ -3,6 +3,7 @@ import { rows, one, query } from '@/lib/db'
 import { fetchAllStats } from '@/lib/stats'
 import { runDueProfileScans } from '@/lib/monitor/process-item'
 import { runDailyAutoSchedule } from '@/lib/instagram/auto-schedule'
+import { runDailyFacebookAutoSchedule } from '@/lib/facebook/auto-schedule'
 import { processDriveExports } from '@/lib/drive-archive/process'
 import { internalBaseUrl } from '@/lib/internal-url'
 import { syncPoseLibraryFromPinterest, reapStaleAdhocJobs } from '@/lib/pose-recreate-sync'
@@ -68,6 +69,28 @@ export async function GET(req: NextRequest) {
       body: JSON.stringify({}),
     }).catch(() => {})
   }
+
+  // Facebook Reels queue (Video Reels API) — same due-item model as the
+  // Instagram queue above, separate table/route since Facebook publishing
+  // uses a 3-step upload+finish flow instead of a media container.
+  const dueFacebookReels = await rows<{ id: string }>(
+    `SELECT id FROM facebook_queue
+     WHERE status='pending' AND scheduled_at IS NOT NULL AND scheduled_at <= now()`,
+  )
+  const facebookReelResults = await Promise.allSettled(
+    dueFacebookReels.map(r =>
+      fetch(`${base}/api/facebook/publish-reel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ queueItemId: r.id }),
+      }),
+    ),
+  )
+
+  // Facebook daily auto-schedule — same fire-and-forget reasoning as the
+  // Instagram one below (a full account/page loop must not risk truncating
+  // the rest of this tick request).
+  runDailyFacebookAutoSchedule().catch(err => console.error('[cron/tick] facebook auto-schedule error:', err))
 
   // Instagram daily auto-schedule — draws unqueued Drive videos per connected
   // account, inserts as 'pending_approval' (own-folder accounts) or 'pending'
@@ -451,6 +474,7 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({
     posts: { processed: due.length, results: postResults.map(r => r.status) },
     reels: { processed: dueReels.length, results: reelResults.map(r => r.status) },
+    facebookReels: { processed: dueFacebookReels.length, results: facebookReelResults.map(r => r.status) },
     stats: statsResult,
     queue: { started: queueStarted, comfyuiStarted: comfyStarted, podHealthChecked },
     orphanedClassified,

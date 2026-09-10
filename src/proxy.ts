@@ -45,6 +45,10 @@ const PUBLIC_API_PREFIXES = [
   // Same class of bug, same fix — Fanvue redirects the browser back here with a
   // one-time `code`, its own signature that this is a legitimate OAuth completion.
   '/api/fanvue/callback',
+  // Same class of bug, same fix — Facebook's own Login for Business dialog
+  // redirects the browser back here with a one-time `code`; that browser
+  // has no reason to carry the xxmachine dashboard's session cookie either.
+  '/api/facebook/oauth/callback',
   // Same class of bug, same silent-401-with-no-server-log symptom, found
   // live 2026-08-14: cron/tick's own internal loopback calls to these three
   // routes carry no session cookie and no secret header, so every due
@@ -58,6 +62,14 @@ const PUBLIC_API_PREFIXES = [
   '/api/publish/now',
   '/api/instagram/publish-reel',
   '/api/instagram/refresh-token',
+  // Same class of bug, same fix, found live 2026-09-09 while auditing the
+  // new Facebook Reels planner before its first deploy: cron/tick's
+  // self-fetch to this route carries no session cookie either, so every
+  // due Facebook Reel was silently 401'd at the edge and never even
+  // reached the route — confirmed by 3 already-overdue queue rows sitting
+  // at status='pending' with zero server log trace of the route ever
+  // running. Same UUID-gated reasoning as the Instagram entry above.
+  '/api/facebook/publish-reel',
   // The browser extension has no dashboard session cookie to send (it's a
   // cross-site request from the extension's own origin) — it authenticates
   // itself with a bearer token instead, checked inside the route.
