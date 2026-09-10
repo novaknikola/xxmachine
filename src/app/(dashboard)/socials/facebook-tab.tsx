@@ -120,9 +120,13 @@ export function FacebookTab() {
     }
   }, [loadPages])
 
-  const loadQueue = useCallback(async () => {
+  // `silent` skips the loadingQueue spinner (which otherwise replaces the
+  // whole list) — used for the background poll below and for post-publish
+  // refreshes, where flashing the entire card list away and back every few
+  // seconds would be worse than the staleness it's fixing.
+  const fetchQueue = useCallback(async (silent = false) => {
     if (!pageId) return
-    setLoadingQueue(true)
+    if (!silent) setLoadingQueue(true)
     try {
       const params = new URLSearchParams({ pageId })
       if (categoryFilter !== '__all__') params.set('category', categoryFilter)
@@ -130,11 +134,25 @@ export function FacebookTab() {
       const data = await res.json()
       setQueue(Array.isArray(data) ? data : (data.items ?? []))
       if (data.categories) setCategories(data.categories)
-    } catch { toast.error('Failed to load queue') }
-    finally { setLoadingQueue(false) }
+    } catch { if (!silent) toast.error('Failed to load queue') }
+    finally { if (!silent) setLoadingQueue(false) }
   }, [pageId, categoryFilter])
 
+  const loadQueue = useCallback(() => fetchQueue(false), [fetchQueue])
+
   useEffect(() => { loadQueue() }, [loadQueue])
+
+  // Poll while anything is actively publishing — covers cron's own
+  // scheduled auto-publish too, not just this browser's "Post now" click,
+  // so a card never looks stuck on a stale "Scheduled"/spinner state for
+  // the full 30-90s a real publish (Drive download + transcode + Facebook
+  // upload) takes. Confirmed live 2026-09-10: a failed attempt still left
+  // the card reading "Scheduled" until a manual page reload.
+  useEffect(() => {
+    if (!queue.some(q => q.status === 'publishing')) return
+    const interval = setInterval(() => fetchQueue(true), 4000)
+    return () => clearInterval(interval)
+  }, [queue, fetchQueue])
 
   async function addPage() {
     if (!addPageForm.name.trim() || !addPageForm.pageId.trim() || !addPageForm.accessToken.trim()) return
@@ -270,9 +288,14 @@ export function FacebookTab() {
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
       toast.success('Reel published!')
-      loadQueue()
+      fetchQueue(true)
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : 'Publish failed')
+      // Without this, a failed publish left the card showing its old
+      // "Scheduled" badge until a manual page refresh — the button's own
+      // spinner stopped (see finally below) but nothing on screen showed
+      // the row had actually flipped to 'failed' with a real error message.
+      fetchQueue(true)
     } finally { setPublishing(null) }
   }
 
