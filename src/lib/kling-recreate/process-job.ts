@@ -6,6 +6,7 @@ import { sendPhoto, sendText, sendVideo } from '@/lib/telegram-recreate'
 import { analyzeOneFpsVideo, renderRecreateKeyframePrompt } from './analyze'
 import { extractOneFpsFrames } from './frames'
 import { bankFreshIdeas } from './ideas'
+import { syncKlingAnalysisSheetSafe } from './sheet-sync'
 import {
   buildKlingI2VPayload,
   clampKlingDuration,
@@ -143,6 +144,15 @@ export async function processKlingRecreateJob(opts: {
 
   if (row.kling_video_url) {
     await heartbeat(opts.queueJobId, 'done', { progress: 100, cached: true })
+    await syncKlingAnalysisSheetSafe({
+      jobId: row.id,
+      sourceUrl: row.source_url,
+      durationSec: row.duration_sec,
+      context: (row.context ?? null) as KlingVideoContext | null,
+      masterPrompt: row.master_prompt,
+      status: 'done',
+      klingVideoUrl: row.kling_video_url,
+    })
     return { ok: true, videoUrl: row.kling_video_url, cached: true }
   }
 
@@ -207,6 +217,15 @@ export async function processKlingRecreateJob(opts: {
       master_prompt: masterPrompt,
     })
     await heartbeat(opts.queueJobId, 'analyzed', { progress: 45 })
+    await syncKlingAnalysisSheetSafe({
+      jobId: row.id,
+      sourceUrl: row.source_url,
+      durationSec: sourceDuration,
+      context,
+      masterPrompt,
+      status: 'analyzing',
+      klingVideoUrl: row.kling_video_url,
+    })
     await notify(
       chatId,
       `🧠 Analysis stored — ${analysis.frames.length} frames @ 1fps` +
@@ -214,6 +233,15 @@ export async function processKlingRecreateJob(opts: {
     )
     await ideasPromise
   } else {
+    await syncKlingAnalysisSheetSafe({
+      jobId: row.id,
+      sourceUrl: row.source_url,
+      durationSec: sourceDuration,
+      context,
+      masterPrompt,
+      status: row.status,
+      klingVideoUrl: row.kling_video_url,
+    })
     const already = await one<{ n: number }>(
       `SELECT count(*)::int AS n FROM kling_idea_bank WHERE job_id = $1`,
       [row.id],
@@ -326,6 +354,15 @@ export async function processKlingRecreateJob(opts: {
     error: null,
   })
   await heartbeat(opts.queueJobId, 'done', { progress: 100, videoUrl: hosted })
+  await syncKlingAnalysisSheetSafe({
+    jobId: row.id,
+    sourceUrl: row.source_url,
+    durationSec: sourceDuration,
+    context,
+    masterPrompt,
+    status: 'done',
+    klingVideoUrl: hosted,
+  })
 
   if (chatId != null) {
     const caption =

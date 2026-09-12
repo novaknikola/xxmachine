@@ -53,8 +53,8 @@ export async function insertIdeaBankRows(
   userId: string,
   jobId: string | null,
   ideas: HashedIdea[],
-): Promise<number> {
-  let inserted = 0
+): Promise<HashedIdea[]> {
+  const inserted: HashedIdea[] = []
   for (const idea of ideas) {
     const result = await query(
       `INSERT INTO kling_idea_bank (user_id, job_id, niche, prompt, uniqueness_hash)
@@ -62,7 +62,7 @@ export async function insertIdeaBankRows(
        ON CONFLICT (user_id, uniqueness_hash) DO NOTHING`,
       [userId, jobId, idea.niche, idea.prompt, idea.hash],
     )
-    inserted += result.rowCount ?? 0
+    if ((result.rowCount ?? 0) > 0) inserted.push(idea)
   }
   return inserted
 }
@@ -163,5 +163,14 @@ export async function bankFreshIdeas(opts: {
   const generated = await generateFreshIdeas(opts)
   const fresh = filterNewIdeas(generated, existing)
   if (!fresh.length) return 0
-  return insertIdeaBankRows(opts.userId, opts.jobId, fresh)
+  const inserted = await insertIdeaBankRows(opts.userId, opts.jobId, fresh)
+  if (inserted.length) {
+    const { syncKlingIdeasSheetSafe } = await import('./sheet-sync')
+    await syncKlingIdeasSheetSafe({
+      ideas: inserted,
+      sourceUrl: opts.sourceUrl,
+      jobId: opts.jobId,
+    })
+  }
+  return inserted.length
 }
