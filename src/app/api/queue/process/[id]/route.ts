@@ -39,6 +39,8 @@ import {
 import { runI2vItem, runAnimateItem, runTalkItem } from '@/lib/my-pod/runners'
 import { fishTts } from '@/lib/my-pod/fish-tts'
 import { replicateCopyPasteItem } from '@/lib/monitor/process-item'
+import { processKlingRecreateJob } from '@/lib/kling-recreate/process-job'
+import type { KlingRecreateQueueInput } from '@/lib/kling-recreate/types'
 
 interface ComfyUIRow {
   prompt: string
@@ -2009,6 +2011,31 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ ok: true, done: doneCount })
     }
 
+    // ── kling_recreate_v1 — IG reel → 1fps analysis → still → Kling 3.0 i2v ─
+    if (job.job_type === 'kling_recreate_v1') {
+      const input = job.input as unknown as KlingRecreateQueueInput
+      if (!input?.recreateJobId) throw new Error('kling_recreate_v1 input missing recreateJobId')
+
+      const result = await processKlingRecreateJob({
+        queueJobId: id,
+        userId: job.user_id,
+        input,
+      })
+
+      await query(
+        `UPDATE generation_queue SET status='done', finished_at=now(), progress=100,
+                output = coalesce(output, '{}'::jsonb) || $2::jsonb
+          WHERE id=$1`,
+        [id, JSON.stringify({
+          videoUrl: result.videoUrl ?? null,
+          cached: result.cached ?? false,
+          progressAt: new Date().toISOString(),
+          stage: 'done',
+        })],
+      )
+      return NextResponse.json({ ok: true, cached: result.cached ?? false })
+    }
+
     // Unknown job type
     await query(
       `UPDATE generation_queue SET status='failed', error=$1, finished_at=now() WHERE id=$2`,
@@ -2031,6 +2058,18 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       if (job.job_type === 'video_repurpose' && repurposeInput?.archiveToDrive) {
         const { notifyRepurposeFailed } = await import('@/lib/monitor/notify')
         await notifyRepurposeFailed(job.user_id, errMsg, repurposeInput.videoName).catch(() => {})
+      }
+      if (job.job_type === 'kling_recreate_v1') {
+        const input = job.input as { recreateJobId?: string; chatId?: number }
+        await query(
+          `UPDATE kling_recreate_jobs SET status='failed', error=$2, updated_at=now()
+            WHERE id=$1 AND status <> 'done'`,
+          [input.recreateJobId, errMsg],
+        ).catch(() => {})
+        if (input.chatId != null) {
+          const { sendText } = await import('@/lib/telegram-recreate')
+          await sendText(input.chatId, `❌ Recreate failed: ${errMsg.slice(0, 300)}`).catch(() => {})
+        }
       }
     } else {
       await query(

@@ -1,5 +1,5 @@
 /**
- * Telegram helpers for the pose-recreate bot (@contentreplicatorbot).
+ * Telegram helpers for the Kling 3.0 recreate bot (@contentreplicatorbot).
  * Deliberately a separate file/token from lib/telegram.ts (the Copy-Paste
  * bot) — same shape, but nothing here is shared code, so nothing here can
  * regress the existing bot.
@@ -43,6 +43,19 @@ export async function sendPhoto(
     caption,
     parse_mode: 'HTML',
     ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+  })
+}
+
+export async function sendVideo(
+  chatId: string | number,
+  videoUrl: string,
+  caption: string,
+) {
+  return call('sendVideo', {
+    chat_id: chatId,
+    video: videoUrl,
+    caption,
+    parse_mode: 'HTML',
   })
 }
 
@@ -118,77 +131,53 @@ export async function downloadTelegramFile(fileId: string): Promise<{
   }
 }
 
-/**
- * Short codes kept under Telegram's 64-byte callback_data limit. 'reels' is
- * deliberately not offered here yet — this pipeline only produces a still
- * image (Seedream Edit), and a Reel button that silently hands back a photo
- * would be misleading. content_format still accepts 'reels' in pose_library
- * so import can start now; the generation step catches up later.
- */
-export const FORMAT_CODES = {
-  p: 'posts', s: 'stories', c: 'carousels', fs: 'fanvue_sfw', fn: 'fanvue_nsfw',
-} as const
-export type FormatCode = keyof typeof FORMAT_CODES
-
-export const FORMAT_LABELS: Record<FormatCode, string> = {
-  p: '🖼️ Post', s: '📖 Story', c: '🎠 Carousel', fs: '🔥 Fanvue SFW', fn: '🔞 Fanvue NSFW',
-}
-
-/** Entry point: /recreate. 2-column grid, same visual language as BringSMS-style menus. */
-export function recreateMenuKeyboard() {
-  return {
-    inline_keyboard: [
-      [{ text: FORMAT_LABELS.p, callback_data: 'rc:fmt:p' }, { text: FORMAT_LABELS.s, callback_data: 'rc:fmt:s' }],
-      [{ text: FORMAT_LABELS.c, callback_data: 'rc:fmt:c' }],
-      [{ text: FORMAT_LABELS.fs, callback_data: 'rc:fmt:fs' }, { text: FORMAT_LABELS.fn, callback_data: 'rc:fmt:fn' }],
-    ],
-  }
-}
-
-/**
- * Per-image cost — WaveSpeed's own Seedream Edit pricing ($0.045 base +
- * $0.003/extra image at 1k), same figure Copy-Paste v2's cost-estimate.ts
- * already uses (confirmed live against WaveSpeed's model page 2026-08-02).
- * Two images in (pose + reference) = one "extra" image beyond the base.
- */
-export const PER_IMAGE_COST_USD = 0.048
-
-export const COUNT_CHOICES = [1, 5, 10, 20] as const
-
-/**
- * Carousel: each drawn pose also gets this many extra variant slides (same
- * shot, different angle/crop — Seedream Edit on the base output, the
- * existing resolveCarouselVariantPrompts mechanism copy_prompts_generate
- * already runs when carousel.enabled is set). Chosen over independent poses
- * per slide per the user's explicit call — see conversation.
- */
-export const CAROUSEL_VARIANT_COUNT = 2
-
-/**
- * Asked right after the reference photo lands — how many poses to draw at
- * once. slidesPerPose > 1 (carousel: each pose also gets N variant slides)
- * multiplies the shown price so the button never understates real cost.
- */
-export function countKeyboard(slidesPerPose = 1) {
-  const btn = (n: number) => ({
-    text: `${n} ($${(n * slidesPerPose * PER_IMAGE_COST_USD).toFixed(2)})`,
-    callback_data: `rc:cnt:${n}`,
-  })
-  return {
-    inline_keyboard: [
-      [btn(COUNT_CHOICES[0]), btn(COUNT_CHOICES[1])],
-      [btn(COUNT_CHOICES[2]), btn(COUNT_CHOICES[3])],
-      [{ text: '✖️ Cancel', callback_data: 'rc:cancel' }],
-    ],
-  }
-}
-
-/** Asked once the count is picked — same Skip/Add text choice Copy-Paste offers per batch. */
-export function promptChoiceKeyboard() {
+export function confirmRecreateKeyboard(urlCount: number) {
+  const n = Math.max(1, urlCount)
   return {
     inline_keyboard: [[
-      { text: '⏭ Skip', callback_data: 'rc:pskip' },
-      { text: '✍️ Add prompt', callback_data: 'rc:padd' },
+      { text: `▶️ Recreate ${n} reel${n === 1 ? '' : 's'}`, callback_data: 'kr:go' },
+      { text: '✖️ Cancel', callback_data: 'kr:cancel' },
     ]],
+  }
+}
+
+export function settingsKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: 'Std', callback_data: 'kr:set:variant:std' },
+        { text: 'Pro', callback_data: 'kr:set:variant:pro' },
+        { text: '4K', callback_data: 'kr:set:variant:4k' },
+      ],
+      [
+        { text: 'Dur auto', callback_data: 'kr:set:dur:auto' },
+        { text: '3s', callback_data: 'kr:set:dur:3' },
+        { text: '5s', callback_data: 'kr:set:dur:5' },
+        { text: '10s', callback_data: 'kr:set:dur:10' },
+        { text: '15s', callback_data: 'kr:set:dur:15' },
+      ],
+      [
+        { text: 'Sound on', callback_data: 'kr:set:sound:on' },
+        { text: 'Sound off', callback_data: 'kr:set:sound:off' },
+      ],
+      [
+        { text: 'CFG 0.3', callback_data: 'kr:set:cfg:0.3' },
+        { text: '0.5', callback_data: 'kr:set:cfg:0.5' },
+        { text: '0.7', callback_data: 'kr:set:cfg:0.7' },
+        { text: '1.0', callback_data: 'kr:set:cfg:1' },
+      ],
+      [
+        { text: 'Shot customize', callback_data: 'kr:set:shot:customize' },
+        { text: 'Intelligence', callback_data: 'kr:set:shot:intelligence' },
+      ],
+      [
+        { text: '✍️ Negative prompt', callback_data: 'kr:set:neg' },
+        { text: 'Clear neg', callback_data: 'kr:set:negclear' },
+      ],
+      [
+        { text: '🧩 Element IDs', callback_data: 'kr:set:els' },
+        { text: 'Clear elements', callback_data: 'kr:set:elsclear' },
+      ],
+    ],
   }
 }
