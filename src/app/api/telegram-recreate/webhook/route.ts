@@ -4,7 +4,7 @@ import {
   sendText, answerCallbackQuery, editMessageReplyMarkup, editMessageText,
   confirmRecreateKeyboard, settingsKeyboard,
 } from '@/lib/telegram-recreate'
-import { addUrlsToPending, attachPhotoFromTelegram, clearPending, getPending, setAwaiting } from '@/lib/kling-recreate/pending'
+import { addUrlsToPending, attachPhotoFromTelegram, claimPending, clearPending, getPending, setAwaiting } from '@/lib/kling-recreate/pending'
 import { enqueueKlingRecreateJobs } from '@/lib/kling-recreate/enqueue'
 import { formatSettingsHtml, getKlingSettings, saveKlingSettings } from '@/lib/kling-recreate/settings'
 import type { KlingUserSettings } from '@/lib/kling-recreate/types'
@@ -185,7 +185,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true })
       }
       if (pending?.awaiting === 'elements') {
-        const ids = message.text.split(/[\s,]+/).map(s => s.trim()).filter(Boolean).slice(0, 3)
+        const ids = String(message.text).split(/[\s,]+/).map((token: string) => token.trim()).filter(Boolean).slice(0, 3)
         await saveKlingSettings(userId, { element_list: ids })
         await setAwaiting(chatId, null)
         await sendText(chatId, formatSettingsHtml(await getKlingSettings(userId)), settingsKeyboard())
@@ -225,14 +225,18 @@ export async function POST(req: NextRequest) {
       }
 
       if (parts[1] === 'go') {
-        const pending = await getPending(chatId)
-        const urls = pending?.urls ?? []
-        const reference = pending?.photo_url || await defaultReference(userId)
+        const open = await getPending(chatId)
+        const urls = open?.urls ?? []
+        const reference = open?.photo_url || await defaultReference(userId)
         if (!urls.length || !reference) {
           await answerCallbackQuery(cb.id, 'Need a photo and at least one reel URL')
           return NextResponse.json({ ok: true })
         }
-        await clearPending(chatId)
+        const pending = await claimPending(chatId)
+        if (!pending) {
+          await answerCallbackQuery(cb.id, 'Already queued')
+          return NextResponse.json({ ok: true })
+        }
         await answerCallbackQuery(cb.id, 'Queued…')
         if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
         const settings = await getKlingSettings(userId)

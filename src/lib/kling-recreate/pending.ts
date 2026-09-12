@@ -111,3 +111,13 @@ export async function setAwaiting(chatId: number, awaiting: string | null): Prom
     [chatId, awaiting],
   )
 }
+
+/** Atomically take the open batch so a double-tap Confirm cannot enqueue twice. */
+export async function claimPending(chatId: number): Promise<RecreatePending | null> {
+  return one<RecreatePending>(
+    `DELETE FROM telegram_recreate_pending
+      WHERE chat_id = $1 AND coalesce(array_length(urls, 1), 0) > 0
+      RETURNING chat_id, user_id, photo_url, urls, awaiting`,
+    [chatId],
+  )
+}
