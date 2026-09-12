@@ -87,6 +87,8 @@ export interface KlingRecreateJobRow {
   settings: KlingUserSettings | Record<string, unknown>
   status: KlingRecreateStatus
   error: string | null
+  parent_job_id?: string | null
+  variation_note?: string | null
 }
 
 export const MAX_RECREATE_URLS = 30

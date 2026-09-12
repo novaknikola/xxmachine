@@ -2,7 +2,7 @@ import { one, query } from '@/lib/db'
 import { getUserApiKey } from '@/lib/user-config'
 import { generateCopyPasteKeyframe } from '@/lib/monitor/replicate'
 import { uploadImageFromUrl } from '@/lib/supabase-storage'
-import { sendPhoto, sendText, sendVideo } from '@/lib/telegram-recreate'
+import { sendPhoto, sendText, sendVideo, variationChoiceKeyboard } from '@/lib/telegram-recreate'
 import { analyzeOneFpsVideo, renderRecreateKeyframePrompt } from './analyze'
 import { extractOneFpsFrames } from './frames'
 import { bankFreshIdeas } from './ideas'
@@ -17,6 +17,7 @@ import {
 import { prepareKlingImage } from './kling-image'
 import { resolveRecreateVideoUrl } from './scrape'
 import { normalizeSettings } from './settings'
+import { applyVariationToKlingInput, variationSkipsUpstream } from './variation'
 import type {
   KlingRecreateJobRow,
   KlingRecreateQueueInput,
@@ -128,6 +129,23 @@ async function notify(chatId: number | string | null | undefined, text: string) 
   )
 }
 
+async function sendDoneVideo(
+  chatId: number | string | null | undefined,
+  jobId: string,
+  videoUrl: string,
+  caption: string,
+) {
+  if (chatId == null) return
+  const keyboard = variationChoiceKeyboard(jobId)
+  try {
+    await sendVideo(chatId, videoUrl, caption, keyboard)
+  } catch {
+    await sendText(chatId, `${caption}\n${escapeHtml(videoUrl)}`, keyboard).catch(err =>
+      console.error('[kling-recreate] variation follow-up failed:', err),
+    )
+  }
+}
+
 export async function processKlingRecreateJob(opts: {
   queueJobId: string
   userId: string
@@ -154,6 +172,56 @@ export async function processKlingRecreateJob(opts: {
       klingVideoUrl: row.kling_video_url,
     })
     return { ok: true, videoUrl: row.kling_video_url, cached: true }
+  }
+
+  // Variation children reuse the parent still + analysis. Do not scrape,
+  // extract 1fps, re-analyze, bank ideas, or regenerate the Seedream still.
+  if (variationSkipsUpstream(row)) {
+    if (!row.character_image_url) {
+      throw new Error('Variation job is missing the parent character still.')
+    }
+    const note = (row.variation_note ?? '').trim()
+    if (!note) throw new Error('Variation job is missing the change text.')
+
+    const context = (row.context ?? null) as KlingVideoContext | null
+    const masterPrompt = row.master_prompt
+    const sourceDuration = row.duration_sec != null ? Number(row.duration_sec) : null
+    const klingInput = applyVariationToKlingInput(
+      buildKlingInput({
+        settings,
+        image: row.character_image_url,
+        masterPrompt: masterPrompt ?? '',
+        context,
+        sourceDuration,
+      }),
+      note,
+    )
+    if (!klingInput.prompt && !klingInput.multi_prompt?.length) {
+      throw new Error('Variation job has no parent prompt to apply the change to')
+    }
+
+    await syncKlingAnalysisSheetSafe({
+      jobId: row.id,
+      sourceUrl: row.source_url,
+      durationSec: sourceDuration,
+      context,
+      masterPrompt,
+      status: `variation: ${note}`,
+      klingVideoUrl: null,
+    })
+
+    return finishKlingRender({
+      row,
+      queueJobId: opts.queueJobId,
+      userId: opts.userId,
+      chatId,
+      settings,
+      masterPrompt,
+      context,
+      sourceDuration,
+      klingInput,
+      apiKey,
+    })
   }
 
   let videoUrl = row.video_url
@@ -321,6 +389,33 @@ export async function processKlingRecreateJob(opts: {
     throw new Error('Analysis produced no master prompt')
   }
 
+  return finishKlingRender({
+    row,
+    queueJobId: opts.queueJobId,
+    userId: opts.userId,
+    chatId,
+    settings,
+    masterPrompt,
+    context,
+    sourceDuration,
+    klingInput,
+    apiKey,
+  })
+}
+
+async function finishKlingRender(opts: {
+  row: KlingRecreateJobRow
+  queueJobId: string
+  userId: string
+  chatId: number | string | null | undefined
+  settings: KlingUserSettings
+  masterPrompt: string | null
+  context: KlingVideoContext | null
+  sourceDuration: number | null
+  klingInput: KlingI2VInput
+  apiKey: string
+}): Promise<{ ok: true; videoUrl: string }> {
+  const { row, settings, klingInput } = opts
   const existingRequestId =
     (row.kling_request as { _prediction_id?: string } | null)?._prediction_id ?? null
 
@@ -332,7 +427,7 @@ export async function processKlingRecreateJob(opts: {
   })
   await heartbeat(opts.queueJobId, 'rendering', { progress: 75 })
 
-  const result = await generateKlingI2V(klingInput, apiKey, {
+  const result = await generateKlingI2V(klingInput, opts.apiKey, {
     existingRequestId,
     onSubmitted: async (requestId, submitted) => {
       await updateRecreate(row.id, {
@@ -357,22 +452,20 @@ export async function processKlingRecreateJob(opts: {
   await syncKlingAnalysisSheetSafe({
     jobId: row.id,
     sourceUrl: row.source_url,
-    durationSec: sourceDuration,
-    context,
-    masterPrompt,
+    durationSec: opts.sourceDuration,
+    context: opts.context,
+    masterPrompt: opts.masterPrompt,
     status: 'done',
     klingVideoUrl: hosted,
   })
 
-  if (chatId != null) {
-    const caption =
-      `✅ Kling 3.0 <code>${escapeHtml(settings.variant)}</code> · ` +
-      `${durationForKling(sourceDuration, settings)}s` +
-      `${context?.prompt_mode === 'multi_prompt' ? ' · multi-shot' : ''}`
-    await sendVideo(chatId, hosted, caption).catch(async () => {
-      await notify(chatId, `${caption}\n${escapeHtml(hosted)}`)
-    })
-  }
+  const note = (row.variation_note ?? '').trim()
+  const caption =
+    `✅ Kling 3.0 <code>${escapeHtml(settings.variant)}</code> · ` +
+    `${durationForKling(opts.sourceDuration, settings)}s` +
+    `${opts.context?.prompt_mode === 'multi_prompt' ? ' · multi-shot' : ''}` +
+    `${note ? ` · ${escapeHtml(note)}` : ''}`
+  await sendDoneVideo(opts.chatId, row.id, hosted, caption)
 
   return { ok: true, videoUrl: hosted }
 }

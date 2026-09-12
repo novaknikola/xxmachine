@@ -4,10 +4,17 @@ import {
   sendText, answerCallbackQuery, editMessageReplyMarkup, editMessageText,
   confirmRecreateKeyboard, settingsKeyboard,
 } from '@/lib/telegram-recreate'
-import { addUrlsToPending, attachPhotoFromTelegram, claimPending, clearPending, getPending, setAwaiting } from '@/lib/kling-recreate/pending'
-import { enqueueKlingRecreateJobs } from '@/lib/kling-recreate/enqueue'
+import { addUrlsToPending, attachPhotoFromTelegram, claimPending, clearPending, getPending, setAwaiting, setAwaitingVariation } from '@/lib/kling-recreate/pending'
+import { enqueueKlingRecreateJobs, enqueueKlingVariationJobs } from '@/lib/kling-recreate/enqueue'
 import { formatSettingsHtml, getKlingSettings, saveKlingSettings } from '@/lib/kling-recreate/settings'
-import type { KlingUserSettings } from '@/lib/kling-recreate/types'
+import {
+  isVariationAwaiting,
+  parseVariationCallback,
+  parseVariationRequest,
+  planVariationCallback,
+  variationAwaitingJobId,
+} from '@/lib/kling-recreate/variation'
+import type { KlingRecreateJobRow, KlingUserSettings } from '@/lib/kling-recreate/types'
 import type { KlingShotType, KlingVariant } from '@/lib/kling-recreate/kling-client'
 
 /**
@@ -170,6 +177,14 @@ export async function POST(req: NextRequest) {
     }
 
     if (message?.photo?.length) {
+      const pendingPhoto = await getPending(chatId)
+      if (isVariationAwaiting(pendingPhoto?.awaiting)) {
+        await sendText(
+          chatId,
+          'Send the change as one text message (and how many copies, 1–6). Example: <code>softer smile, 3</code>',
+        )
+        return NextResponse.json({ ok: true })
+      }
       const largest = message.photo[message.photo.length - 1]
       await attachPhotoFromTelegram({ chatId, userId, fileId: largest.file_id })
       await showBatch(chatId, userId)
@@ -178,6 +193,45 @@ export async function POST(req: NextRequest) {
 
     if (message?.text && !message.text.startsWith('/')) {
       const pending = await getPending(chatId)
+      if (isVariationAwaiting(pending?.awaiting)) {
+        const parentId = variationAwaitingJobId(pending.awaiting)
+        const parsed = parseVariationRequest(message.text)
+        if (!parentId) {
+          await setAwaiting(chatId, null)
+          await sendText(chatId, 'That variation request expired — tap Change anything? on the video again.')
+          return NextResponse.json({ ok: true })
+        }
+        if (!parsed.change) {
+          await sendText(
+            chatId,
+            'I need the change text (and optionally a count 1–6). Try: <code>softer smile, 3</code>',
+          )
+          return NextResponse.json({ ok: true })
+        }
+        const parent = await one<KlingRecreateJobRow>(
+          `SELECT * FROM kling_recreate_jobs WHERE id = $1 AND user_id = $2`,
+          [parentId, userId],
+        )
+        if (!parent?.character_image_url) {
+          await setAwaiting(chatId, null)
+          await sendText(chatId, 'That job has no character still to vary — run the original recreate first.')
+          return NextResponse.json({ ok: true })
+        }
+        await setAwaiting(chatId, null)
+        const ids = await enqueueKlingVariationJobs({
+          userId,
+          chatId,
+          parent,
+          change: parsed.change,
+          count: parsed.count,
+        })
+        await sendText(
+          chatId,
+          `🎬 Queued ${ids.length} variation${ids.length === 1 ? '' : 's'} — ` +
+            `<i>${escapeHtml(parsed.change)}</i>. I’ll send each Kling video when it’s ready.`,
+        )
+        return NextResponse.json({ ok: true })
+      }
       if (pending?.awaiting === 'negative_prompt') {
         await saveKlingSettings(userId, { negative_prompt: message.text })
         await setAwaiting(chatId, null)
@@ -221,6 +275,44 @@ export async function POST(req: NextRequest) {
         await clearPending(chatId)
         await answerCallbackQuery(cb.id, 'Cancelled')
         if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
+        return NextResponse.json({ ok: true })
+      }
+
+      const variationCb = parseVariationCallback(data)
+      if (variationCb) {
+        const plan = planVariationCallback(variationCb.action)
+        if (variationCb.action === 'skip' || !plan.awaitPrompt) {
+          const open = await getPending(chatId)
+          if (variationAwaitingJobId(open?.awaiting) === variationCb.jobId) {
+            await setAwaiting(chatId, null)
+          }
+          await answerCallbackQuery(cb.id, 'Skipped')
+          if (messageId) await editMessageReplyMarkup(chatId, messageId, {}).catch(() => {})
+          return NextResponse.json({ ok: true })
+        }
+
+        const parent = await one<KlingRecreateJobRow>(
+          `SELECT * FROM kling_recreate_jobs WHERE id = $1 AND user_id = $2`,
+          [variationCb.jobId, userId],
+        )
+        if (!parent) {
+          await answerCallbackQuery(cb.id, 'Job not found')
+          return NextResponse.json({ ok: true })
+        }
+        if (!parent.character_image_url) {
+          await answerCallbackQuery(cb.id, 'No character still on this job')
+          return NextResponse.json({ ok: true })
+        }
+        await setAwaitingVariation(chatId, userId, variationCb.jobId)
+        await answerCallbackQuery(cb.id, 'What should change?')
+        await sendText(
+          chatId,
+          [
+            'Send <b>one</b> message with (1) what to change and (2) how many copies (1–6).',
+            'Examples: <code>softer smile, 3</code> · <code>3</code> then a new line · <code>make it night, count: 2</code>',
+            'The change text is the prompt — no extra step.',
+          ].join('\n'),
+        )
         return NextResponse.json({ ok: true })
       }
 

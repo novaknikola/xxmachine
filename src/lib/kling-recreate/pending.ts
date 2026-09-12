@@ -3,6 +3,7 @@ import { parseReelUrlList } from '@/lib/monitor/parse-reel-url'
 import { downloadTelegramFile } from '@/lib/telegram-recreate'
 import { uploadBuffer } from '@/lib/supabase-storage'
 import { MAX_RECREATE_URLS } from './types'
+import { variationAwaitingValue } from './variation'
 
 export interface RecreatePending {
   chat_id: string | number
@@ -109,6 +110,19 @@ export async function setAwaiting(chatId: number, awaiting: string | null): Prom
   await query(
     `UPDATE telegram_recreate_pending SET awaiting = $2, updated_at = now() WHERE chat_id = $1`,
     [chatId, awaiting],
+  )
+}
+
+/** Arms the next text message as a variation delta for this job (not reel URLs). */
+export async function setAwaitingVariation(chatId: number, userId: string, jobId: string): Promise<void> {
+  await query(
+    `INSERT INTO telegram_recreate_pending (chat_id, user_id, awaiting, updated_at)
+     VALUES ($1, $2, $3, now())
+     ON CONFLICT (chat_id) DO UPDATE SET
+       awaiting = EXCLUDED.awaiting,
+       user_id = EXCLUDED.user_id,
+       updated_at = now()`,
+    [chatId, userId, variationAwaitingValue(jobId)],
   )
 }
 

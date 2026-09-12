@@ -50,12 +50,14 @@ export async function sendVideo(
   chatId: string | number,
   videoUrl: string,
   caption: string,
+  replyMarkup?: object,
 ) {
   return call('sendVideo', {
     chat_id: chatId,
     video: videoUrl,
     caption,
     parse_mode: 'HTML',
+    ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
   })
 }
 
@@ -128,6 +130,15 @@ export async function downloadTelegramFile(fileId: string): Promise<{
     buffer: await res.arrayBuffer(),
     contentType: res.headers.get('content-type') ?? 'image/jpeg',
     extension: /^(jpe?g|png|webp)$/.test(extension) ? extension : 'jpg',
+  }
+}
+
+export function variationChoiceKeyboard(jobId: string) {
+  return {
+    inline_keyboard: [[
+      { text: 'Change anything?', callback_data: `kr:var:${jobId}` },
+      { text: 'Skip', callback_data: `kr:skip:${jobId}` },
+    ]],
   }
 }
 
