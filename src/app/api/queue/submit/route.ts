@@ -163,6 +163,10 @@ export interface VideoRepurposeJobInput {
   effects: VideoEffectOpts
   /** Per-effect min/max override. Missing = video-ffmpeg's built-in defaults. */
   effectRanges?: VideoEffectRanges
+  /** Fixed unsharp pass, not randomized. Set by the Copy-Paste chain. */
+  sharpen?: boolean
+  /** Drops this many seconds off the start of the clip. Set by the Copy-Paste chain. */
+  trimStartSec?: number
   /**
    * Opt-in so the existing Repurpose page keeps behaving exactly as before.
    * Set by the Copy-Paste chain, which does want its variants in Drive.

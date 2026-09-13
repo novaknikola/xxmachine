@@ -32,3 +32,17 @@ export const DEFAULT_VIDEO_RANGES: VideoEffectRanges = {
   speed: { min: 0.97, max: 1.03 },
   crop: { min: 0.01, max: 0.07 },
 }
+
+/**
+ * IGreplicator's (Copy-Paste v2) automatic repurpose pass — kept much
+ * subtler than the manual Repurpose tool's default. Color grading (brightness/
+ * contrast/saturation/hue) is capped at ~3% either way; crop and speed are
+ * unchanged from the default since only color intensity was too strong.
+ */
+export const IGREPLICATOR_REPURPOSE_RANGES: VideoEffectRanges = {
+  ...DEFAULT_VIDEO_RANGES,
+  brightness: { min: -0.03, max: 0.03 },
+  contrast: { min: 0.97, max: 1.03 },
+  saturation: { min: 0.97, max: 1.03 },
+  hue: { min: -3, max: 3 },
+}

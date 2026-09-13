@@ -298,7 +298,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     if (job.job_type === 'video_repurpose') {
       const {
         videoUrl, videoName, count, baseSeed, effects, effectRanges, archiveToDrive, characterKey, seriesLabel,
-        driveFileId, outputDriveFolderId,
+        driveFileId, outputDriveFolderId, sharpen, trimStartSec,
       } = job.input as unknown as VideoRepurposeJobInput
       let doneCount = job.done_items
 
@@ -337,7 +337,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
           await Promise.all(batchIndices.map(async (variantIdx) => {
             const seed = baseSeed + variantIdx * 1337
-            const outputPath = await processVideoVariant(inputPath, seed, effects, fadeDuration, effectRanges)
+            const outputPath = await processVideoVariant(inputPath, seed, effects, fadeDuration, effectRanges, { sharpen, trimStartSec })
 
             if (outputPath) {
               try {

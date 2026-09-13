@@ -19,6 +19,7 @@ import { resolveVideoUrlViaRapidApi, resolveVideoUrlsViaApify } from '@/lib/inst
 import { resolveKey } from '@/lib/user-keys'
 import { isPlayableVideoUrl } from './video-url'
 import { internalBaseUrl } from '@/lib/internal-url'
+import { IGREPLICATOR_REPURPOSE_RANGES } from '@/lib/video-effect-ranges'
 
 /**
  * Floor for frames sampled per clip — denser sampling catches background gag
@@ -62,6 +63,12 @@ async function enqueueRepurpose(opts: {
           brightness: true, contrast: true, saturation: true,
           hue: true, speed: true, flipH: true, crop: true, fade: false,
         },
+        // Color grading capped at ~3% — the defaults were too strong for this
+        // pipeline's output. Fixed 35% sharpen and a half-second head trim
+        // added on top.
+        effectRanges: IGREPLICATOR_REPURPOSE_RANGES,
+        sharpen: true,
+        trimStartSec: 0.5,
         archiveToDrive: true,
         characterKey: opts.characterKey,
         seriesLabel: opts.seriesLabel,
