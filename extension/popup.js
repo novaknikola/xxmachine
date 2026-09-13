@@ -2,6 +2,12 @@ const dot = document.getElementById('dot')
 const statusText = document.getElementById('statusText')
 const countEl = document.getElementById('count')
 
+// Stale tabs (open before the extension was loaded) never got content.js.
+// Inject on popup open so the green + appears without a manual refresh.
+chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+  if (tab?.id) chrome.runtime.sendMessage({ type: 'XM_ENSURE_CONTENT', tabId: tab.id, url: tab.url })
+})
+
 chrome.storage.local.get(['apiBase', 'token', 'clipCount'], async data => {
   countEl.textContent = data.clipCount ? `Sačuvano slika: ${data.clipCount}` : ''
 
@@ -53,7 +59,12 @@ document.getElementById('grabAll').addEventListener('click', async () => {
     try {
       scan = await chrome.tabs.sendMessage(tab.id, { type: 'XM_SCAN_PAGE_IMAGES' })
     } catch {
-      throw new Error('Stranica nije spremna — osveži je (F5) pa probaj ponovo.')
+      await chrome.runtime.sendMessage({ type: 'XM_ENSURE_CONTENT', tabId: tab.id, url: tab.url })
+      try {
+        scan = await chrome.tabs.sendMessage(tab.id, { type: 'XM_SCAN_PAGE_IMAGES' })
+      } catch {
+        throw new Error('Stranica nije spremna — osveži je (F5) pa probaj ponovo.')
+      }
     }
     let urls = scan?.urls || []
     if (!urls.length) throw new Error('Nema slika na ovoj stranici koje mogu da se sačuvaju.')
