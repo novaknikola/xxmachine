@@ -236,6 +236,35 @@ export async function enqueueReelUrlsForUser(opts: {
     }
   }
 
+  // 5) One retry through Apify for whatever is still missing. Apify's own
+  // headless scrape sometimes comes back empty for a post that is perfectly
+  // public and fetches fine seconds later — not worth reporting as "private
+  // or age-restricted" without giving it a second, delayed shot first. Only
+  // when Apify itself didn't already throw (a dead key/plan won't recover).
+  missing = parsed.filter(p => !resolved.has(p.shortCode.toLowerCase()))
+  if (missing.length && process.env.APIFY_API_KEY && !apifyError) {
+    await new Promise(r => setTimeout(r, 4_000))
+    try {
+      const byCode = await resolveVideoUrlsViaApify(missing.map(p => p.permalink))
+      for (const p of missing) {
+        const match = byCode.get(p.shortCode.toLowerCase())
+        if (!match?.videoUrl || !isPlayableVideoUrl(match.videoUrl)) continue
+        resolved.set(p.shortCode.toLowerCase(), {
+          id: match.shortCode ?? p.shortCode,
+          permalink: match.url ?? p.permalink,
+          videoUrl: match.videoUrl,
+          thumbnailUrl: match.displayUrl ?? match.images?.[0] ?? null,
+          views: match.videoViewCount ?? match.videoPlayCount ?? 0,
+          likes: match.likesCount ?? 0,
+          comments: match.commentsCount ?? 0,
+          postedAt: match.timestamp ?? null,
+        })
+      }
+    } catch (err) {
+      apifyError = err instanceof Error ? err.message : String(err)
+    }
+  }
+
   for (const p of parsed.filter(p => !resolved.has(p.shortCode.toLowerCase()))) {
     resolveErrors.push({
       permalink: p.permalink,
