@@ -8,6 +8,7 @@ import {
   resolveVideoUrlsViaApify,
 } from '@/lib/instagram-scrape'
 import { composeRecreateScrapeError } from '@/lib/instagram-video-extract.mjs'
+import { resolveVideoUrlViaYtdlp } from './ytdlp.mjs'
 import { resolveKey } from '@/lib/user-keys'
 
 export { composeRecreateScrapeError }
@@ -19,9 +20,8 @@ export interface RecreateScrapeNote {
 
 /**
  * Resolve a pasted Instagram reel permalink (or an already-hosted mp4) to a
- * playable mp4 URL. Apify (posts → reels → /p/ → reel actor), then public
- * embed/page parse, then RapidAPI downloaders, then the stable-api host
- * already used for profile listing.
+ * playable mp4 URL. Apify → public page → RapidAPI → stable-api → yt-dlp
+ * `--get-url`. Telegram file upload is last-resort only, not the product path.
  */
 export async function resolveRecreateVideoUrl(userId: string, sourceUrl: string): Promise<string> {
   if (isPlayableVideoUrl(sourceUrl)) return sourceUrl.trim()
@@ -74,6 +74,16 @@ export async function resolveRecreateVideoUrl(userId: string, sourceUrl: string)
       const detail = err instanceof Error ? err.message : String(err)
       notes.push({ source: 'RapidAPI stable-api', detail })
     }
+  }
+
+  try {
+    const ytdlpUrl = await resolveVideoUrlViaYtdlp(parsed.permalink)
+    if (ytdlpUrl && isPlayableVideoUrl(ytdlpUrl)) return ytdlpUrl
+  } catch (err) {
+    notes.push({
+      source: 'yt-dlp',
+      detail: err instanceof Error ? err.message : String(err),
+    })
   }
 
   throw new Error(composeRecreateScrapeError(notes))

@@ -7,6 +7,7 @@ import {
   isRapidApiPlanNoise,
   looksLikeDirectVideoUrl,
 } from '../instagram-video-extract.mjs'
+import { pickPlayableUrlFromYtdlpOutput, YT_DLP_LOOKUP } from './ytdlp.mjs'
 
 const CDN_MP4 =
   'https://scontent-lax3-1.cdninstagram.com/o1/v/t16/f2/m86/AQMI-rs42_example.mp4?stp=dst-mp4&_nc_cat=108'
@@ -82,5 +83,21 @@ describe('isRapidApiPlanNoise', () => {
     assert.equal(isRapidApiPlanNoise('You are not subscribed to this API'), true)
     assert.equal(isRapidApiPlanNoise('This API is undergoing an upgrade'), true)
     assert.equal(isRapidApiPlanNoise('No video media in the response'), false)
+  })
+})
+
+describe('yt-dlp --get-url helper', () => {
+  it('looks up env then the three VPS paths', () => {
+    assert.deepEqual(YT_DLP_LOOKUP, [
+      'env:YT_DLP_PATH',
+      '/usr/local/bin/yt-dlp',
+      '/usr/bin/yt-dlp',
+      '/tmp/ytdlp-venv/bin/yt-dlp',
+    ])
+  })
+
+  it('picks the first CDN mp4 from --get-url stdout', () => {
+    const fra = 'https://scontent-fra5-2.cdninstagram.com/o1/v/t16/f2/m86/control.mp4?stp=dst-mp4'
+    assert.equal(pickPlayableUrlFromYtdlpOutput(`${fra}\nhttps://example.com/audio.m4a\n`), fra)
   })
 })

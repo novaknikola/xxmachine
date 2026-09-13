@@ -139,7 +139,9 @@ export function isRapidApiPlanNoise(message) {
  * the RapidAPI downloader subscription is why we have no mp4.
  */
 export function composeRecreateScrapeError(notes) {
-  const restricted = notes.find(n => /restricted_page|restricted|login.walled|age.?gate/i.test(n.detail))
+  const restricted = notes.find(n =>
+    /restricted_page|restricted|login.walled|age.?gate|audience-gated|isn't available to everyone|can't be seen by certain audiences|certain audiences/i.test(n.detail),
+  )
   const useful = notes.filter(n => !isRapidApiPlanNoise(n.detail))
   if (restricted) {
     const extra = useful

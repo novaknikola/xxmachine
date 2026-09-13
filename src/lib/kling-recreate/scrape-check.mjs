@@ -10,6 +10,12 @@ import {
   isRapidApiPlanNoise,
   looksLikeDirectVideoUrl,
 } from '../instagram-video-extract.mjs'
+import {
+  findYtdlpBinary,
+  pickPlayableUrlFromYtdlpOutput,
+  ytdlpCandidatePaths,
+  YT_DLP_LOOKUP,
+} from './ytdlp.mjs'
 
 const CDN_MP4 =
   'https://scontent-lax3-1.cdninstagram.com/o1/v/t16/f2/m86/AQMI-rs42_example.mp4?stp=dst-mp4&_nc_cat=108'
@@ -72,5 +78,41 @@ assert.match(
 assert.equal(isRapidApiPlanNoise('You are not subscribed to this API'), true)
 assert.equal(isRapidApiPlanNoise('This API is undergoing an upgrade'), true)
 assert.equal(isRapidApiPlanNoise('No video media in the response'), false)
+
+assert.deepEqual(YT_DLP_LOOKUP, [
+  'env:YT_DLP_PATH',
+  '/usr/local/bin/yt-dlp',
+  '/usr/bin/yt-dlp',
+  '/tmp/ytdlp-venv/bin/yt-dlp',
+])
+const candidates = ytdlpCandidatePaths()
+assert.deepEqual(candidates.slice(-3), [
+  '/usr/local/bin/yt-dlp',
+  '/usr/bin/yt-dlp',
+  '/tmp/ytdlp-venv/bin/yt-dlp',
+])
+assert.equal(findYtdlpBinary(), null)
+
+const fra = 'https://scontent-fra5-2.cdninstagram.com/o1/v/t16/f2/m86/control.mp4?stp=dst-mp4'
+assert.equal(pickPlayableUrlFromYtdlpOutput(`${fra}\nhttps://example.com/audio.m4a\n`), fra)
+
+const gated = composeRecreateScrapeError([
+  { source: 'Apify', detail: 'restricted_page' },
+  { source: 'RapidAPI downloader', detail: 'HTTP 500 system undergoing an upgrade' },
+  {
+    source: 'yt-dlp',
+    detail: "This content isn't available to everyone: It can't be seen by certain audiences.",
+  },
+])
+assert.match(gated, /Instagram blocked anonymous access/)
+assert.match(gated, /restricted_page/)
+assert.doesNotMatch(gated, /not subscribed/)
+assert.match(
+  composeRecreateScrapeError([{
+    source: 'yt-dlp',
+    detail: "This content isn't available to everyone: It can't be seen by certain audiences.",
+  }]),
+  /isn't available to everyone/,
+)
 
 console.log('scrape-check: ok')
