@@ -24,8 +24,11 @@ interface GrokOptions {
 }
 
 const DEFAULT_TIMEOUT_MS = 300_000
+const RETRY_DELAY_MS = 3_000
 
-export async function callGrok(opts: GrokOptions): Promise<string> {
+class GrokTransientError extends Error {}
+
+async function callGrokOnce(opts: GrokOptions): Promise<string> {
   const key = process.env.XAI_API_KEY
   if (!key) throw new Error('XAI_API_KEY is not configured')
 
@@ -54,17 +57,33 @@ export async function callGrok(opts: GrokOptions): Promise<string> {
     })
   } catch (err) {
     if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
-      throw new Error('Grok request timed out')
+      throw new GrokTransientError('Grok request timed out')
     }
-    throw err
+    throw new GrokTransientError(err instanceof Error ? err.message : String(err))
   }
 
   const data = await res.json()
-  if (!res.ok) throw new Error(data?.error?.message ?? `Grok error (${res.status})`)
+  if (!res.ok) {
+    const message = data?.error?.message ?? `Grok error (${res.status})`
+    if (res.status === 429 || res.status >= 500) throw new GrokTransientError(message)
+    throw new Error(message)
+  }
 
   const text: string | undefined = data?.choices?.[0]?.message?.content
-  if (!text) throw new Error('Empty response from Grok')
+  if (!text) throw new GrokTransientError('Empty response from Grok')
   return text
+}
+
+/** One retry on a transient failure (timeout, network error, 429, 5xx, empty body) — a bad model turn or a blip, not a bad request. */
+export async function callGrok(opts: GrokOptions): Promise<string> {
+  try {
+    return await callGrokOnce(opts)
+  } catch (err) {
+    if (!(err instanceof GrokTransientError)) throw err
+    console.warn('[grok] transient failure, retrying once:', err.message)
+    await new Promise(r => setTimeout(r, RETRY_DELAY_MS))
+    return await callGrokOnce(opts)
+  }
 }
 
 export function base64ImageContent(base64: string, mimeType = 'image/jpeg'): ImageContent {

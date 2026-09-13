@@ -154,7 +154,8 @@ export async function GET(req: NextRequest) {
         AND started_at < now() - interval '30 minutes'
         AND attempts < max_attempts
         AND job_type NOT IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk',
-                             'copy_paste_v2', 'copy_prompts_generate', 'seedance_i2v', 'infinite_talk')`,
+                             'copy_paste_v2', 'copy_prompts_generate', 'seedance_i2v', 'infinite_talk',
+                             'kling_recreate_v1')`,
   ).catch(err => console.error('[cron/tick] reset stuck queue jobs:', err))
 
   // copy_paste_v2 and copy_prompts_generate write progressAt after every batch.
@@ -179,10 +180,11 @@ export async function GET(req: NextRequest) {
   // single statement was.
   const STALE_JOB_ERROR = 'Job stalled — no progress for 60 minutes. Check WaveSpeed usage before resubmitting; the original call may have already billed.'
   try {
-    const staleJobs = await rows<{ id: string; user_id: string }>(
-      `SELECT id, user_id FROM generation_queue
+    const staleJobs = await rows<{ id: string; user_id: string; job_type: string }>(
+      `SELECT id, user_id, job_type FROM generation_queue
         WHERE status = 'processing'
-          AND job_type IN ('copy_paste_v2', 'copy_prompts_generate', 'seedance_i2v', 'infinite_talk')
+          AND job_type IN ('copy_paste_v2', 'copy_prompts_generate', 'seedance_i2v', 'infinite_talk',
+                           'kling_recreate_v1')
           AND COALESCE(
                 NULLIF(output->>'progressAt', '')::timestamptz,
                 started_at
@@ -195,7 +197,23 @@ export async function GET(req: NextRequest) {
         [STALE_JOB_ERROR, job.id],
       )
       if (failed.rowCount) {
-        await notifyMonitorUser(job.user_id, `❌ ${STALE_JOB_ERROR}`).catch(() => {})
+        if (job.job_type === 'kling_recreate_v1') {
+          const rec = await one<{ chat_id: string | number | null }>(
+            `SELECT chat_id FROM kling_recreate_jobs WHERE queue_job_id = $1`,
+            [job.id],
+          )
+          await query(
+            `UPDATE kling_recreate_jobs SET status = 'failed', error = $2, updated_at = now()
+              WHERE queue_job_id = $1 AND status <> 'done'`,
+            [job.id, STALE_JOB_ERROR],
+          ).catch(() => {})
+          if (rec?.chat_id != null) {
+            const { sendText } = await import('@/lib/telegram-recreate')
+            await sendText(rec.chat_id, `❌ ${STALE_JOB_ERROR}`).catch(() => {})
+          }
+        } else {
+          await notifyMonitorUser(job.user_id, `❌ ${STALE_JOB_ERROR}`).catch(() => {})
+        }
       }
     }
   } catch (err) {

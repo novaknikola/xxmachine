@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 /**
- * Register Telegram webhook for the pose-recreate bot (@contentreplicatorbot).
+ * Register Telegram webhook for the Kling 3.0 recreate bot (@contentreplicatorbot).
+ * Token and path are unchanged from the old pose-recreate bot:
+ *   TELEGRAM_RECREATE_BOT_TOKEN
+ *   /api/telegram-recreate/webhook?secret=CRON_SECRET
+ *
  * Usage: node scripts/set-telegram-recreate-webhook.mjs
  * Requires: TELEGRAM_RECREATE_BOT_TOKEN, CRON_SECRET, NEXT_PUBLIC_BASE_URL in .env.local
  */

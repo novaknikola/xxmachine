@@ -62,8 +62,19 @@ export function randomVideoSettings(
   }
 }
 
-export function buildVideoFilter(s: VideoSettings, fadeDuration?: number): string {
+export interface VideoFilterExtras {
+  /** Drops this many seconds off the start of the clip before anything else runs. */
+  trimStartSec?: number
+  /** Fixed unsharp pass (not randomized per-variant like the other effects). */
+  sharpen?: boolean
+}
+
+export function buildVideoFilter(s: VideoSettings, fadeDuration?: number, extra?: VideoFilterExtras): string {
   const parts: string[] = []
+
+  if (extra?.trimStartSec) {
+    parts.push(`trim=start=${extra.trimStartSec}`, 'setpts=PTS-STARTPTS')
+  }
 
   if (s.cropPct > 0) {
     const c = s.cropPct.toFixed(4)
@@ -90,6 +101,9 @@ export function buildVideoFilter(s: VideoSettings, fadeDuration?: number): strin
   // Force exact 1080x1920 (9:16) output
   parts.push('scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920')
 
+  // Fixed 35% luma sharpen — chroma left alone so it doesn't amplify color noise.
+  if (extra?.sharpen) parts.push('unsharp=5:5:0.35:5:5:0.0')
+
   if (s.fade) {
     parts.push('fade=t=in:st=0:d=0.4')
     if (fadeDuration && fadeDuration > 1.0) {
@@ -101,11 +115,11 @@ export function buildVideoFilter(s: VideoSettings, fadeDuration?: number): strin
   return parts.join(',')
 }
 
-export function buildAudioFilter(s: VideoSettings): string | null {
-  if (Math.abs(s.speed - 1.0) > 0.001) {
-    return `atempo=${s.speed.toFixed(4)}`
-  }
-  return null
+export function buildAudioFilter(s: VideoSettings, extra?: VideoFilterExtras): string | null {
+  const parts: string[] = []
+  if (extra?.trimStartSec) parts.push(`atrim=start=${extra.trimStartSec}`, 'asetpts=PTS-STARTPTS')
+  if (Math.abs(s.speed - 1.0) > 0.001) parts.push(`atempo=${s.speed.toFixed(4)}`)
+  return parts.length ? parts.join(',') : null
 }
 
 export async function getVideoDuration(inputPath: string): Promise<number | null> {
@@ -161,10 +175,11 @@ export async function processVideoVariant(
   opts: VideoEffectOpts,
   fadeDuration?: number,
   ranges?: VideoEffectRanges,
+  extra?: VideoFilterExtras,
 ): Promise<string | null> {
   const settings = randomVideoSettings(seed, opts, ranges)
-  const vf = buildVideoFilter(settings, fadeDuration)
-  const af = buildAudioFilter(settings)
+  const vf = buildVideoFilter(settings, fadeDuration, extra)
+  const af = buildAudioFilter(settings, extra)
   const outputPath = join(tmpdir(), `vr_${randomUUID()}.mp4`)
 
   try {
