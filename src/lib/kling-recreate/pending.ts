@@ -59,6 +59,17 @@ export async function attachPhotoFromTelegram(opts: {
   return setPendingPhoto(opts.chatId, opts.userId, photoUrl)
 }
 
+/** Last-resort source clip when Instagram scrape cannot return an mp4. */
+export async function uploadTelegramVideo(opts: {
+  userId: string
+  fileId: string
+}): Promise<string> {
+  const { buffer, contentType, extension } = await downloadTelegramFile(opts.fileId)
+  const ext = /^(mp4|m4v|mov)$/.test(extension) ? extension : 'mp4'
+  const path = `kling-recreate-source/${opts.userId}/${Date.now()}.${ext}`
+  return uploadBuffer(buffer, path, contentType.startsWith('video/') ? contentType : 'video/mp4')
+}
+
 export interface AddUrlsResult {
   pending: RecreatePending
   added: number
