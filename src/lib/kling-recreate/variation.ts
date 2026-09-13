@@ -65,7 +65,7 @@ export function parseVariationRequest(raw: string): VariationParse {
   }
 
   if (count == null) {
-    const lead = rest.match(/^(\d+)\s+(?:copies?\s+)?(?:with\s+)?(.+)$/is)
+    const lead = rest.match(/^(\d+)\s+(?:copies?\s+)?(?:with\s+)?([\s\S]+)$/i)
     if (lead) {
       count = Number(lead[1])
       rest = lead[2]
