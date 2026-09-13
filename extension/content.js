@@ -92,8 +92,14 @@ function boot() {
     }
   }
 
+  function containsPoint(el, x, y, pad = 12) {
+    const r = el.getBoundingClientRect()
+    return x >= r.left - pad && x <= r.right + pad && y >= r.top - pad && y <= r.bottom + pad
+  }
+
   function inspectElement(el) {
     if (!(el instanceof Element)) return null
+    if (el === document.documentElement || el === document.body) return null
     const tag = el.tagName
     if (tag === 'IMG') {
       if (!isLargeEnough(el)) return null
@@ -149,17 +155,19 @@ function boot() {
     }
 
     // Pinterest / Instagram paint a transparent overlay on top of the image.
-    // Walk a few ancestors and pick the largest saveable <img> in that tile.
+    // Walk a few ancestors and pick the largest saveable <img> that still
+    // contains the pointer — never body/html, or the + sticks on empty space.
     for (const el of stack) {
       if (host && (el === host || host.contains(el))) continue
       let node = el
       for (let i = 0; i < 6 && node; i++, node = node.parentElement) {
+        if (node === document.body || node === document.documentElement) break
         const img = bestImgIn(node)
-        if (img) {
+        if (img && containsPoint(img, x, y)) {
           const url = pickHttpImageUrlFromImg(img)
           if (url) return { el: img, url }
         }
-        if (isLargeEnough(node)) {
+        if (isLargeEnough(node) && containsPoint(node, x, y)) {
           const bg = pickHttpBgUrl(node)
           if (bg) return { el: node, url: bg }
         }
