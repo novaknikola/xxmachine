@@ -4,7 +4,7 @@ import {
   sendText, answerCallbackQuery, editMessageReplyMarkup, editMessageText,
   confirmRecreateKeyboard, settingsKeyboard,
 } from '@/lib/telegram-recreate'
-import { addUrlsToPending, attachPhotoFromTelegram, claimPending, clearPending, getPending, setAwaiting, setAwaitingVariation } from '@/lib/kling-recreate/pending'
+import { addUrlsToPending, attachPhotoFromTelegram, claimPending, clearPending, getPending, setAwaiting, setAwaitingVariation, uploadTelegramVideo } from '@/lib/kling-recreate/pending'
 import { enqueueKlingRecreateJobs, enqueueKlingVariationJobs } from '@/lib/kling-recreate/enqueue'
 import { formatSettingsHtml, getKlingSettings, saveKlingSettings } from '@/lib/kling-recreate/settings'
 import {
@@ -35,6 +35,7 @@ const HELP = [
   '<b>Kling 3.0 Recreate</b>',
   'Send an Instagram reel URL and a reference photo of your character (or use the default photo from dashboard Settings).',
   'I scrape the reel, describe it at 1fps, build a character still, and animate it with Kling 3.0.',
+  'If Instagram blocks the scrape, send the reel as a video file as a last resort.',
   '',
   '/settings — variant, duration, sound, CFG, shot type, negative prompt',
   '/ideas — recent banked niche ideas (not rendered)',
@@ -173,6 +174,36 @@ export async function POST(req: NextRequest) {
         `${i + 1}. <b>${escapeHtml(idea.niche)}</b>\n${escapeHtml(idea.prompt.slice(0, 400))}`,
       )
       await sendText(chatId, `<b>Recent ideas</b>\n\n${lines.join('\n\n')}`)
+      return NextResponse.json({ ok: true })
+    }
+
+    const videoFile = message?.video
+      ?? (message?.document?.mime_type?.startsWith('video/') ? message.document : null)
+    if (videoFile?.file_id) {
+      const pendingVideo = await getPending(chatId)
+      if (isVariationAwaiting(pendingVideo?.awaiting)) {
+        await sendText(
+          chatId,
+          'Send the change as one text message (and how many copies, 1–6). Example: <code>softer smile, 3</code>',
+        )
+        return NextResponse.json({ ok: true })
+      }
+      const photoUrl = pendingVideo?.photo_url || await defaultReference(userId)
+      if (!photoUrl) {
+        await sendText(chatId, 'Send a reference photo first, then the video file.')
+        return NextResponse.json({ ok: true })
+      }
+      const hosted = await uploadTelegramVideo({ userId, fileId: videoFile.file_id })
+      const urls = pendingVideo?.urls?.length ? pendingVideo.urls : [hosted]
+      await clearPending(chatId)
+      const settings = await getKlingSettings(userId)
+      const ids = await enqueueKlingRecreateJobs({
+        userId, chatId, urls, referenceImageUrl: photoUrl, settings, videoUrl: hosted,
+      })
+      await sendText(
+        chatId,
+        `🎬 Queued ${ids.length} Kling recreate job${ids.length === 1 ? '' : 's'} from the video file (scrape skipped). I’ll send analysis, the character still, then the video.`,
+      )
       return NextResponse.json({ ok: true })
     }
 

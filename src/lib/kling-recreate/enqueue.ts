@@ -12,19 +12,22 @@ export async function enqueueKlingRecreateJobs(opts: {
   urls: string[]
   referenceImageUrl: string
   settings: KlingUserSettings
+  /** Last-resort hosted mp4 when Instagram scrape cannot see the reel. */
+  videoUrl?: string | null
 }): Promise<string[]> {
   const queueIds: string[] = []
 
   for (const sourceUrl of opts.urls) {
     const recreate = await one<{ id: string }>(
       `INSERT INTO kling_recreate_jobs
-         (user_id, chat_id, source_url, reference_image_url, settings, kling_variant, status)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'pending')
+         (user_id, chat_id, source_url, video_url, reference_image_url, settings, kling_variant, status)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'pending')
        RETURNING id`,
       [
         opts.userId,
         opts.chatId,
         sourceUrl,
+        opts.videoUrl ?? null,
         opts.referenceImageUrl,
         JSON.stringify(opts.settings),
         opts.settings.variant,

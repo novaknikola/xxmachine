@@ -8,8 +8,11 @@
 import { one, query } from '@/lib/db'
 import { resolveKey } from '@/lib/user-keys'
 import {
+  apifyRestriction,
   listProfileReels,
+  resolveVideoUrlViaPublicPage,
   resolveVideoUrlViaRapidApi,
+  resolveVideoUrlViaStableApi,
   resolveVideoUrlsViaApify,
 } from '@/lib/instagram-scrape'
 import { enqueueDiscoveryReels, type EnqueueReelInput } from './enqueue'
@@ -164,7 +167,11 @@ export async function enqueueReelUrlsForUser(opts: {
       const byCode = await resolveVideoUrlsViaApify(missing.map(p => p.permalink))
       for (const p of missing) {
         const match = byCode.get(p.shortCode.toLowerCase())
-        if (!match?.videoUrl || !isPlayableVideoUrl(match.videoUrl)) continue
+        if (!match?.videoUrl || !isPlayableVideoUrl(match.videoUrl)) {
+          const restriction = apifyRestriction(match)
+          if (restriction) apifyError = restriction
+          continue
+        }
         resolved.set(p.shortCode.toLowerCase(), {
           id: match.shortCode ?? p.shortCode,
           permalink: match.url ?? p.permalink,
@@ -205,6 +212,47 @@ export async function enqueueReelUrlsForUser(opts: {
         const msg = err instanceof Error ? err.message : String(err)
         if (/\b429\b|exceeded the .*quota|too many requests/i.test(msg)) quotaExhausted = true
         /* fall through to the listing path */
+      }
+    }
+  }
+
+  // 3b) Public embed/page parse + the stable-api host already used for listing.
+  // Only leftovers — working RapidAPI/Apify URLs never reach this.
+  missing = parsed.filter(p => !resolved.has(p.shortCode.toLowerCase()))
+  if (missing.length) {
+    for (const p of missing) {
+      try {
+        const publicUrl = await resolveVideoUrlViaPublicPage(p.permalink)
+        if (!publicUrl || !isPlayableVideoUrl(publicUrl)) continue
+        resolved.set(p.shortCode.toLowerCase(), {
+          id: p.shortCode,
+          permalink: p.permalink,
+          videoUrl: publicUrl,
+          thumbnailUrl: null,
+          views: 0,
+          likes: 0,
+        })
+      } catch {
+        /* next leftover */
+      }
+    }
+  }
+  missing = parsed.filter(p => !resolved.has(p.shortCode.toLowerCase()))
+  if (missing.length && rapidApiKey) {
+    for (const p of missing) {
+      try {
+        const stable = await resolveVideoUrlViaStableApi(p.permalink, rapidApiKey)
+        if (!stable || !isPlayableVideoUrl(stable)) continue
+        resolved.set(p.shortCode.toLowerCase(), {
+          id: p.shortCode,
+          permalink: p.permalink,
+          videoUrl: stable,
+          thumbnailUrl: null,
+          views: 0,
+          likes: 0,
+        })
+      } catch {
+        /* next leftover */
       }
     }
   }
@@ -253,7 +301,9 @@ export async function enqueueReelUrlsForUser(opts: {
     // upgrade — and vice versa once Apify is out of credit too.
     const detail = apifyDown && !rapidApiKey
       ? 'No reel fetcher configured — set APIFY_API_KEY or add a RapidAPI key in Settings.'
-      : apifyError
+      : apifyError && /restricted/i.test(apifyError)
+        ? `Instagram blocked anonymous access (${apifyError}). The reel may be login-walled, age-gated, or region-restricted — not a RapidAPI subscription issue.`
+        : apifyError
         ? `Apify could not fetch it (${apifyError})${quotaExhausted ? ', and the RapidAPI fallback is out of monthly requests (HTTP 429)' : ''}.`
         : quotaExhausted
           // Named exactly, because the fix is a plan upgrade and no amount of

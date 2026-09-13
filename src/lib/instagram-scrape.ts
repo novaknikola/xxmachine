@@ -1,9 +1,29 @@
 import { parseReelUrl } from '@/lib/monitor/parse-reel-url'
+import { isPlayableVideoUrl } from '@/lib/monitor/video-url'
+import {
+  extractPlayableVideoUrlFromHtml,
+  findPlayableVideoUrl,
+  isRapidApiPlanNoise,
+} from './instagram-video-extract.mjs'
+
+export {
+  extractPlayableVideoUrlFromHtml,
+  findPlayableVideoUrl,
+  isRapidApiPlanNoise,
+  looksLikeDirectVideoUrl,
+  composeRecreateScrapeError,
+} from './instagram-video-extract.mjs'
 
 const APIFY_TOKEN = process.env.APIFY_API_KEY!
 const ACTOR_ID = 'apify~instagram-scraper'
+/** Official reel actor — same Apify org, reel-URL input, `videoUrl` in the item. */
+const REEL_ACTOR_ID = 'apify~instagram-reel-scraper'
 const POLL_INTERVAL_MS = 5_000
 const MAX_POLLS = 48 // 4 min cap
+
+const IG_WEB_APP_ID = '936619743392459'
+const IG_PAGE_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 
 const RAPIDAPI_HOST = 'instagram-reels-downloader-api.p.rapidapi.com'
 const RAPIDAPI_SCRAPER_HOST = 'instagram-scraper-ai1.p.rapidapi.com'
@@ -41,16 +61,19 @@ export interface ApifyReel {
   timestamp?: string
   /** Echo of the directUrls entry that produced this item. */
   inputUrl?: string
+  /** Actor-level failure, e.g. `restricted_page` when Instagram gated the post. */
+  error?: string
+  errorDescription?: string
 }
 
-async function runApifyActor<T = ApifyReel>(input: object): Promise<T[]> {
+async function runApifyActor<T = ApifyReel>(input: object, actorId = ACTOR_ID): Promise<T[]> {
   // Explicit timeouts on every leg: none of these had one before, so a stuck
   // TCP connection to Apify (not just a slow actor run) could hang past
   // MAX_POLLS' own bookkeeping and stall whatever awaited this indefinitely —
   // that chain is what starved the daily profile-scan cron (see
   // runDueProfileScans in monitor/process-item.ts).
   const startRes = await fetch(
-    `https://api.apify.com/v2/acts/${ACTOR_ID}/runs?token=${APIFY_TOKEN}`,
+    `https://api.apify.com/v2/acts/${actorId}/runs?token=${APIFY_TOKEN}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -125,20 +148,7 @@ export async function fetchIgProfileViaApify(
  *
  * Keyed by lowercased shortcode. Missing/non-video posts are simply absent.
  */
-export async function resolveVideoUrlsViaApify(
-  permalinks: string[],
-): Promise<Map<string, ApifyReel>> {
-  const out = new Map<string, ApifyReel>()
-  if (!APIFY_TOKEN || !permalinks.length) return out
-
-  // resultsLimit is per input URL here — a permalink is a single post either way.
-  const items = await runApifyActor({
-    directUrls: permalinks,
-    resultsType: 'posts',
-    resultsLimit: 1,
-    addParentData: false,
-  })
-
+function indexApifyItems(out: Map<string, ApifyReel>, items: ApifyReel[] | null | undefined) {
   for (const item of items ?? []) {
     // The actor echoes back what it was asked for, so a redirected or reshaped
     // canonical url still maps onto the shortcode the caller is waiting on.
@@ -146,8 +156,102 @@ export async function resolveVideoUrlsViaApify(
       item.shortCode
       ?? (item.url ? parseReelUrl(item.url)?.shortCode : undefined)
       ?? (item.inputUrl ? parseReelUrl(item.inputUrl)?.shortCode : undefined)
-    if (code) out.set(code.toLowerCase(), item)
+    if (!code) continue
+    const key = code.toLowerCase()
+    const prev = out.get(key)
+    // A later pass with a playable URL (or a more specific error) wins.
+    if (prev?.videoUrl && isPlayableVideoUrl(prev.videoUrl) && !item.videoUrl) continue
+    out.set(key, {
+      ...prev,
+      ...item,
+      shortCode: item.shortCode ?? prev?.shortCode ?? code,
+      error: item.videoUrl ? undefined : (item.error ?? prev?.error),
+    })
   }
+}
+
+function missingApifyPermalinks(permalinks: string[], out: Map<string, ApifyReel>): string[] {
+  return permalinks.filter(url => {
+    const code = parseReelUrl(url)?.shortCode?.toLowerCase()
+    if (!code) return true
+    const item = out.get(code)
+    return !item?.videoUrl || !isPlayableVideoUrl(item.videoUrl)
+  })
+}
+
+export async function resolveVideoUrlsViaApify(
+  permalinks: string[],
+): Promise<Map<string, ApifyReel>> {
+  const out = new Map<string, ApifyReel>()
+  if (!APIFY_TOKEN || !permalinks.length) return out
+
+  // resultsLimit is per input URL here — a permalink is a single post either way.
+  // First call is unchanged so Copy-Paste URLs that already work stay on this path.
+  const items = await runApifyActor({
+    directUrls: permalinks,
+    resultsType: 'posts',
+    resultsLimit: 1,
+    addParentData: false,
+  })
+  indexApifyItems(out, items)
+
+  // Official input schema: `/reel/` URLs pair with resultsType `reels`, `/p/` with `posts`.
+  // Anonymous `posts` on a reel permalink is what returns restricted_page with no videoUrl.
+  let missing = missingApifyPermalinks(permalinks, out)
+  if (missing.length) {
+    try {
+      indexApifyItems(out, await runApifyActor({
+        directUrls: missing,
+        resultsType: 'reels',
+        resultsLimit: 1,
+        addParentData: false,
+      }))
+    } catch (err) {
+      console.warn(
+        '[instagram-scrape] Apify reels-type retry failed:',
+        err instanceof Error ? err.message : err,
+      )
+    }
+  }
+
+  missing = missingApifyPermalinks(permalinks, out)
+  if (missing.length) {
+    const asPosts = missing.map(url => {
+      const code = parseReelUrl(url)?.shortCode
+      return code ? `https://www.instagram.com/p/${code}/` : url
+    })
+    try {
+      indexApifyItems(out, await runApifyActor({
+        directUrls: asPosts,
+        resultsType: 'posts',
+        resultsLimit: 1,
+        addParentData: false,
+      }))
+    } catch (err) {
+      console.warn(
+        '[instagram-scrape] Apify /p/ posts retry failed:',
+        err instanceof Error ? err.message : err,
+      )
+    }
+  }
+
+  missing = missingApifyPermalinks(permalinks, out)
+  if (missing.length) {
+    try {
+      // Same org as apify~instagram-scraper; input is `username` (reel URLs allowed).
+      // Expected item: { shortCode, videoUrl, url, inputUrl } — same media schema.
+      indexApifyItems(out, await runApifyActor({
+        username: missing,
+        resultsLimit: 1,
+      }, REEL_ACTOR_ID))
+    } catch (err) {
+      console.warn(
+        '[instagram-scrape] Apify reel-scraper actor failed:',
+        err instanceof Error ? err.message : err,
+      )
+    }
+  }
+
   return out
 }
 
@@ -456,4 +560,138 @@ export async function resolveReelMedia(
     views: match.videoViewCount ?? null,
     source: 'profile_list',
   }
+}
+
+const RAPIDAPI_STABLE_HOST = 'instagram-scraper-stable-api.p.rapidapi.com'
+
+async function fetchIgPublicText(url: string, extra?: HeadersInit): Promise<string> {
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': IG_PAGE_UA,
+      Accept: 'text/html,application/json;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9',
+      ...extra,
+    },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(20_000),
+  })
+  return res.text()
+}
+
+/**
+ * Public Instagram page / embed / GraphQL — no extra secret.
+ * Works when the HTML or `xdt_shortcode_media` JSON still carries `video_url`.
+ */
+export async function resolveVideoUrlViaPublicPage(permalink: string): Promise<string | null> {
+  const parsed = parseReelUrl(permalink)
+  const code = parsed?.shortCode
+  if (!code) return null
+  const pages = [
+    `https://www.instagram.com/p/${code}/embed/captioned/`,
+    `https://www.instagram.com/reel/${code}/embed/`,
+    `https://www.instagram.com/p/${code}/embed/`,
+    parsed.permalink,
+    `https://www.instagram.com/p/${code}/`,
+    `https://www.instagram.com/p/${code}/?__a=1&__d=dis`,
+  ]
+
+  let csrf: string | undefined
+  for (const url of pages) {
+    try {
+      const extra: HeadersInit = url.includes('__a=1')
+        ? { 'X-IG-App-ID': IG_WEB_APP_ID, 'X-Requested-With': 'XMLHttpRequest' }
+        : {}
+      const text = await fetchIgPublicText(url, extra)
+      csrf ??= text.match(/csrf_token":"([^"]+)"/)?.[1]
+      const fromHtml = extractPlayableVideoUrlFromHtml(text)
+      if (fromHtml) return fromHtml
+      try {
+        const fromJson = findPlayableVideoUrl(JSON.parse(text))
+        if (fromJson) return fromJson
+      } catch {
+        /* HTML, not JSON */
+      }
+    } catch {
+      /* try the next public URL */
+    }
+  }
+
+  const variables = JSON.stringify({ shortcode: code, fetch_tagged_user_count: null })
+  for (const docId of ['10015901848480474', '8845758582119845']) {
+    try {
+      const qs = new URLSearchParams({ doc_id: docId, variables })
+      const text = await fetchIgPublicText(`https://www.instagram.com/graphql/query/?${qs}`, {
+        'X-IG-App-ID': IG_WEB_APP_ID,
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-CSRFToken': csrf ?? '',
+        Referer: parsed.permalink,
+      })
+      const fromHtml = extractPlayableVideoUrlFromHtml(text)
+      if (fromHtml) return fromHtml
+      const fromJson = findPlayableVideoUrl(JSON.parse(text))
+      if (fromJson) return fromJson
+    } catch {
+      /* GraphQL is blocked on many datacenter IPs — not fatal */
+    }
+  }
+
+  return null
+}
+
+/**
+ * RapidAPI host already used for profile listing (`get_ig_user_info.php` /
+ * `get_ig_user_reels.php`). Detailed media endpoints return the Instagram
+ * media object: `{ video_versions: [{ url }], video_url }`.
+ */
+export async function resolveVideoUrlViaStableApi(
+  permalink: string,
+  apiKey: string,
+): Promise<string | null> {
+  const parsed = parseReelUrl(permalink)
+  if (!parsed) return null
+  const code = parsed.shortCode
+  const attempts: Array<{ path: string; method?: 'GET' | 'POST'; body?: string }> = [
+    { path: `/media_data_id.php?media_code=${encodeURIComponent(code)}` },
+    {
+      path: `/get_ig_reel_data.php?type=reel&reel_post_code_or_url=${encodeURIComponent(parsed.permalink)}`,
+    },
+    {
+      path: '/get_ig_user_reels.php',
+      method: 'POST',
+      body: `username_or_url=${encodeURIComponent(parsed.permalink)}&amount=1`,
+    },
+  ]
+
+  for (const attempt of attempts) {
+    try {
+      const res = await fetch(`https://${RAPIDAPI_STABLE_HOST}${attempt.path}`, {
+        method: attempt.method ?? 'GET',
+        headers: {
+          'x-rapidapi-key': apiKey,
+          'x-rapidapi-host': RAPIDAPI_STABLE_HOST,
+          ...(attempt.body ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
+        },
+        body: attempt.body,
+        signal: AbortSignal.timeout(30_000),
+      })
+      const json = await res.json().catch(() => null)
+      if (!res.ok) {
+        const msg = (json as { message?: string } | null)?.message ?? `HTTP ${res.status}`
+        if (isRapidApiPlanNoise(msg)) continue
+        continue
+      }
+      const found = findPlayableVideoUrl(json)
+      if (found) return found
+    } catch {
+      /* next endpoint */
+    }
+  }
+  return null
+}
+
+export function apifyRestriction(item: ApifyReel | undefined): string | null {
+  const err = (item?.error ?? item?.errorDescription ?? '').trim()
+  if (!err) return null
+  if (/restricted|login|private|age.?gate|not.?available/i.test(err)) return err
+  return err || null
 }

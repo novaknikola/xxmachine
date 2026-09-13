@@ -126,10 +126,12 @@ export async function downloadTelegramFile(fileId: string): Promise<{
   if (!res.ok) throw new Error(`Telegram file download failed (${res.status})`)
 
   const extension = file.file_path.split('.').pop()?.toLowerCase() ?? 'jpg'
+  const safeExt = /^(jpe?g|png|webp|mp4|m4v|mov)$/.test(extension) ? extension : 'jpg'
+  const fallbackType = /^(mp4|m4v|mov)$/.test(safeExt) ? 'video/mp4' : 'image/jpeg'
   return {
     buffer: await res.arrayBuffer(),
-    contentType: res.headers.get('content-type') ?? 'image/jpeg',
-    extension: /^(jpe?g|png|webp)$/.test(extension) ? extension : 'jpg',
+    contentType: res.headers.get('content-type') ?? fallbackType,
+    extension: safeExt,
   }
 }
 
