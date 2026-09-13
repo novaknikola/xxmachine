@@ -190,8 +190,13 @@ export function buildKlingI2VPayload(
 }
 
 const POLL_INTERVAL_MS = 5_000
-const KLING_POLL_ATTEMPTS = 360 // 360 × 5s = 30 min
-const KLING_ABORT_MS = 1_800_000
+// Seedance (src/lib/monitor/replicate.ts) learned this the hard way: a real
+// WaveSpeed render finished at ~22 min after a 20-min cap had already aborted
+// it and recorded a failure — WaveSpeed still bills for a run we never got
+// the result of, so an early abort here is pure waste, not a safety net.
+// Match Seedance's 45-min budget instead of a tighter Kling-specific guess.
+const KLING_POLL_ATTEMPTS = 540 // 540 × 5s = 45 min
+const KLING_ABORT_MS = 2_700_000
 
 async function pollKlingResult(
   requestId: string,
@@ -201,11 +206,22 @@ async function pollKlingResult(
   for (let i = 0; i < KLING_POLL_ATTEMPTS; i++) {
     if (signal.aborted) throw new Error('Kling poll aborted')
     await new Promise(r => setTimeout(r, POLL_INTERVAL_MS))
-    const res = await fetch(`${WAVESPEED_API_V3}/predictions/${requestId}/result`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal,
-    })
-    const data = await res.json()
+
+    // One flaky poll out of 540 (45 min at 5s each) must not kill a render
+    // that is otherwise progressing fine on WaveSpeed's side — only a
+    // definitive 'failed'/'cancelled'/etc status below ends the job early.
+    let data: any
+    try {
+      const res = await fetch(`${WAVESPEED_API_V3}/predictions/${requestId}/result`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal,
+      })
+      data = await res.json()
+    } catch (err) {
+      if (signal.aborted) throw err
+      console.warn('[kling-recreate] poll request failed, retrying:', err instanceof Error ? err.message : err)
+      continue
+    }
     const status = data?.data?.status ?? data?.status
     if (status === 'completed') {
       const outputs = data?.data?.outputs ?? data?.outputs
@@ -251,8 +267,11 @@ export async function generateKlingI2V(
       body: JSON.stringify(payload),
       signal,
     })
-    const initData = await initRes.json()
-    if (initData.code && initData.code !== 200) {
+    const initData = await initRes.json().catch(() => null)
+    if (!initRes.ok) {
+      throw new Error(`Kling 3.0 submit failed (${initRes.status}): ${initData?.message ?? JSON.stringify(initData)}`)
+    }
+    if (initData?.code && initData.code !== 200) {
       throw new Error(`Kling 3.0 failed: ${initData.message ?? JSON.stringify(initData)}`)
     }
     requestId = initData?.data?.id ?? initData?.id

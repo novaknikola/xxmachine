@@ -24,10 +24,24 @@ function parseJsonObject(raw: string): Record<string, unknown> {
   throw new Error('Kling analysis JSON parse failed')
 }
 
+/**
+ * This pipeline chains several Grok calls per job (one per frame chunk, plus
+ * synthesizeContext) where Copy-Paste v2 makes one — so a single malformed
+ * response has more chances to kill the whole job. One retry on a bad parse
+ * (re-asking, not re-parsing the same text) absorbs an occasional bad turn.
+ */
+async function callGrokJson(opts: Parameters<typeof callGrok>[0]): Promise<Record<string, unknown>> {
+  try {
+    return parseJsonObject(await callGrok(opts))
+  } catch {
+    return parseJsonObject(await callGrok(opts))
+  }
+}
+
 async function describeFrameChunk(
   frames: OneFpsExtract['frames'],
 ): Promise<FrameDescription[]> {
-  const raw = await callGrok({
+  const parsed = await callGrokJson({
     model: GROK_SMART,
     json: true,
     temperature: 0.2,
@@ -50,8 +64,6 @@ async function describeFrameChunk(
       ],
     }],
   })
-
-  const parsed = parseJsonObject(raw)
   const list = Array.isArray(parsed.frames) ? parsed.frames : []
   return frames.map((f, i) => {
     const rec = (list[i] ?? {}) as { t?: unknown; description?: unknown }
@@ -77,7 +89,7 @@ async function synthesizeContext(opts: {
     .map(f => `${f.t_sec.toFixed(0)}s: ${f.description}`)
     .join('\n')
 
-  const raw = await callGrok({
+  const parsed = await callGrokJson({
     model: GROK_FAST,
     json: true,
     temperature: 0.25,
@@ -97,8 +109,6 @@ async function synthesizeContext(opts: {
       ].join('\n'),
     }],
   })
-
-  const parsed = parseJsonObject(raw)
   const shotsRaw = Array.isArray(parsed.shots) ? parsed.shots : []
   const shots: KlingShotBeat[] = shotsRaw
     .map((s): KlingShotBeat | null => {
