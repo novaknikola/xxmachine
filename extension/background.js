@@ -4,13 +4,69 @@
 // host_permissions covering the target, is not.
 
 const MENU_ID = 'xxmachine-clip-image'
+const CONTENT_FILES = ['image-url.js', 'content.js']
 
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: MENU_ID,
-    title: 'Sačuvaj sliku u XXmachine',
-    contexts: ['image'],
+function ensureContextMenu() {
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: MENU_ID,
+      title: 'Sačuvaj sliku u XXmachine',
+      contexts: ['image'],
+    }, () => {
+      void chrome.runtime.lastError
+    })
   })
+}
+
+function isInjectableUrl(url) {
+  if (!url) return false
+  try {
+    const u = new URL(url)
+    if (u.protocol === 'chrome:' || u.protocol === 'chrome-extension:' || u.protocol === 'edge:' || u.protocol === 'about:' || u.protocol === 'devtools:') {
+      return false
+    }
+    return u.protocol === 'http:' || u.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+async function injectIntoTab(tabId, url) {
+  if (!tabId || !isInjectableUrl(url)) return
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: CONTENT_FILES,
+    })
+  } catch {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId, allFrames: false },
+        files: CONTENT_FILES,
+      })
+    } catch {
+      // restricted page (PDF viewer, Chrome Web Store, …)
+    }
+  }
+}
+
+async function injectAllTabs() {
+  const tabs = await chrome.tabs.query({})
+  await Promise.all(tabs.map(tab => (tab.id ? injectIntoTab(tab.id, tab.url) : Promise.resolve())))
+}
+
+ensureContextMenu()
+chrome.runtime.onInstalled.addListener(() => {
+  ensureContextMenu()
+  void injectAllTabs()
+})
+chrome.runtime.onStartup.addListener(() => {
+  ensureContextMenu()
+  void injectAllTabs()
+})
+
+chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+  if (info.status === 'complete') void injectIntoTab(tabId, tab.url)
 })
 
 async function getConfig() {
@@ -78,6 +134,13 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 })
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === 'XM_ENSURE_CONTENT') {
+    const tabId = sender.tab?.id ?? msg.tabId
+    const url = sender.tab?.url ?? msg.url
+    injectIntoTab(tabId, url).then(() => sendResponse({ ok: true }))
+    return true
+  }
+
   if (msg?.type === 'XM_CLIP_IMAGE') {
     clipImage(msg.imageUrl, msg.pageUrl, msg.title).then(result => {
       if (result.ok) void bumpBadge()
