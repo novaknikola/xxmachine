@@ -44,6 +44,15 @@ export interface CopyPasteShot {
 export interface CopyPasteSpec {
   format: string
   /**
+   * Seconds into the clip (matching one of the times the frames were sampled at)
+   * where people[0]'s face is most clearly visible — front-facing or near-front,
+   * unobstructed, in focus. This frame, not frame 0, becomes the Seedream Edit
+   * scene input (see uploadFaceFrame in analyze.ts). Null when no frame shows a
+   * usable view of the face (person never turns to camera, etc.) — the caller
+   * then falls back to frame 0, same as before this field existed.
+   */
+  best_face_frame_time: number | null
+  /**
    * The single reason a viewer stops scrolling, as a physical fact.
    *
    * Top level rather than on people[0] because enforceReferenceLock() overwrites
@@ -142,6 +151,7 @@ scene — you decide which person that is (see RULE A).
 Return ONLY this JSON shape (fill every key; no markdown, no commentary):
 {
   "format": "aspect ratio + duration + one phrase describing capture style, e.g. '9:16 vertical video format, 0:14 duration, raw smartphone social media clip' — you will be told the ACTUAL measured duration and aspect ratio below; use those exact numbers here, do not invent your own.",
+  "best_face_frame_time": "SEE RULE F. The exact time in seconds (a bare number, matching one of the frame times you were given, e.g. 3.2) of the frame where people[0]'s face is clearest. null if no frame shows it well.",
   "hook": "SEE RULE E. ONE sentence: the single specific thing that makes a viewer stop scrolling, stated as a physical fact a camera can see. This is the most important field in this JSON — everything else must be consistent with it.",
   "subject_motion": "SEE RULE E. How people[0]'s body actually moves across the whole clip: which parts move, what drives them, the rhythm and the amplitude. Movement only — never size or shape.",
   "people": [
@@ -251,6 +261,18 @@ RULE B does not apply here. RULE B normalizes hair colour, garment colour, ethni
 skin tone and age. It says nothing about how a body moves, and you must not
 self-censor motion into vagueness in order to feel safe.
 
+RULE F — BEST FACE FRAME:
+The frame you pick for "best_face_frame_time" becomes the actual photo Seedream
+edits to swap in the real identity — the single most important input for whether
+the final video looks like the reference person. Scan every frame you were given
+and pick the one where people[0]'s face is most usable for that edit: facing
+toward or near-toward the camera (not in profile or turned away), not blocked by
+a hand/hair/object/another person, in focus (not motion-blurred), reasonably lit
+(not silhouetted or blown out), eyes open. Prefer a frame from earlier in the clip
+over a later one only when quality is otherwise equal — do not default to frame 0
+just because it is first. If genuinely no frame shows a usable face (always
+turned away, always obstructed), return null rather than picking a bad one.
+
 OTHER RULES:
 - Be concrete and specific, not vague: every field must describe something a camera
   could see, never a mood word standing in for a fact. Shot-list register applies to
@@ -342,9 +364,18 @@ export function normalizeCopyPasteSpec(raw: unknown): CopyPasteSpec {
     ? obj.imperfections.map(asString).filter(Boolean)
     : []
 
+  const rawFaceTime = obj.best_face_frame_time
+  const faceTime = typeof rawFaceTime === 'number'
+    ? rawFaceTime
+    : typeof rawFaceTime === 'string' && rawFaceTime.trim() !== ''
+      ? Number(rawFaceTime.replace(/s$/i, ''))
+      : NaN
+
   return {
     format: asString(obj.format),
-    // Absent on every spec written before this field existed; '' renders nothing.
+    // Absent on every spec written before this field existed (or unparseable) —
+    // null falls back to frame 0 in uploadFaceFrame, same as pre-existing specs.
+    best_face_frame_time: Number.isFinite(faceTime) ? faceTime : null,
     hook: asString(obj.hook),
     subject_motion: asString(obj.subject_motion),
     people,

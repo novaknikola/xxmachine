@@ -79,9 +79,9 @@ export async function enqueueDiscoveryReels(
     )
 
     if (existing) {
-      const busy = ['analyzing', 'image_generating', 'image_done', 'video_generating'].includes(
-        existing.replicate_status,
-      )
+      const busy = [
+        'analyzing', 'image_generating', 'image_done', 'awaiting_keyframe_approval', 'video_generating',
+      ].includes(existing.replicate_status)
       if (busy) {
         skippedBusy++
         ids.push(existing.id)
@@ -90,11 +90,11 @@ export async function enqueueDiscoveryReels(
       // A new reference photo is a new identity request — a finished render made
       // from the OLD photo does not answer it. Without this, resubmitting the
       // same reel with a different photo silently returns the old video
-      // untouched: replicateCopyPasteItem short-circuits on any existing
-      // kling_video_url to avoid double-billing a retried job, and that check
-      // can't tell a genuine retry apart from a new identity landing on the same
-      // deduped row. Same clearing this table already does for an explicit
-      // `reset` re-analysis (see classifyDiscoveryItem).
+      // untouched: generateCopyPasteKeyframes/finishCopyPasteVideo short-circuit
+      // on any existing kling_video_url to avoid double-billing a retried job,
+      // and that check can't tell a genuine retry apart from a new identity
+      // landing on the same deduped row. Same clearing this table already does
+      // for an explicit `reset` re-analysis (see classifyDiscoveryItem).
       const referencePhotoChanged =
         referenceImageUrl !== null && referenceImageUrl !== existing.reference_image_url
       await query(

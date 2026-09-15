@@ -76,6 +76,7 @@ const STATUS_LABEL: Record<string, string> = {
   analyzing: 'Analyzing',
   image_generating: 'Generating keyframe',
   image_done: 'Keyframe ready',
+  awaiting_keyframe_approval: 'Review keyframe',
   video_generating: 'Generating video',
   done: 'Done',
   failed: 'Failed',
@@ -89,6 +90,7 @@ const PIPELINE_STEPS = [
   'analyzing',
   'image_generating',
   'image_done',
+  'awaiting_keyframe_approval',
   'video_generating',
   'done',
 ] as const
@@ -257,6 +259,55 @@ export function RunTab() {
       load()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Queue submit failed')
+    }
+  }
+
+  /**
+   * The keyframe(s) look right — pay for the actual Seedance video-edit call.
+   * Same queue-job pattern as submitReplicate: this can run for minutes, so it
+   * has to be a server-side job, not a held-open request.
+   */
+  async function approveKeyframe(item: ReplicateItem) {
+    try {
+      const res = await fetch('/api/queue/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job_type: 'copy_paste_finish',
+          input: { itemIds: [item.id], repurposeCount: studio.repurposeCount },
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      setQueuedIds(prev => new Set([...prev, item.id]))
+      toast.success('Generating video…', {
+        description: 'Runs in the background — you can leave the page',
+        action: { label: 'Open Queue', onClick: () => { window.location.href = '/captions?tab=queue' } },
+      })
+      load()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Approve failed')
+    }
+  }
+
+  /** The keyframe missed — clear it and generate a fresh one off the same spec. */
+  async function regenerateKeyframe(item: ReplicateItem) {
+    try {
+      const res = await fetch('/api/queue/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job_type: 'copy_paste_v2',
+          input: { itemIds: [item.id], endFrame: studio.endFrame, regenerate: true },
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      setQueuedIds(prev => new Set([...prev, item.id]))
+      toast.success('Regenerating keyframe…')
+      load()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Regenerate failed')
     }
   }
 
@@ -498,6 +549,18 @@ export function RunTab() {
                           <img src={item.reference_image_url} alt="" className="absolute inset-0 w-full h-full object-cover" />
                         </a>
                       )}
+                      {item.generated_end_image_url && (
+                        <a
+                          href={item.generated_end_image_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title="End keyframe"
+                          className="relative w-10 aspect-square rounded-lg overflow-hidden bg-secondary/50 ring-1 ring-border/60"
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={item.generated_end_image_url} alt="" className="absolute inset-0 w-full h-full object-cover" />
+                        </a>
+                      )}
                     </div>
 
                     <div className="min-w-0 flex-1 space-y-3">
@@ -594,6 +657,17 @@ export function RunTab() {
                                     ? 'Keyframe ready…'
                                     : 'Analyzing…'}
                           </Button>
+                        ) : item.replicate_status === 'awaiting_keyframe_approval' ? (
+                          <>
+                            <Button onClick={() => approveKeyframe(item)}>
+                              <CheckCircle2 className="w-4 h-4" />
+                              Approve → Video
+                            </Button>
+                            <Button variant="outline" onClick={() => regenerateKeyframe(item)}>
+                              <RefreshCw className="w-4 h-4" />
+                              Regenerate
+                            </Button>
+                          </>
                         ) : item.replicate_status !== 'done' && item.replicate_status !== 'skipped' && (
                           <Button
                             disabled={!item.reference_image_url}

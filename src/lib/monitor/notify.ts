@@ -1,5 +1,5 @@
 import { one } from '@/lib/db'
-import { sendPhoto, sendText, sendVideo } from '@/lib/telegram'
+import { sendPhoto, sendText, sendVideo, keyframeApprovalKeyboard } from '@/lib/telegram'
 import { archiveDateKey, sanitizeDriveKey } from '@/lib/drive-archive/paths'
 
 function escapeHtml(s: string): string {
@@ -126,6 +126,43 @@ export async function notifyReplicationDone(opts: {
         })
       }
     }
+  }
+}
+
+/**
+ * Sent once the Seedream keyframe(s) are ready, before the paid Seedance
+ * video-edit call — the gate that lets a human catch a bad identity swap
+ * before it burns 45 minutes and real money. Mirrors notifyReplicationDone's
+ * "Spread this one?" pattern (photo/text + inline buttons), but here the
+ * buttons are the only way this item moves forward: approve.ts/[id] and the
+ * Run tab both do the same thing this callback triggers.
+ */
+export async function notifyKeyframeReady(opts: {
+  userId: string
+  itemId: string
+  profile: string
+  contentUrl: string
+  imageUrl: string
+  endImageUrl?: string | null
+}): Promise<void> {
+  if (!process.env.TELEGRAM_BOT_TOKEN) return
+  const chatId = await resolveChatId(opts.userId)
+  if (!chatId) return
+
+  const lines = [
+    `🖼️ <b>Keyframe ready — review before video</b>`,
+    `Source: @${escapeHtml(opts.profile)}`,
+    opts.endImageUrl ? 'Start + end keyframe generated.' : 'Start keyframe generated.',
+    `<a href="${escapeHtml(opts.contentUrl)}">Original post</a>`,
+  ]
+
+  try {
+    await sendPhoto(chatId, opts.imageUrl, lines.join('\n'), keyframeApprovalKeyboard(opts.itemId))
+    if (opts.endImageUrl) {
+      await sendPhoto(chatId, opts.endImageUrl, 'End keyframe')
+    }
+  } catch (err) {
+    console.error('[monitor/notify] notifyKeyframeReady', err)
   }
 }
 

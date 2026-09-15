@@ -522,6 +522,67 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true })
     }
 
+    // ── Keyframe approval buttons — the gate before the paid Seedance call ─
+    if (action === 'kfok' || action === 'kfrg') {
+      const chatId = cbMessage?.chat?.id as number | undefined
+      const kfUserId = chatId != null ? await findUserByChat(chatId) : null
+      if (!chatId || !kfUserId) {
+        await answerCallbackQuery(callbackId, 'Chat not linked')
+        return NextResponse.json({ ok: true })
+      }
+      // Clear the buttons first either way, so a double tap cannot pay twice.
+      if (cbMessage?.message_id) {
+        await editMessageReplyMarkup(chatId, cbMessage.message_id, {})
+      }
+
+      const item = await one<{ replicate_status: string; generated_image_url: string | null }>(
+        `SELECT replicate_status, generated_image_url FROM discovery_items WHERE id = $1 AND user_id = $2`,
+        [postId, kfUserId],
+      )
+      if (!item || item.replicate_status !== 'awaiting_keyframe_approval' || !item.generated_image_url) {
+        await answerCallbackQuery(callbackId, 'Already handled or expired')
+        return NextResponse.json({ ok: true })
+      }
+
+      const settings = await getRepurposeSettings(kfUserId)
+      const jobType = action === 'kfok' ? 'copy_paste_finish' : 'copy_paste_v2'
+      const input = action === 'kfok'
+        ? { itemIds: [postId], repurposeCount: settings.variantCount, outputDriveFolderId: settings.outputDriveFolderId }
+        : { itemIds: [postId], endFrame: settings.endFrameMode, regenerate: true }
+
+      const row = await one<{ id: string }>(
+        `INSERT INTO generation_queue (user_id, job_type, input, total_items)
+         VALUES ($1, $2, $3, 1)
+         RETURNING id`,
+        [kfUserId, jobType, JSON.stringify(input)],
+      )
+      if (row) {
+        const secret = process.env.CRON_SECRET
+        if (secret) {
+          const claimed = await one<{ id: string }>(
+            `UPDATE generation_queue SET status='processing', started_at=now(), attempts=attempts+1
+              WHERE id=$1 AND status='pending' RETURNING id`,
+            [row.id],
+          ).catch(() => null)
+          if (claimed) {
+            fetch(`${internalBaseUrl()}/api/queue/process/${row.id}`, {
+              method: 'POST',
+              headers: { 'x-cron-secret': secret },
+            }).catch(err => console.error(`[telegram/webhook] fire ${jobType} worker:`, err))
+          }
+        }
+      }
+
+      await answerCallbackQuery(callbackId, action === 'kfok' ? 'Generating video…' : 'Regenerating keyframe…')
+      await sendText(
+        chatId,
+        action === 'kfok'
+          ? '🎬 Generating the video now. You will get it here when it finishes.'
+          : '🔁 Regenerating the keyframe — you will get the new one here shortly.',
+      )
+      return NextResponse.json({ ok: true })
+    }
+
     // ── Copy-Paste batch buttons ──────────────────────────────────────────
     if (action === 'cpstart' || action === 'cpcancel') {
       const chatId = cbMessage?.chat?.id as number | undefined
