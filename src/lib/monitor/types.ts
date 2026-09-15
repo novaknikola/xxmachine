@@ -14,6 +14,7 @@ export type ReplicateStatus =
   | 'analyzing'
   | 'image_generating'
   | 'image_done'
+  | 'awaiting_keyframe_approval'
   | 'video_generating'
   | 'done'
   | 'failed'

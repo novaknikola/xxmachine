@@ -46,6 +46,7 @@ interface ItemLike {
 const EDITABLE_STATUSES = new Set([
   'classified',
   'image_done',
+  'awaiting_keyframe_approval',
   'needs_review',
   'failed',
   'pending_classify',

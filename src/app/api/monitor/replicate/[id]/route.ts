@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireUser } from '@/lib/session'
-import { replicateCopyPasteItem } from '@/lib/monitor/process-item'
+import { generateCopyPasteKeyframes } from '@/lib/monitor/process-item'
 
 export async function POST(
   req: NextRequest,
@@ -12,7 +12,10 @@ export async function POST(
   const { id } = await params
 
   try {
-    const result = await replicateCopyPasteItem(id, auth.id)
+    // Phase 1 only — generates the Seedream keyframe(s) and parks the item on
+    // 'awaiting_keyframe_approval'. The Seedance call now requires a separate
+    // approve step (Run tab or Telegram); see finishCopyPasteVideo.
+    const result = await generateCopyPasteKeyframes(id, auth.id)
     return NextResponse.json(result)
   } catch (err) {
     return NextResponse.json(

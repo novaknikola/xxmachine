@@ -88,6 +88,21 @@ export interface CopyPasteJobInput {
   outputDriveFolderId?: string | null
   /** Appended to the end of every item's rendered prompt. */
   customPrompt?: string | null
+  /** Regenerate button on a rejected keyframe — clears it and re-runs Seedream Edit. */
+  regenerate?: boolean
+}
+
+/**
+ * Phase 2 of Copy-Paste: items whose keyframe(s) are already approved
+ * (replicate_status = 'awaiting_keyframe_approval'). Submitted by the Run
+ * tab's Approve button and the Telegram kfok: callback — same shape as
+ * CopyPasteJobInput minus the keyframe-only fields (endFrame, customPrompt),
+ * since those were already used to produce the keyframe being approved.
+ */
+export interface CopyPasteFinishJobInput {
+  itemIds: string[]
+  repurposeCount?: number
+  outputDriveFolderId?: string | null
 }
 
 export interface CopyPromptsJobItem {
@@ -403,6 +418,7 @@ export type QueueSubmitBody =
     }
   | { job_type: 'bulk_carousel'; input: BulkCarouselJobInput }
   | { job_type: 'copy_paste_v2'; input: CopyPasteJobInput }
+  | { job_type: 'copy_paste_finish'; input: CopyPasteFinishJobInput }
   | { job_type: 'copy_prompts_generate'; input: CopyPromptsJobInput }
   | { job_type: 'seedance_i2v'; input: SeedanceI2VJobInput }
   | { job_type: 'infinite_talk'; input: InfiniteTalkJobInput }
@@ -1142,7 +1158,7 @@ export async function POST(req: NextRequest) {
   }
 
   if (body.job_type === 'copy_paste_v2') {
-    const { itemIds, endFrame, repurposeCount } = body.input ?? {}
+    const { itemIds, endFrame, repurposeCount, regenerate } = body.input ?? {}
     if (!Array.isArray(itemIds) || itemIds.length === 0) {
       return NextResponse.json({ error: 'itemIds required' }, { status: 400 })
     }
@@ -1158,6 +1174,7 @@ export async function POST(req: NextRequest) {
       itemIds,
       endFrame: endFrame === 'always' || endFrame === 'off' ? endFrame : 'auto',
       repurposeCount: repurpose,
+      regenerate: regenerate === true,
     }
     const row = await one<{ id: string }>(
       `INSERT INTO generation_queue (user_id, job_type, input, total_items)
@@ -1183,6 +1200,48 @@ export async function POST(req: NextRequest) {
           method: 'POST',
           headers: { 'x-cron-secret': secret },
         }).catch(err => console.error('[queue/submit] fire copy_paste_v2 worker:', err))
+      }
+    }
+    return NextResponse.json({ id: row!.id })
+  }
+
+  if (body.job_type === 'copy_paste_finish') {
+    const { itemIds, repurposeCount } = body.input ?? {}
+    if (!Array.isArray(itemIds) || itemIds.length === 0) {
+      return NextResponse.json({ error: 'itemIds required' }, { status: 400 })
+    }
+    if (itemIds.length > 100) {
+      return NextResponse.json({ error: 'Max 100 items per submission' }, { status: 400 })
+    }
+    const repurpose = Number(repurposeCount) || 0
+    if (repurpose < 0 || repurpose > 20) {
+      return NextResponse.json({ error: 'repurposeCount must be 0–20' }, { status: 400 })
+    }
+
+    const input: CopyPasteFinishJobInput = { itemIds, repurposeCount: repurpose }
+    const row = await one<{ id: string }>(
+      `INSERT INTO generation_queue (user_id, job_type, input, total_items)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [user.id, body.job_type, JSON.stringify(input), itemIds.length],
+    )
+    // Same loopback-port pattern as copy_paste_v2 — Seedance alone can run up
+    // to 45 minutes, far past nginx's proxy_read_timeout.
+    const secret = process.env.CRON_SECRET
+    if (row && secret) {
+      const claimed = await one<{ id: string }>(
+        `UPDATE generation_queue
+            SET status = 'processing', started_at = now(), attempts = attempts + 1
+          WHERE id = $1 AND status = 'pending'
+          RETURNING id`,
+        [row.id],
+      ).catch(() => null)
+      if (claimed) {
+        const internalBase = internalBaseUrl()
+        fetch(`${internalBase}/api/queue/process/${row.id}`, {
+          method: 'POST',
+          headers: { 'x-cron-secret': secret },
+        }).catch(err => console.error('[queue/submit] fire copy_paste_finish worker:', err))
       }
     }
     return NextResponse.json({ id: row!.id })

@@ -9,10 +9,10 @@ import {
   renderKeyframeEditPrompt,
   type CopyPasteSpec,
 } from './copy-paste-spec'
-import { probeSourceVideo, type SourceAspectRatio } from './analyze'
+import { probeSourceVideo, uploadFaceFrame, type SourceAspectRatio } from './analyze'
 import { generateCopyPasteKeyframe, generateSeedanceVideo } from './replicate'
 import { getUserApiKey } from '@/lib/user-config'
-import { notifyReplicationDone, notifyReplicationFailed } from './notify'
+import { notifyReplicationDone, notifyReplicationFailed, notifyKeyframeReady } from './notify'
 import { archiveDiscoveryItem } from '@/lib/drive-archive/from-discovery-item'
 import type { DiscoveryItemRow, EndFrameMode, TrackedProfileRow } from './types'
 import { resolveVideoUrlViaRapidApi, resolveVideoUrlsViaApify } from '@/lib/instagram-scrape'
@@ -190,6 +190,9 @@ export async function classifyDiscoveryItem(
 
     const spec = await extractCopyPasteSpec(probe, videoUrl, transcript)
     const renderedPrompt = renderCopyPastePrompt(spec)
+    // Picks the frame where the face actually reads well, per the analysis above
+    // (spec.best_face_frame_time) — replaces the old blind "always frame 0".
+    const faceFrameUrl = await uploadFaceFrame(probe, spec.best_face_frame_time)
 
     // A prompt the user typed outlives a re-analysis. They can take the new one
     // by clearing the textarea, which also clears this flag.
@@ -230,7 +233,7 @@ export async function classifyDiscoveryItem(
         probe.aspectRatio,
         probe.width,
         probe.height,
-        probe.firstFrameUrl,
+        faceFrameUrl,
         // Without this the end-frame variant silently never fires: Replicate
         // skips its probe when a spec already exists, so the only chance to
         // capture the last frame is here.
@@ -252,19 +255,22 @@ export async function classifyDiscoveryItem(
 }
 
 /**
- * Replication: reference photo + source first-frame composited into a
- * Seedream v5 Pro Edit keyframe, then that keyframe + rendered prompt into
- * Seedance 2.0 i2v. Runs analysis first if it hasn't happened yet.
+ * Phase 1 of replication: reference photo + source face-frame composited into
+ * a Seedream v5 Pro Edit keyframe (start, and optionally a matching end
+ * keyframe). Stops there and parks the item on 'awaiting_keyframe_approval'
+ * instead of continuing straight to Seedance — the keyframe is the only real
+ * check on whether the identity swap looks right before paying for the
+ * video-edit call, which runs up to 45 minutes and cannot be undone once
+ * billed. finishCopyPasteVideo() below does the rest once a human approves,
+ * from either the Run tab or the Telegram notification this sends.
  */
-export async function replicateCopyPasteItem(
+export async function generateCopyPasteKeyframes(
   itemId: string,
   userId: string,
   opts?: {
     endFrame?: EndFrameMode
-    repurposeCount?: number
-    outputDriveFolderId?: string | null
     /** Appended to the keyframe (Seedream) edit prompt — the video-edit (Seedance) prompt is
-     *  now fixed and does not read this. See the finalPrompt comment further down for why. */
+     *  fixed and does not read this. See finishCopyPasteVideo's finalPrompt for why. */
     customPrompt?: string | null
   },
 ) {
@@ -300,14 +306,19 @@ export async function replicateCopyPasteItem(
       `UPDATE discovery_items SET replicate_status = 'done', replicate_error = NULL WHERE id = $1`,
       [itemId],
     )
-    return { ok: true, videoUrl: item.kling_video_url, model: item.video_model ?? 'cached' }
+    return { ok: true, videoUrl: item.kling_video_url, model: item.video_model ?? 'cached', awaitingApproval: false }
+  }
+  // Keyframes are already sitting in front of a human — a re-poll of the same
+  // batch (queue retries a batch by item, not by call) must not regenerate
+  // them (paid) or re-send the same Telegram notification.
+  if (item.replicate_status === 'awaiting_keyframe_approval' && item.generated_image_url) {
+    return { ok: true, awaitingApproval: true }
   }
 
   try {
     let spec: CopyPasteSpec | null = item.copy_paste_spec
       ? normalizeCopyPasteSpec(item.copy_paste_spec)
       : null
-    let durationSec = item.source_duration
     let aspectRatio: SourceAspectRatio = item.source_aspect_ratio ?? 'other'
     let firstFrameUrl = item.source_first_frame_url
     let lastFrameUrl = item.source_last_frame_url
@@ -323,9 +334,10 @@ export async function replicateCopyPasteItem(
 
       spec = await extractCopyPasteSpec(probe, item.video_url, transcript)
       renderedPrompt = renderCopyPastePrompt(spec)
-      durationSec = probe.duration
       aspectRatio = probe.aspectRatio
-      firstFrameUrl = probe.firstFrameUrl ?? firstFrameUrl
+      // Picks the frame where the face actually reads well (spec.best_face_frame_time),
+      // not blindly frame 0.
+      firstFrameUrl = (await uploadFaceFrame(probe, spec.best_face_frame_time)) ?? firstFrameUrl
       lastFrameUrl = probe.lastFrameUrl ?? lastFrameUrl
       cutCount = probe.cutCount
 
@@ -346,12 +358,12 @@ export async function replicateCopyPasteItem(
           itemId,
           JSON.stringify(spec),
           renderedPrompt,
-          durationSec,
+          probe.duration,
           probe.cutCount,
           aspectRatio,
           probe.width,
           probe.height,
-          probe.firstFrameUrl,
+          firstFrameUrl,
           probe.lastFrameUrl,
         ],
       )
@@ -363,7 +375,7 @@ export async function replicateCopyPasteItem(
       await query(`UPDATE discovery_items SET replicate_status = 'image_generating' WHERE id = $1`, [itemId])
       // Telegram's custom prompt now lands here, not on the Seedance call — live testing
       // showed it actually needs to steer the identity swap itself (this step), while
-      // Seedance just needs to be told to use the resulting keyframe (see finalPrompt below).
+      // Seedance just needs to be told to use the resulting keyframe (see finishCopyPasteVideo).
       const keyframePrompt = [renderKeyframeEditPrompt(spec), opts?.customPrompt?.trim()].filter(Boolean).join(' ')
       // Written before the call, not after: if the render fails or returns
       // something wrong, the prompt that caused it is the thing worth having.
@@ -414,24 +426,83 @@ export async function replicateCopyPasteItem(
         [itemId, generatedEndImageUrl],
       )
     }
-    const lastImageUrl = wantEndFrame ? generatedEndImageUrl : null
-    const referenceImageUrls = [generatedImageUrl, ...(lastImageUrl ? [lastImageUrl] : [])]
 
-    // Previous approach — kept for reference, no longer sent. Built the Seedance prompt from
-    // the auto-generated scene/motion description (renderCopyPastePrompt), a front-loaded
-    // identity-lock instruction, and the user's Telegram custom text. reference_images alone
-    // is documented as soft "style or character guidance" for this model, not a hard
-    // constraint, and was repeatedly observed keeping the original video's face/identity
-    // instead of the keyframe's even with SEEDANCE_IDENTITY_LOCK front-loaded. Live testing
-    // (2026-08-24) found a short, fixed instruction below performs far more reliably —
-    // Seedance's video-edit model already preserves the source's motion/timing/camera on its
-    // own, so the long scene description wasn't needed and may have been diluting the lock:
-    //
-    // const finalPrompt = [
-    //   SEEDANCE_IDENTITY_LOCK,
-    //   renderedPrompt,
-    //   opts?.customPrompt?.trim(),
-    // ].filter(Boolean).join(' ')
+    await query(
+      `UPDATE discovery_items
+          SET replicate_status = 'awaiting_keyframe_approval', replicate_error = NULL
+        WHERE id = $1`,
+      [itemId],
+    )
+    await notifyKeyframeReady({
+      userId,
+      itemId,
+      profile: item.profile,
+      contentUrl: item.content_url,
+      imageUrl: generatedImageUrl,
+      endImageUrl: generatedEndImageUrl,
+    }).catch(() => {})
+
+    return { ok: true, awaitingApproval: true }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    await query(
+      `UPDATE discovery_items SET replicate_status = 'failed', replicate_error = $2 WHERE id = $1`,
+      [itemId, msg],
+    )
+    await notifyReplicationFailed(userId, item.profile, msg).catch(() => {})
+    throw err
+  }
+}
+
+/**
+ * Phase 2 of replication: the paid Seedance video-edit call, run only after a
+ * human has approved the keyframe(s) generateCopyPasteKeyframes produced.
+ * Everything from here down — archive, repurpose fan-out, done notification —
+ * is unchanged from the old one-shot replicateCopyPasteItem.
+ */
+export async function finishCopyPasteVideo(
+  itemId: string,
+  userId: string,
+  opts?: {
+    repurposeCount?: number
+    outputDriveFolderId?: string | null
+  },
+) {
+  const item = await one<DiscoveryItemRow>(
+    `SELECT * FROM discovery_items WHERE id = $1 AND user_id = $2`,
+    [itemId, userId],
+  )
+  if (!item) throw new Error('Item not found')
+  if (!item.video_url) throw new Error('Item has no source video')
+
+  const apiKey = await getUserApiKey(userId, 'wavespeed_api_key')
+
+  // Idempotent: a requeued/retried job, or a double-tap on Approve, must not
+  // pay for a second Seedance render.
+  if (item.kling_video_url) {
+    await query(
+      `UPDATE discovery_items SET replicate_status = 'done', replicate_error = NULL WHERE id = $1`,
+      [itemId],
+    )
+    return { ok: true, videoUrl: item.kling_video_url, model: item.video_model ?? 'cached' }
+  }
+  if (!item.generated_image_url) {
+    throw new Error('Keyframe not ready yet — run Replicate first')
+  }
+
+  try {
+    const aspectRatio: SourceAspectRatio = item.source_aspect_ratio ?? 'other'
+    const lastImageUrl = item.generated_end_image_url
+    const referenceImageUrls = [item.generated_image_url, ...(lastImageUrl ? [lastImageUrl] : [])]
+
+    // Built from a short fixed instruction rather than the auto-generated scene/motion
+    // description (renderCopyPastePrompt) plus an identity-lock preamble — that longer
+    // form was repeatedly observed keeping the original video's face/identity instead of
+    // the keyframe's, because reference_images is only documented as soft "style or
+    // character guidance" for this model, not a hard constraint. Live testing (2026-08-24)
+    // found this short instruction performs far more reliably — Seedance's video-edit
+    // model already preserves the source's motion/timing/camera on its own, so the long
+    // scene description wasn't needed and may have been diluting the identity lock.
     const finalPrompt =
       'Use @Image1 as the primary character and visual reference. Completely recreate the ' +
       'original video using the character shown in @Image1 as the main subject. Remove text ' +
@@ -487,6 +558,28 @@ export async function replicateCopyPasteItem(
     await notifyReplicationFailed(userId, item.profile, msg).catch(() => {})
     throw err
   }
+}
+
+/**
+ * Rejected keyframe: clears it (and the end keyframe) so
+ * generateCopyPasteKeyframes regenerates from scratch off the same spec — a
+ * fresh, differently-seeded Seedream Edit call. Paid again on purpose, only on
+ * an explicit Regenerate tap.
+ */
+export async function regenerateCopyPasteKeyframes(
+  itemId: string,
+  userId: string,
+  opts?: { endFrame?: EndFrameMode; customPrompt?: string | null },
+) {
+  await query(
+    `UPDATE discovery_items
+        SET generated_image_url = NULL, generated_end_image_url = NULL,
+            keyframe_prompt = NULL, end_keyframe_prompt = NULL,
+            replicate_status = 'classified'
+      WHERE id = $1 AND user_id = $2`,
+    [itemId, userId],
+  )
+  return generateCopyPasteKeyframes(itemId, userId, opts)
 }
 
 /**

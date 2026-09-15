@@ -29,6 +29,7 @@ import type {
   BulkImageJobItem, VideoRepurposeJobInput, ImageRepurposeJobInput, VideoCaptionJobInput, VideoCaptionItem,
   VideoTranscribeJobInput, VideoOcrJobInput, CaptionShuffleJobInput, CaptionGenerateJobInput, ComfyUIPodBulkJobInput,
   BulkCarouselJobInput, MyPodI2vJobInput, MyPodAnimateJobInput, MyPodTalkJobInput, CopyPasteJobInput,
+  CopyPasteFinishJobInput,
   CopyPromptsJobInput, SeedanceI2VJobInput, InfiniteTalkJobInput,
 } from '../../submit/route'
 import { getPodSessionSecrets } from '@/lib/my-pod/session'
@@ -38,7 +39,7 @@ import {
 } from '@/lib/my-pod/comfy'
 import { runI2vItem, runAnimateItem, runTalkItem } from '@/lib/my-pod/runners'
 import { fishTts } from '@/lib/my-pod/fish-tts'
-import { replicateCopyPasteItem } from '@/lib/monitor/process-item'
+import { generateCopyPasteKeyframes, finishCopyPasteVideo, regenerateCopyPasteKeyframes } from '@/lib/monitor/process-item'
 import { processKlingRecreateJob } from '@/lib/kling-recreate/process-job'
 import type { KlingRecreateQueueInput } from '@/lib/kling-recreate/types'
 
@@ -69,7 +70,7 @@ interface CarouselRow {
 
 interface CopyPasteRow {
   itemId: string
-  status: 'done' | 'error'
+  status: 'done' | 'awaiting_approval' | 'error'
   videoUrl?: string
   error?: string
 }
@@ -1527,9 +1528,11 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ ok: true, done: doneCount })
     }
 
-    // ── copy_paste_v2 ─────────────────────────────────────────────────────────
+    // ── copy_paste_v2 — phase 1: probe/analyze + Seedream keyframe(s), then
+    // park each item on 'awaiting_keyframe_approval' for a human to check
+    // before the paid Seedance call (see copy_paste_finish below) ───────────
     if (job.job_type === 'copy_paste_v2') {
-      const { itemIds, endFrame, repurposeCount, outputDriveFolderId, customPrompt } = job.input as unknown as CopyPasteJobInput
+      const { itemIds, endFrame, customPrompt, regenerate } = job.input as unknown as CopyPasteJobInput
       if (!itemIds?.length) throw new Error('No items in job input')
 
       const copyPasteRows: CopyPasteRow[] = job.output?.copyPasteRows ? [...job.output.copyPasteRows] : []
@@ -1547,13 +1550,16 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
         const results = await Promise.all(batchIds.map(async (itemId): Promise<CopyPasteRow> => {
           try {
-            const result = await replicateCopyPasteItem(itemId, job.user_id, {
-              endFrame,
-              repurposeCount,
-              outputDriveFolderId,
-              customPrompt,
-            })
-            return { itemId, status: 'done', videoUrl: result.videoUrl }
+            // Regenerate (a rejected keyframe) clears the old one first; a
+            // normal run just skips items that already have one.
+            const result = regenerate
+              ? await regenerateCopyPasteKeyframes(itemId, job.user_id, { endFrame, customPrompt })
+              : await generateCopyPasteKeyframes(itemId, job.user_id, { endFrame, customPrompt })
+            // Already had a cached video (idempotent re-run) — surface it as done,
+            // not awaiting_approval, so the batch summary reads correctly.
+            return 'videoUrl' in result && result.videoUrl
+              ? { itemId, status: 'done', videoUrl: result.videoUrl }
+              : { itemId, status: 'awaiting_approval' }
           } catch (err) {
             const msg = err instanceof Error ? err.message : 'failed'
             console.error(`[queue/process] copy_paste_v2 ${id} item ${itemId} failed:`, msg)
@@ -1566,6 +1572,55 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         const progress = Math.round((doneCount / itemIds.length) * 100)
         // progressAt is the liveness heartbeat cron uses to tell a slow job from a
         // dead one — a long bulk run must not be requeued while it is still working.
+        await query(
+          `UPDATE generation_queue
+              SET done_items=$1, progress=$2,
+                  output=jsonb_build_object('copyPasteRows', $3::jsonb, 'progressAt', $5::text)
+            WHERE id=$4`,
+          [doneCount, progress, JSON.stringify(copyPasteRows), id, new Date().toISOString()],
+        )
+      }
+
+      await query(
+        `UPDATE generation_queue SET status='done', finished_at=now(), progress=100 WHERE id=$1`,
+        [id],
+      )
+
+      return NextResponse.json({ ok: true, done: doneCount })
+    }
+
+    // ── copy_paste_finish — phase 2: the paid Seedance video-edit call, only
+    // for items whose keyframe a human already approved ─────────────────────
+    if (job.job_type === 'copy_paste_finish') {
+      const { itemIds, repurposeCount, outputDriveFolderId } = job.input as unknown as CopyPasteFinishJobInput
+      if (!itemIds?.length) throw new Error('No items in job input')
+
+      const copyPasteRows: CopyPasteRow[] = job.output?.copyPasteRows ? [...job.output.copyPasteRows] : []
+      let doneCount = job.done_items
+
+      for (let batchStart = doneCount; batchStart < itemIds.length; batchStart += COPY_PASTE_BATCH_SIZE) {
+        if (!(await jobStillRunning(id))) {
+          console.log(`[queue/process] copy_paste_finish ${id} cancelled at ${doneCount}/${itemIds.length}`)
+          return NextResponse.json({ ok: true, cancelled: true, done: doneCount })
+        }
+
+        const batchEnd = Math.min(batchStart + COPY_PASTE_BATCH_SIZE, itemIds.length)
+        const batchIds = itemIds.slice(batchStart, batchEnd)
+
+        const results = await Promise.all(batchIds.map(async (itemId): Promise<CopyPasteRow> => {
+          try {
+            const result = await finishCopyPasteVideo(itemId, job.user_id, { repurposeCount, outputDriveFolderId })
+            return { itemId, status: 'done', videoUrl: result.videoUrl }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : 'failed'
+            console.error(`[queue/process] copy_paste_finish ${id} item ${itemId} failed:`, msg)
+            return { itemId, status: 'error', error: msg }
+          }
+        }))
+
+        copyPasteRows.push(...results)
+        doneCount = batchEnd
+        const progress = Math.round((doneCount / itemIds.length) * 100)
         await query(
           `UPDATE generation_queue
               SET done_items=$1, progress=$2,

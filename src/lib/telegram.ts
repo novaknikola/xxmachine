@@ -139,6 +139,16 @@ export function mainMenuKeyboard() {
   }
 }
 
+/** Approve / regenerate buttons on a Copy-Paste keyframe awaiting review before Seedance runs. */
+export function keyframeApprovalKeyboard(itemId: string) {
+  return {
+    inline_keyboard: [[
+      { text: '✅ Approve → Video', callback_data: `kfok:${itemId}` },
+      { text: '🔁 Regenerate', callback_data: `kfrg:${itemId}` },
+    ]],
+  }
+}
+
 /** Approve / cancel buttons for an assembled Copy-Paste batch. */
 export function batchKeyboard(batchId: string) {
   return {

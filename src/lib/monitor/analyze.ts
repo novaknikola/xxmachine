@@ -74,7 +74,12 @@ export interface SourceProbe {
   width: number | null
   height: number | null
   aspectRatio: SourceAspectRatio
-  /** Frame 0 (always ≤0.4s in) re-hosted publicly — the Seedream Edit keyframe input. Best-effort. */
+  /**
+   * No longer auto-populated here — which sampled frame becomes the Seedream Edit
+   * keyframe input now depends on CopyPasteSpec.best_face_frame_time (the vision
+   * analysis picks the clearest view of the subject's face), so the caller uploads
+   * it via `uploadFaceFrame()` once that spec exists. Always null on this return.
+   */
   firstFrameUrl: string | null
   /** Last sampled frame (~0.25s before the end) — input for the optional end keyframe. Best-effort. */
   lastFrameUrl: string | null
@@ -408,19 +413,18 @@ export async function probeSourceVideo(
       return null
     }
 
-    // Both endpoints are re-hosted so Seedream can fetch them. Best-effort: a
-    // failed upload only costs the corresponding keyframe, not the whole probe.
-    const uploadFrame = async (b64: string, name: string): Promise<string | null> => {
-      try {
-        return await uploadBuffer(Buffer.from(b64, 'base64'), `monitor/${id}/${name}.jpg`, 'image/jpeg')
-      } catch (err) {
-        console.warn(`[monitor/probe] ${name} upload failed:`, err instanceof Error ? err.message : err)
-        return null
-      }
-    }
-    const firstFrameUrl = await uploadFrame(frames[0], 'first-frame')
+    // Re-hosted so Seedream can fetch it. Best-effort: a failed upload only
+    // costs the end keyframe, not the whole probe. The start frame is no longer
+    // uploaded here — see uploadFaceFrame().
     const lastFrameUrl = frames.length > 1
-      ? await uploadFrame(frames[frames.length - 1], 'last-frame')
+      ? await uploadBuffer(
+          Buffer.from(frames[frames.length - 1], 'base64'),
+          `monitor/${id}/last-frame.jpg`,
+          'image/jpeg',
+        ).catch(err => {
+          console.warn('[monitor/probe] last-frame upload failed:', err instanceof Error ? err.message : err)
+          return null
+        })
       : null
 
     return {
@@ -433,7 +437,7 @@ export async function probeSourceVideo(
       width,
       height,
       aspectRatio: bucketAspectRatio(width, height),
-      firstFrameUrl,
+      firstFrameUrl: null,
       lastFrameUrl,
     }
   } catch (err) {
@@ -443,5 +447,45 @@ export async function probeSourceVideo(
     for (const p of [videoPath, ...framePaths]) {
       try { if (existsSync(p)) unlinkSync(p) } catch {}
     }
+  }
+}
+
+/**
+ * Re-hosts whichever sampled frame is nearest `targetTimeSec` — the Seedream Edit
+ * scene input. Replaces the old blind "always frame 0" choice: frame 0 sits
+ * ≤0.4s in, before the subject has necessarily turned toward camera or come into
+ * focus, and Seedream's identity swap works far better off a frame where the face
+ * is actually clear. `targetTimeSec` comes from CopyPasteSpec.best_face_frame_time
+ * (the vision model already looked at every frame once for the spec — this reuses
+ * that judgement instead of a second detection pass). Falls back to frame 0 when
+ * the model didn't return a usable time, matching the previous behaviour exactly.
+ */
+export async function uploadFaceFrame(
+  probe: Pick<SourceProbe, 'frames' | 'frameTimes'>,
+  targetTimeSec: number | null | undefined,
+): Promise<string | null> {
+  if (!probe.frames.length) return null
+
+  let index = 0
+  if (
+    targetTimeSec != null && Number.isFinite(targetTimeSec)
+    && probe.frameTimes.length === probe.frames.length
+  ) {
+    let best = Infinity
+    for (let i = 0; i < probe.frameTimes.length; i++) {
+      const d = Math.abs(probe.frameTimes[i] - targetTimeSec)
+      if (d < best) { best = d; index = i }
+    }
+  }
+
+  try {
+    return await uploadBuffer(
+      Buffer.from(probe.frames[index], 'base64'),
+      `monitor/${randomUUID()}/face-frame.jpg`,
+      'image/jpeg',
+    )
+  } catch (err) {
+    console.warn('[monitor/probe] face-frame upload failed:', err instanceof Error ? err.message : err)
+    return null
   }
 }
