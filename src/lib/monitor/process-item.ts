@@ -503,10 +503,25 @@ export async function finishCopyPasteVideo(
     // found this short instruction performs far more reliably — Seedance's video-edit
     // model already preserves the source's motion/timing/camera on its own, so the long
     // scene description wasn't needed and may have been diluting the identity lock.
+    //
+    // Still not reliable enough: confirmed live 2026-09-15 (item 589e996b) that even this
+    // short instruction can lose the fight and the output keeps the ORIGINAL video's face,
+    // not @Image1's — the keyframe itself was correct, only the video-edit call ignored it.
+    // Strengthened per the user's explicit instruction, general (not scene-specific)
+    // language only — do not reintroduce a scene/motion description here, that's the exact
+    // thing 2026-08-24 found made this worse, not better. The identity clause is stated
+    // twice (front and back — early tokens carry the most weight, but a second mention
+    // right before the trailing text-removal instructions guards against it being the part
+    // that gets dropped) and as an explicit negative against the source video's own person.
     const finalPrompt =
-      'Use @Image1 as the primary character and visual reference. Completely recreate the ' +
-      'original video using the character shown in @Image1 as the main subject. Remove text ' +
-      'on the screen. Remove captions.'
+      'The face, body and identity of the main subject in the output MUST be @Image1 in ' +
+      'every single frame from start to end — never the person who appears in the original ' +
+      'source video. Use @Image1 as the primary character and visual reference. Completely ' +
+      'recreate the original video using the character shown in @Image1 as the main subject, ' +
+      'keeping the original motion, camera work and scene. Do not keep any part of the ' +
+      'original source video\'s own person — their face, body and identity must be fully ' +
+      'replaced by @Image1, not blended with it and not reverted to at any point in the clip. ' +
+      'Remove text on the screen. Remove captions.'
 
     await query(`UPDATE discovery_items SET replicate_status = 'video_generating' WHERE id = $1`, [itemId])
     const result = await generateSeedanceVideo({
