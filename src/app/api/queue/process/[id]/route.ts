@@ -19,6 +19,7 @@ import {
 } from '@/lib/caption-shuffle'
 import { downloadDriveFile, uploadToDriveFolderResilient } from '@/lib/google-drive'
 import { getUserGoogleAccessToken } from '@/lib/drive-archive/user-google-auth'
+import { uploadRepurposeVariantGrouped } from '@/lib/drive-archive/repurpose-grouped-upload'
 import { writeFileSync, readFileSync, unlinkSync } from 'fs'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
@@ -350,14 +351,15 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
                 // already rendered and stored, so a Drive hiccup must not mark it
                 // failed — it is logged and the run carries on.
                 if (outputDriveFolderId) {
-                  const base = (videoName ?? 'video').replace(/\.[^.]+$/, '')
                   try {
-                    await uploadToDriveFolderResilient(
+                    await uploadRepurposeVariantGrouped(
                       job.user_id,
                       outputDriveFolderId,
-                      `${base}_${String(variantIdx + 1).padStart(3, '0')}.mp4`,
+                      variantIdx,
+                      count,
                       buf,
                       'video/mp4',
+                      '.mp4',
                     )
                   } catch (err) {
                     console.error(
@@ -454,7 +456,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     // ── image_repurpose ────────────────────────────────────────────────────────
     if (job.job_type === 'image_repurpose') {
       const {
-        imageUrl, imageName, count, baseSeed, settings, driveFileId, outputDriveFolderId,
+        imageUrl, count, baseSeed, settings, driveFileId, outputDriveFolderId,
       } = job.input as unknown as ImageRepurposeJobInput
       let doneCount = job.done_items
 
@@ -497,14 +499,15 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             // already rendered and stored, so a Drive hiccup must not mark it
             // failed — it is logged and the run carries on.
             if (outputDriveFolderId) {
-              const base = (imageName ?? 'image').replace(/\.[^.]+$/, '')
               try {
-                await uploadToDriveFolderResilient(
+                await uploadRepurposeVariantGrouped(
                   job.user_id,
                   outputDriveFolderId,
-                  `${base}_${String(variantIdx + 1).padStart(3, '0')}.jpg`,
+                  variantIdx,
+                  count,
                   buf,
                   'image/jpeg',
+                  '.jpg',
                 )
               } catch (err) {
                 console.error(
