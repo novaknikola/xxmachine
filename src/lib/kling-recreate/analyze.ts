@@ -46,7 +46,7 @@ async function callGrokJson(opts: Parameters<typeof callGrok>[0]): Promise<Recor
  * with repeating itself instead of tracking a real change.
  */
 const FRAME_DESCRIPTION_SYSTEM =
-  'You describe consecutive 1fps video frames for a motion-generation model, one entry per frame, ' +
+  'You describe consecutive ~2fps video frames for a motion-generation model, one entry per frame, ' +
   'in strict chronological order. Return JSON {"frames":[{"t":number,"description":"..."}]}.\n\n' +
   'Each description must cover, explicitly, every time: HEAD/FACE (direction, expression, eyes open ' +
   'or closed — do not default to "eyes closed" out of habit, look at the actual frame), HANDS (what ' +
@@ -57,7 +57,7 @@ const FRAME_DESCRIPTION_SYSTEM =
   'state what changed from the previous frame first, then the rest of the description. If two ' +
   'consecutive frames genuinely look identical, say so explicitly ("unchanged from previous frame in ' +
   'pose/hands/face; only X differs") — do not silently paste the same boilerplate sentence for both, ' +
-  'that is the single most common failure mode and it destroys the sequence. Real 1fps footage of a ' +
+  'that is the single most common failure mode and it destroys the sequence. Real ~2fps footage of a ' +
   'person almost never has ten identical "eyes closed, smiling" frames in a row; if your descriptions ' +
   'read that way, you are pattern-matching a generic pose instead of looking at each image.\n\n' +
   'Never use "steadily", "smoothly", "gently", "calmly", "consistently", or "slightly" to describe ' +
@@ -81,7 +81,7 @@ async function describeFrameChunk(
         {
           type: 'text' as const,
           text: [
-            `These ${frames.length} frames are 1fps samples at t=${frames.map(f => f.t_sec).join(', ')} seconds, in order.`,
+            `These ${frames.length} frames are ~2fps samples at t=${frames.map(f => f.t_sec.toFixed(1)).join(', ')} seconds, in order.`,
             precedingContext
               ? `The frame immediately before this chunk (last one already described) ended like this — start this chunk's first frame by stating what changed from it: ${precedingContext}`
               : 'This is the first frame of the clip — describe it fully, nothing precedes it.',
@@ -109,7 +109,7 @@ function choosePromptMode(shots: KlingShotBeat[]): 'prompt' | 'multi_prompt' {
 /**
  * Kling's own multi_prompt API caps at 6 beats (KLING_MULTI_PROMPT_MAX in
  * kling-client.ts) — a hard provider limit, not something prompting can lift.
- * A 10s clip sampled at 1fps has ~10 frame-level observations; this step's
+ * A 10s clip sampled at ~2fps has ~20 frame-level observations; this step's
  * job is to compress those into at most 6 shots WITHOUT losing the specific,
  * differentiated motion each frame already captured — the previous version
  * of this prompt let the model default to a generic paraphrase instead,
@@ -119,7 +119,7 @@ function choosePromptMode(shots: KlingShotBeat[]): 'prompt' | 'multi_prompt' {
  * body-part changes frame to frame.
  */
 const SYNTHESIS_SYSTEM =
-  'You compress a 1fps, per-frame video analysis into instructions for a video-generation model. ' +
+  'You compress a ~2fps, per-frame video analysis into instructions for a video-generation model. ' +
   'Return JSON: setting, hook, character_action, camera, speech (or null), master_prompt, ' +
   'shots: array of {t_start, t_end, prompt}, at most 6 entries, covering the FULL clip start to end ' +
   'with no gaps.\n\n' +
@@ -157,7 +157,7 @@ async function synthesizeContext(opts: {
   transcript: string
 }): Promise<Pick<KlingVideoContext, 'setting' | 'hook' | 'character_action' | 'camera' | 'speech' | 'shots'> & { master_prompt: string }> {
   const timeline = opts.frames
-    .map(f => `${f.t_sec.toFixed(0)}s: ${f.description}`)
+    .map(f => `${f.t_sec.toFixed(1)}s: ${f.description}`)
     .join('\n')
 
   const parsed = await callGrokJson({
@@ -171,7 +171,7 @@ async function synthesizeContext(opts: {
       content: [
         `Duration: ${opts.duration != null ? `${opts.duration.toFixed(1)}s` : 'unknown'}. Aspect: ${opts.aspectRatio}.`,
         opts.transcript ? `Timestamped transcript:\n${opts.transcript}` : 'No speech transcript.',
-        `Per-frame descriptions (1fps, already tracks what changed each second):\n${timeline}`,
+        `Per-frame descriptions (~2fps, already tracks what changed each moment):\n${timeline}`,
         'Follow the rules above exactly. Cross-check before returning: does character_action name ' +
           'every distinct beat visible in the per-frame timeline? Do shots cover 0s to the end with no ' +
           'gap and no repeated pose between consecutive shots? If not, fix it before returning.',

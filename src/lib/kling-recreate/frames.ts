@@ -93,6 +93,20 @@ async function probeFormat(path: string): Promise<{
  * base64 for the vision call. Caps at MAX_FPS_FRAMES so a long source cannot
  * spawn unbounded Grok calls.
  */
+/**
+ * Target gap between sampled frames — 2fps, not 1fps. Confirmed live
+ * 2026-09-16: a real reel's distinctive "opens the bottle with her heel"
+ * beat sat at ~4.6-4.8s, squarely between the old grid's 4s and 5s samples,
+ * and was invisible to the whole analysis pipeline as a result — the frame
+ * that would have shown it was simply never extracted. Same adaptive-grid
+ * approach Copy-Paste's analyze.ts already uses (TARGET_FRAME_GAP_SEC there
+ * too), so short clips get denser sampling while long ones still respect
+ * MAX_FPS_FRAMES instead of spawning an unbounded Grok call.
+ */
+const TARGET_FRAME_GAP_SEC = 0.5
+/** Floor — a very short clip still gets at least this many samples. */
+const MIN_FRAMES = 5
+
 export async function extractOneFpsFrames(
   videoUrl: string,
   storagePrefix: string,
@@ -105,9 +119,16 @@ export async function extractOneFpsFrames(
     await downloadVideo(videoUrl, videoPath)
     const format = await probeFormat(videoPath)
     const duration = format.duration ?? 1
-    const lastWhole = Math.max(0, Math.min(MAX_FPS_FRAMES - 1, Math.floor(duration)))
+    const frameCount = Math.min(
+      MAX_FPS_FRAMES,
+      Math.max(MIN_FRAMES, Math.ceil(duration / TARGET_FRAME_GAP_SEC)),
+    )
+    const step = frameCount > 1 ? duration / frameCount : 0
     const times: number[] = []
-    for (let t = 0; t <= lastWhole; t++) times.push(t)
+    for (let i = 0; i < frameCount; i++) {
+      const t = Math.round(i * step * 10) / 10 // one decimal — matches ffmpeg -ss precision used below
+      if (t < duration) times.push(t)
+    }
     if (times.length === 0) times.push(0)
 
     const frames: OneFpsExtract['frames'] = []
