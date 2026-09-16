@@ -49,10 +49,14 @@ const FRAME_DESCRIPTION_SYSTEM =
   'You describe consecutive ~2fps video frames for a motion-generation model, one entry per frame, ' +
   'in strict chronological order. Return JSON {"frames":[{"t":number,"description":"..."}]}.\n\n' +
   'Each description must cover, explicitly, every time: HEAD/FACE (direction, expression, eyes open ' +
-  'or closed — do not default to "eyes closed" out of habit, look at the actual frame), HANDS (what ' +
-  'each hand is doing, holding, and exactly where it is), TORSO/HIPS, LEGS/FEET (weight-bearing leg, ' +
-  'stride phase), and WARDROBE state (any garment moved by wind, motion, or the subject\'s own hands ' +
-  'since the last frame).\n\n' +
+  'or closed — do not default to "eyes closed" out of habit, look at the actual frame), MOUTH/SPEECH ' +
+  '(state plainly: mouth closed / mouth open not speaking, e.g. smiling or gasping / mouth actively ' +
+  'moving as if speaking — this is used later to work out who said which line, so never skip it and ' +
+  'never guess "speaking" just because a line falls near this timestamp), HANDS (what each hand is ' +
+  'doing, holding, and exactly where it is), TORSO/HIPS, LEGS/FEET (weight-bearing leg, stride phase), ' +
+  'and WARDROBE state (any garment moved by wind, motion, or the subject\'s own hands since the last ' +
+  'frame). If more than one person is visible, describe MOUTH/SPEECH for each of them separately, ' +
+  'not just the main subject.\n\n' +
   'CRITICAL — this is a SEQUENCE, not a set of unrelated stills: for every frame after the first, ' +
   'state what changed from the previous frame first, then the rest of the description. If two ' +
   'consecutive frames genuinely look identical, say so explicitly ("unchanged from previous frame in ' +
@@ -141,8 +145,26 @@ const SYNTHESIS_SYSTEM =
   'than a natural sentence would. Only mention a body part when it is doing something worth directing; ' +
   'skip the ones that are just sitting there. Two consecutive shots must never describe the same pose/' +
   'action — if the per-frame timeline shows real change between them (it should, that is what the frames ' +
-  'are for), say what changed. Merge only genuinely identical seconds; do not merge for brevity. State ' +
-  'speech within the shot whose time range it falls in, quoted, with who says it if determinable.\n\n' +
+  'are for), say what changed. Merge only genuinely identical seconds; do not merge for brevity. Every ' +
+  'shot must refer to the on-camera subject as the same one continuous person, appearance matching the ' +
+  'reference photo used to generate the still image this shot is anchored to — do not describe her as if ' +
+  'she could be a different person shot to shot.\n\n' +
+  'SPEECH ATTRIBUTION (CRITICAL — this pipeline previously put the wrong person\'s words in the wrong ' +
+  'mouth, confirmed live 2026-09-16, do not repeat that): the transcript is timestamped as ' +
+  '"[start s-end s] text". For each line, find the per-frame description(s) whose time falls inside ' +
+  'that window and check what MOUTH/SPEECH says for every visible person at that moment.\n' +
+  '- Attribute the line to a visible person ONLY if their mouth is described as actively moving/speaking ' +
+  'at that timestamp.\n' +
+  '- If the frame data shows the main subject\'s mouth closed or just smiling (not speaking) at that ' +
+  'timestamp, that line is NOT hers — phrase it as heard off-screen instead (e.g. "a voice off-camera ' +
+  'says ..."), never put it in her mouth by default.\n' +
+  '- A back-and-forth transcript (two distinct voices/registers) with only one person ever visibly ' +
+  'speaking means the other voice is off-screen for its lines — never assign both sides to the one ' +
+  'visible person.\n' +
+  '- When genuinely unsure, phrase the line as off-screen/ambient rather than guessing a speaker — a line ' +
+  'not visually lip-synced is harmless, a line put in the wrong (or same) mouth for both speakers is not.\n' +
+  '- State each line within the shot whose time range it falls in, quoted, correctly attributed per the ' +
+  'rule above.\n\n' +
   'master_prompt — one flowing paragraph (not a list), a fallback for when shots are not used: setting, ' +
   'hook, the full character_action, camera, and speech.\n\n' +
   'Never use "steadily", "smoothly", "gently", "calmly", "consistently", "playfully", "flirtatiously", ' +
