@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   buildKlingI2VPayload,
   clampKlingDuration,
+  clampShotDuration,
   KlingPayloadError,
   KLING_I2V_MODELS,
   klingI2VEndpoint,
@@ -21,6 +22,30 @@ describe('clampKlingDuration', () => {
     assert.equal(clampKlingDuration(20), 15)
     assert.equal(clampKlingDuration(null), 5)
     assert.equal(clampKlingDuration(Number.NaN), 5)
+  })
+})
+
+describe('clampShotDuration', () => {
+  it('rounds to a positive integer WITHOUT the 3-15 whole-video floor/ceiling', () => {
+    // The bug this guards: clampKlingDuration's MIN=3 floor silently inflated
+    // a 2s shot to 3s, so 5 shots summed to 15 against a declared top-level
+    // duration of 10 — WaveSpeed rejected the mismatch (confirmed live,
+    // job b981e638, 2026-09-16). A shot only needs to be >=1s.
+    assert.equal(clampShotDuration(1), 1)
+    assert.equal(clampShotDuration(2), 2)
+    assert.equal(clampShotDuration(2.4), 2)
+    assert.equal(clampShotDuration(0), 1)
+    assert.equal(clampShotDuration(-3), 1)
+    assert.equal(clampShotDuration(null), 1)
+    assert.equal(clampShotDuration(Number.NaN), 1)
+  })
+
+  it('5 shots over a 10s total sum to exactly 10, not 15', () => {
+    const total = 10
+    const n = 5
+    const base = Math.floor(total / n)
+    const shots = Array.from({ length: n }, () => clampShotDuration(base))
+    assert.equal(shots.reduce((a, b) => a + b, 0), total)
   })
 })
 

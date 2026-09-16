@@ -85,6 +85,21 @@ export function clampKlingDuration(seconds: number | null | undefined): number {
   return Math.min(KLING_DURATION_MAX, Math.max(KLING_DURATION_MIN, Math.round(Number(seconds))))
 }
 
+/**
+ * Per-shot duration inside multi_prompt — deliberately NOT clampKlingDuration,
+ * which enforces the 3-15s WHOLE-VIDEO range. Applying that to one shot among
+ * several silently inflates it (2s -> 3s), so the shots stop summing to the
+ * top-level `duration` WaveSpeed was also told — confirmed live 2026-09-16
+ * (job b981e638): 5 shots x (wrongly clamped) 3s = 15s against a declared
+ * total of 10s, rejected by WaveSpeed as "duration must be an integer" (a
+ * misleading message for what was actually a sum mismatch). A shot only
+ * needs to be a positive whole number of seconds, no individual floor/ceiling.
+ */
+export function clampShotDuration(seconds: number | null | undefined): number {
+  if (seconds == null || !Number.isFinite(Number(seconds))) return 1
+  return Math.max(1, Math.round(Number(seconds)))
+}
+
 export function clampKlingCfg(value: number | null | undefined): number {
   if (value == null || !Number.isFinite(Number(value))) return KLING_CFG_DEFAULT
   return Math.min(1, Math.max(0, Number(value)))
@@ -173,7 +188,7 @@ export function buildKlingI2VPayload(
   if (hasMulti) {
     payload.multi_prompt = multi.map(item => {
       const shot: Record<string, unknown> = { prompt: item.prompt.trim() }
-      if (item.duration != null) shot.duration = clampKlingDuration(item.duration)
+      if (item.duration != null) shot.duration = clampShotDuration(item.duration)
       return shot
     })
   }
