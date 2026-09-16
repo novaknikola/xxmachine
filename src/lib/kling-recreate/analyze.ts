@@ -128,21 +128,27 @@ const SYNTHESIS_SYSTEM =
   'it goes with) — never a mood word like "flirty" or "playful" standing in for the actual content. ' +
   'If the transcript is a back-and-forth or a joke, say what the joke/exchange actually is.\n\n' +
   'character_action — the complete action from the FIRST second to the LAST, in order, naming every ' +
-  'distinct beat (not just the overall gist). If the per-frame descriptions show 6 different things ' +
-  'happening across the clip, character_action must name all 6, not summarize them into 1-2.\n\n' +
-  'shots — this is the part that actually reaches the video model, so it carries the most weight. ' +
-  'Each shot.prompt must read like a director\'s beat, built DIRECTLY from the per-frame descriptions ' +
-  'in its time range — reuse their concrete hand/leg/head/torso details, do not re-summarize them into ' +
-  'something vaguer. Two consecutive shots must never describe the same pose/action — if the per-frame ' +
-  'timeline shows real change between them (it should, that is what the frames are for), the shot ' +
-  'prompts must show that same change. Merge only genuinely identical seconds; do not merge for brevity. ' +
-  'Name concrete body parts and objects, not just "she moves". State speech within the shot whose ' +
-  'time range it falls in, quoted, with who says it if determinable.\n\n' +
-  'master_prompt — one paragraph, a fallback for when shots are not used: setting, hook, the full ' +
-  'character_action, camera, and speech.\n\n' +
+  'distinct beat (not just the overall gist), written as ONE flowing narrative sentence-by-sentence ' +
+  'description — not a checklist. If the per-frame descriptions show 6 different things happening ' +
+  'across the clip, character_action must name all 6, not summarize them into 1-2.\n\n' +
+  'shots — this is the part that actually reaches the video model, so it carries the most weight, and ' +
+  'HOW it is written matters as much as WHAT it says. Each shot.prompt must read like natural director\'s ' +
+  'direction — 2-4 flowing sentences of prose, the way a person would describe the beat out loud — built ' +
+  'from the concrete details in the per-frame descriptions for its time range, but REWRITTEN as narrative, ' +
+  'never copied as a list. Do NOT structure every shot the same mechanical way (e.g. "Head: ... Eyes: ... ' +
+  'Right hand: ... Left hand: ... Torso: ..." repeated shot after shot) — that pattern reads as a robotic ' +
+  'pose audit, not direction, even when the underlying details are accurate, and it produces worse motion ' +
+  'than a natural sentence would. Only mention a body part when it is doing something worth directing; ' +
+  'skip the ones that are just sitting there. Two consecutive shots must never describe the same pose/' +
+  'action — if the per-frame timeline shows real change between them (it should, that is what the frames ' +
+  'are for), say what changed. Merge only genuinely identical seconds; do not merge for brevity. State ' +
+  'speech within the shot whose time range it falls in, quoted, with who says it if determinable.\n\n' +
+  'master_prompt — one flowing paragraph (not a list), a fallback for when shots are not used: setting, ' +
+  'hook, the full character_action, camera, and speech.\n\n' +
   'Never use "steadily", "smoothly", "gently", "calmly", "consistently", "playfully", "flirtatiously", ' +
   'or "dynamically" as a substitute for describing what actually happens — name the phase/action/words ' +
-  'instead. Do not invent anything not present in the per-frame descriptions or transcript.'
+  'instead. Do not invent anything not present in the per-frame descriptions or transcript. Precision and ' +
+  'natural prose are both required — a mechanical checklist is not more precise, it is just worse writing.'
 
 async function synthesizeContext(opts: {
   frames: FrameDescription[]
