@@ -2,8 +2,10 @@ import { one, query } from '@/lib/db'
 import { parseReelUrlList } from '@/lib/monitor/parse-reel-url'
 import { downloadTelegramFile } from '@/lib/telegram-recreate'
 import { uploadBuffer } from '@/lib/supabase-storage'
-import { MAX_RECREATE_URLS } from './types'
+import { MAX_RECREATE_URLS, type KlingShotMode } from './types'
 import { variationAwaitingValue } from './variation'
+
+const PENDING_COLUMNS = 'chat_id, user_id, photo_url, urls, awaiting, shot_mode, custom_prompt'
 
 export interface RecreatePending {
   chat_id: string | number
@@ -11,11 +13,13 @@ export interface RecreatePending {
   photo_url: string | null
   urls: string[]
   awaiting: string | null
+  shot_mode: KlingShotMode | null
+  custom_prompt: string | null
 }
 
 export async function getPending(chatId: number): Promise<RecreatePending | null> {
   return one<RecreatePending>(
-    `SELECT chat_id, user_id, photo_url, urls, awaiting FROM telegram_recreate_pending WHERE chat_id = $1`,
+    `SELECT ${PENDING_COLUMNS} FROM telegram_recreate_pending WHERE chat_id = $1`,
     [chatId],
   )
 }
@@ -28,7 +32,7 @@ export async function upsertPending(chatId: number, userId: string): Promise<Rec
   const existing = await getPending(chatId)
   if (existing) return existing
   const row = await one<RecreatePending>(
-    `INSERT INTO telegram_recreate_pending (chat_id, user_id) VALUES ($1, $2) RETURNING chat_id, user_id, photo_url, urls, awaiting`,
+    `INSERT INTO telegram_recreate_pending (chat_id, user_id) VALUES ($1, $2) RETURNING chat_id, user_id, photo_url, urls, awaiting, shot_mode, custom_prompt`,
     [chatId, userId],
   )
   return row!
@@ -42,7 +46,7 @@ export async function setPendingPhoto(chatId: number, userId: string, photoUrl: 
        photo_url = EXCLUDED.photo_url,
        user_id = EXCLUDED.user_id,
        updated_at = now()
-     RETURNING chat_id, user_id, photo_url, urls, awaiting`,
+     RETURNING chat_id, user_id, photo_url, urls, awaiting, shot_mode, custom_prompt`,
     [chatId, userId, photoUrl],
   )
   return row!
@@ -93,7 +97,7 @@ export async function addUrlsToPending(opts: {
     `UPDATE telegram_recreate_pending
         SET urls = urls || $2::text[], user_id = $3, updated_at = now()
       WHERE chat_id = $1
-      RETURNING chat_id, user_id, photo_url, urls, awaiting`,
+      RETURNING chat_id, user_id, photo_url, urls, awaiting, shot_mode, custom_prompt`,
     [opts.chatId, toAdd, opts.userId],
   )
 
@@ -110,6 +114,22 @@ export async function setAwaiting(chatId: number, awaiting: string | null): Prom
   await query(
     `UPDATE telegram_recreate_pending SET awaiting = $2, updated_at = now() WHERE chat_id = $1`,
     [chatId, awaiting],
+  )
+}
+
+/** Answer to the "One shot or Multi-shot?" question, asked once per batch before analysis. */
+export async function setPendingShotMode(chatId: number, mode: KlingShotMode): Promise<void> {
+  await query(
+    `UPDATE telegram_recreate_pending SET shot_mode = $2, updated_at = now() WHERE chat_id = $1`,
+    [chatId, mode],
+  )
+}
+
+/** Optional custom instruction for the character still(s), collected before Recreate fires. */
+export async function setPendingCustomPrompt(chatId: number, text: string | null): Promise<void> {
+  await query(
+    `UPDATE telegram_recreate_pending SET custom_prompt = $2, updated_at = now() WHERE chat_id = $1`,
+    [chatId, text],
   )
 }
 
@@ -131,7 +151,7 @@ export async function claimPending(chatId: number): Promise<RecreatePending | nu
   return one<RecreatePending>(
     `DELETE FROM telegram_recreate_pending
       WHERE chat_id = $1 AND coalesce(array_length(urls, 1), 0) > 0
-      RETURNING chat_id, user_id, photo_url, urls, awaiting`,
+      RETURNING chat_id, user_id, photo_url, urls, awaiting, shot_mode, custom_prompt`,
     [chatId],
   )
 }

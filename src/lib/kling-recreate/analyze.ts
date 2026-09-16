@@ -38,28 +38,55 @@ async function callGrokJson(opts: Parameters<typeof callGrok>[0]): Promise<Recor
   }
 }
 
+/**
+ * Words that describe a moving body without saying what actually changed —
+ * banned for the same reason Copy-Paste's spec (copy-paste-spec.ts RULE E)
+ * bans them: they instruct a video model to damp the exact motion it was
+ * asked to reproduce, and they let a lazy per-frame description get away
+ * with repeating itself instead of tracking a real change.
+ */
+const FRAME_DESCRIPTION_SYSTEM =
+  'You describe consecutive 1fps video frames for a motion-generation model, one entry per frame, ' +
+  'in strict chronological order. Return JSON {"frames":[{"t":number,"description":"..."}]}.\n\n' +
+  'Each description must cover, explicitly, every time: HEAD/FACE (direction, expression, eyes open ' +
+  'or closed — do not default to "eyes closed" out of habit, look at the actual frame), HANDS (what ' +
+  'each hand is doing, holding, and exactly where it is), TORSO/HIPS, LEGS/FEET (weight-bearing leg, ' +
+  'stride phase), and WARDROBE state (any garment moved by wind, motion, or the subject\'s own hands ' +
+  'since the last frame).\n\n' +
+  'CRITICAL — this is a SEQUENCE, not a set of unrelated stills: for every frame after the first, ' +
+  'state what changed from the previous frame first, then the rest of the description. If two ' +
+  'consecutive frames genuinely look identical, say so explicitly ("unchanged from previous frame in ' +
+  'pose/hands/face; only X differs") — do not silently paste the same boilerplate sentence for both, ' +
+  'that is the single most common failure mode and it destroys the sequence. Real 1fps footage of a ' +
+  'person almost never has ten identical "eyes closed, smiling" frames in a row; if your descriptions ' +
+  'read that way, you are pattern-matching a generic pose instead of looking at each image.\n\n' +
+  'Never use "steadily", "smoothly", "gently", "calmly", "consistently", or "slightly" to describe ' +
+  'motion — name the actual phase instead (e.g. "right foot lands, weight shifting forward" not ' +
+  '"walks smoothly"). Also note camera angle/framing and background only insofar as they change.'
+
 async function describeFrameChunk(
   frames: OneFpsExtract['frames'],
+  precedingContext: string | null,
 ): Promise<FrameDescription[]> {
   const parsed = await callGrokJson({
     model: GROK_SMART,
     json: true,
     temperature: 0.2,
     maxTokens: 4096,
-    system:
-      'You describe video frames for motion generation. Return JSON ' +
-      '{"frames":[{"t":number,"description":"detailed what happens in this frame"}]} ' +
-      'with one entry per image, in order. Describe subject, pose, wardrobe, ' +
-      'hands, face, camera angle, background, lighting, motion cues.',
+    system: FRAME_DESCRIPTION_SYSTEM,
     messages: [{
       role: 'user',
       content: [
         ...frames.map(f => base64ImageContent(f.base64)),
         {
           type: 'text' as const,
-          text:
-            `These ${frames.length} frames are 1fps samples at t=` +
-            `${frames.map(f => f.t_sec).join(', ')} seconds. Describe each frame.`,
+          text: [
+            `These ${frames.length} frames are 1fps samples at t=${frames.map(f => f.t_sec).join(', ')} seconds, in order.`,
+            precedingContext
+              ? `The frame immediately before this chunk (last one already described) ended like this — start this chunk's first frame by stating what changed from it: ${precedingContext}`
+              : 'This is the first frame of the clip — describe it fully, nothing precedes it.',
+            'Describe each frame per the rules above. One entry per image, same order.',
+          ].filter(Boolean).join(' '),
         },
       ],
     }],
@@ -79,12 +106,50 @@ function choosePromptMode(shots: KlingShotBeat[]): 'prompt' | 'multi_prompt' {
   return shots.length >= 2 && shots.length <= 6 ? 'multi_prompt' : 'prompt'
 }
 
+/**
+ * Kling's own multi_prompt API caps at 6 beats (KLING_MULTI_PROMPT_MAX in
+ * kling-client.ts) — a hard provider limit, not something prompting can lift.
+ * A 10s clip sampled at 1fps has ~10 frame-level observations; this step's
+ * job is to compress those into at most 6 shots WITHOUT losing the specific,
+ * differentiated motion each frame already captured — the previous version
+ * of this prompt let the model default to a generic paraphrase instead,
+ * which is what made the output "raw" (confirmed by the user reviewing a
+ * real master_prompt live, 2026-09-16): vague verbs ("speaks flirtatiously"),
+ * no reason WHY the clip works, and shots that don't actually track distinct
+ * body-part changes frame to frame.
+ */
+const SYNTHESIS_SYSTEM =
+  'You compress a 1fps, per-frame video analysis into instructions for a video-generation model. ' +
+  'Return JSON: setting, hook, character_action, camera, speech (or null), master_prompt, ' +
+  'shots: array of {t_start, t_end, prompt}, at most 6 entries, covering the FULL clip start to end ' +
+  'with no gaps.\n\n' +
+  'hook — ONE sentence: the specific reason this clip works, the actual point of the action and ' +
+  'dialogue together, stated as a concrete fact (what is being said/implied and what physical action ' +
+  'it goes with) — never a mood word like "flirty" or "playful" standing in for the actual content. ' +
+  'If the transcript is a back-and-forth or a joke, say what the joke/exchange actually is.\n\n' +
+  'character_action — the complete action from the FIRST second to the LAST, in order, naming every ' +
+  'distinct beat (not just the overall gist). If the per-frame descriptions show 6 different things ' +
+  'happening across the clip, character_action must name all 6, not summarize them into 1-2.\n\n' +
+  'shots — this is the part that actually reaches the video model, so it carries the most weight. ' +
+  'Each shot.prompt must read like a director\'s beat, built DIRECTLY from the per-frame descriptions ' +
+  'in its time range — reuse their concrete hand/leg/head/torso details, do not re-summarize them into ' +
+  'something vaguer. Two consecutive shots must never describe the same pose/action — if the per-frame ' +
+  'timeline shows real change between them (it should, that is what the frames are for), the shot ' +
+  'prompts must show that same change. Merge only genuinely identical seconds; do not merge for brevity. ' +
+  'Name concrete body parts and objects, not just "she moves". State speech within the shot whose ' +
+  'time range it falls in, quoted, with who says it if determinable.\n\n' +
+  'master_prompt — one paragraph, a fallback for when shots are not used: setting, hook, the full ' +
+  'character_action, camera, and speech.\n\n' +
+  'Never use "steadily", "smoothly", "gently", "calmly", "consistently", "playfully", "flirtatiously", ' +
+  'or "dynamically" as a substitute for describing what actually happens — name the phase/action/words ' +
+  'instead. Do not invent anything not present in the per-frame descriptions or transcript.'
+
 async function synthesizeContext(opts: {
   frames: FrameDescription[]
   duration: number | null
   aspectRatio: string
   transcript: string
-}): Promise<Pick<KlingVideoContext, 'setting' | 'character_action' | 'camera' | 'speech' | 'shots'> & { master_prompt: string }> {
+}): Promise<Pick<KlingVideoContext, 'setting' | 'hook' | 'character_action' | 'camera' | 'speech' | 'shots'> & { master_prompt: string }> {
   const timeline = opts.frames
     .map(f => `${f.t_sec.toFixed(0)}s: ${f.description}`)
     .join('\n')
@@ -93,19 +158,17 @@ async function synthesizeContext(opts: {
     model: GROK_FAST,
     json: true,
     temperature: 0.25,
-    maxTokens: 3072,
-    system:
-      'You write a master motion-generation prompt from a 1fps video analysis. ' +
-      'Return JSON with setting, character_action, camera, speech (or null), ' +
-      'master_prompt (one prose paragraph a video model can follow), and ' +
-      'shots: array of {t_start, t_end, prompt} for distinct camera/action beats, max 6.',
+    maxTokens: 4096,
+    system: SYNTHESIS_SYSTEM,
     messages: [{
       role: 'user',
       content: [
         `Duration: ${opts.duration != null ? `${opts.duration.toFixed(1)}s` : 'unknown'}. Aspect: ${opts.aspectRatio}.`,
-        opts.transcript ? `Transcript:\n${opts.transcript}` : 'No speech transcript.',
-        `Per-frame descriptions:\n${timeline}`,
-        'master_prompt must describe setting, character action, camera, and speech if any.',
+        opts.transcript ? `Timestamped transcript:\n${opts.transcript}` : 'No speech transcript.',
+        `Per-frame descriptions (1fps, already tracks what changed each second):\n${timeline}`,
+        'Follow the rules above exactly. Cross-check before returning: does character_action name ' +
+          'every distinct beat visible in the per-frame timeline? Do shots cover 0s to the end with no ' +
+          'gap and no repeated pose between consecutive shots? If not, fix it before returning.',
       ].join('\n'),
     }],
   })
@@ -127,12 +190,47 @@ async function synthesizeContext(opts: {
 
   return {
     setting: String(parsed.setting ?? '').trim(),
+    hook: String(parsed.hook ?? '').trim(),
     character_action: String(parsed.character_action ?? '').trim(),
     camera: String(parsed.camera ?? '').trim(),
     speech: parsed.speech == null || parsed.speech === '' ? null : String(parsed.speech),
     shots,
     master_prompt: String(parsed.master_prompt ?? '').trim(),
   }
+}
+
+async function buildAnalysisFromFrames(opts: {
+  frames: FrameDescription[]
+  duration: number | null
+  aspectRatio: string
+  transcript: string
+}): Promise<KlingAnalysis> {
+  const synthesized = await synthesizeContext(opts)
+
+  const shots = synthesized.shots
+  const context: KlingVideoContext = {
+    setting: synthesized.setting,
+    hook: synthesized.hook,
+    character_action: synthesized.character_action,
+    camera: synthesized.camera,
+    speech: synthesized.speech ?? (opts.transcript || null),
+    duration_sec: opts.duration,
+    aspect_ratio: opts.aspectRatio,
+    shots,
+    prompt_mode: choosePromptMode(shots),
+  }
+
+  const master_prompt = synthesized.master_prompt
+    || [
+      context.setting,
+      context.hook,
+      context.character_action,
+      context.camera,
+      context.speech,
+      opts.frames.map(f => f.description).join(' '),
+    ].filter(Boolean).join(' ')
+
+  return { frames: opts.frames, context, master_prompt }
 }
 
 export async function analyzeOneFpsVideo(
@@ -146,7 +244,12 @@ export async function analyzeOneFpsVideo(
 
   const frames: FrameDescription[] = []
   for (const chunk of chunks) {
-    frames.push(...await describeFrameChunk(chunk))
+    // Each chunk gets the last frame's description from the PREVIOUS chunk so
+    // "what changed" tracking doesn't reset at chunk boundaries (CHUNK=12
+    // frames per call) — otherwise the first frame of every new chunk reads
+    // like the start of a new sequence instead of a continuation.
+    const preceding = frames.length ? frames[frames.length - 1].description : null
+    frames.push(...await describeFrameChunk(chunk, preceding))
   }
 
   let transcript = ''
@@ -158,38 +261,30 @@ export async function analyzeOneFpsVideo(
     }
   }
 
-  const synthesized = await synthesizeContext({
-    frames,
-    duration: extract.duration,
-    aspectRatio: extract.aspectRatio,
-    transcript,
+  return buildAnalysisFromFrames({
+    frames, duration: extract.duration, aspectRatio: extract.aspectRatio, transcript,
   })
-
-  const shots = synthesized.shots
-  const context: KlingVideoContext = {
-    setting: synthesized.setting,
-    character_action: synthesized.character_action,
-    camera: synthesized.camera,
-    speech: synthesized.speech ?? (transcript || null),
-    duration_sec: extract.duration,
-    aspect_ratio: extract.aspectRatio,
-    shots,
-    prompt_mode: choosePromptMode(shots),
-  }
-
-  const master_prompt = synthesized.master_prompt
-    || [
-      context.setting,
-      context.character_action,
-      context.camera,
-      context.speech,
-      frames.map(f => f.description).join(' '),
-    ].filter(Boolean).join(' ')
-
-  return { frames, context, master_prompt }
 }
 
-export function renderRecreateKeyframePrompt(context: KlingVideoContext): string {
+/**
+ * Re-synthesizes shots/master_prompt off ALREADY-EXTRACTED per-frame
+ * descriptions — used by the "Regenerate prompt" action so a rejected shot
+ * breakdown can be redone without re-spending on the per-frame Grok vision
+ * pass (that part is the more expensive one and wasn't what was wrong).
+ */
+export async function analyzeOneFpsVideoFromFrames(opts: {
+  frames: FrameDescription[]
+  duration: number | null
+  aspectRatio: string
+  transcript: string
+}): Promise<KlingAnalysis> {
+  return buildAnalysisFromFrames(opts)
+}
+
+export function renderRecreateKeyframePrompt(
+  context: KlingVideoContext,
+  customPrompt?: string | null,
+): string {
   return [
     'Image 1 is the scene reference, image 2 is the identity reference.',
     'Keep the exact pose, camera framing, and background from image 1 unchanged.',
@@ -201,5 +296,9 @@ export function renderRecreateKeyframePrompt(context: KlingVideoContext): string
     'Remove any on-screen text, captions, subtitles, or watermarks visible in image 1.',
     'Photorealistic, natural skin texture, no beauty filter, no AI skin smoothing.',
     'Do not add any other people. Do not change the composition, angle, or background.',
+    // User-supplied, collected before the still is generated (Telegram "Add
+    // prompt?" step) — appended last so it can override/refine the defaults
+    // above without fighting for priority against the identity-lock rules.
+    customPrompt?.trim() ? customPrompt.trim() : '',
   ].filter(Boolean).join(' ')
 }

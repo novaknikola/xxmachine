@@ -37,6 +37,16 @@ export const KLING_ELEMENT_LIST_MAX = 3
 export interface KlingMultiPromptItem {
   prompt: string
   duration?: number
+  /**
+   * Per-shot reference image — confirmed with the user (2026-09-16, hands-on
+   * with Kling's own UI) that each multi-shot beat CAN carry its own image,
+   * separate from the top-level `image`. This is what makes multi-shot a real
+   * identity-lock lever instead of just per-segment motion text: instead of
+   * one still anchoring only t=0 while later shots drift (the exact Seedance
+   * failure this pipeline exists to avoid), each shot gets re-anchored to its
+   * own still. Optional — a shot without one still gets the top-level image.
+   */
+  image?: string
 }
 
 export interface KlingI2VInput {
@@ -189,6 +199,7 @@ export function buildKlingI2VPayload(
     payload.multi_prompt = multi.map(item => {
       const shot: Record<string, unknown> = { prompt: item.prompt.trim() }
       if (item.duration != null) shot.duration = clampShotDuration(item.duration)
+      if (item.image?.trim()) shot.image = item.image.trim()
       return shot
     })
   }
