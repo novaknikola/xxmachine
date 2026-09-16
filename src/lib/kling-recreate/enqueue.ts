@@ -1,7 +1,9 @@
 import { one } from '@/lib/db'
 import { internalBaseUrl } from '@/lib/internal-url'
 import { buildVariationJobDrafts } from './variation'
-import type { KlingRecreateJobRow, KlingRecreateQueueInput, KlingUserSettings } from './types'
+import type {
+  KlingRecreateAction, KlingRecreateJobRow, KlingRecreateQueueInput, KlingShotMode, KlingUserSettings,
+} from './types'
 
 const CRON_SECRET = process.env.CRON_SECRET
 const IMMEDIATE_FIRES = 2
@@ -12,14 +14,17 @@ export async function enqueueKlingRecreateJobs(opts: {
   urls: string[]
   referenceImageUrl: string
   settings: KlingUserSettings
+  shotMode: KlingShotMode
+  customPrompt?: string | null
 }): Promise<string[]> {
   const queueIds: string[] = []
 
   for (const sourceUrl of opts.urls) {
     const recreate = await one<{ id: string }>(
       `INSERT INTO kling_recreate_jobs
-         (user_id, chat_id, source_url, reference_image_url, settings, kling_variant, status)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'pending')
+         (user_id, chat_id, source_url, reference_image_url, settings, kling_variant, status,
+          shot_mode, custom_prompt)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'pending', $7, $8)
        RETURNING id`,
       [
         opts.userId,
@@ -28,6 +33,8 @@ export async function enqueueKlingRecreateJobs(opts: {
         opts.referenceImageUrl,
         JSON.stringify(opts.settings),
         opts.settings.variant,
+        opts.shotMode,
+        opts.customPrompt?.trim() || null,
       ],
     )
     if (!recreate) throw new Error('Could not create kling_recreate_jobs row')
@@ -53,6 +60,35 @@ export async function enqueueKlingRecreateJobs(opts: {
 
   await claimAndFire(queueIds)
   return queueIds
+}
+
+/**
+ * Enqueues one action against an already-existing kling_recreate_jobs row —
+ * the Approve/Regenerate buttons on both approval gates all go through this,
+ * same claim-then-fire pattern as a fresh recreate so the request never blocks
+ * on the work itself (a still or a Kling render both run past any reasonable
+ * Telegram/HTTP timeout).
+ */
+export async function enqueueKlingAction(opts: {
+  userId: string
+  chatId: number
+  jobId: string
+  action: KlingRecreateAction
+}): Promise<string> {
+  const input: KlingRecreateQueueInput = {
+    recreateJobId: opts.jobId,
+    chatId: opts.chatId,
+    action: opts.action,
+  }
+  const queued = await one<{ id: string }>(
+    `INSERT INTO generation_queue (user_id, job_type, input, total_items)
+     VALUES ($1, 'kling_recreate_v1', $2, 1)
+     RETURNING id`,
+    [opts.userId, JSON.stringify(input)],
+  )
+  if (!queued) throw new Error(`Could not queue ${opts.action}`)
+  await claimAndFire([queued.id])
+  return queued.id
 }
 
 async function claimAndFire(queueIds: string[]): Promise<void> {

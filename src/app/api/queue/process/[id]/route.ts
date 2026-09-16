@@ -41,7 +41,7 @@ import {
 import { runI2vItem, runAnimateItem, runTalkItem } from '@/lib/my-pod/runners'
 import { fishTts } from '@/lib/my-pod/fish-tts'
 import { generateCopyPasteKeyframes, finishCopyPasteVideo, regenerateCopyPasteKeyframes } from '@/lib/monitor/process-item'
-import { processKlingRecreateJob } from '@/lib/kling-recreate/process-job'
+import { runKlingRecreateAction } from '@/lib/kling-recreate/process-job'
 import type { KlingRecreateQueueInput } from '@/lib/kling-recreate/types'
 
 interface ComfyUIRow {
@@ -2074,7 +2074,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const input = job.input as unknown as KlingRecreateQueueInput
       if (!input?.recreateJobId) throw new Error('kling_recreate_v1 input missing recreateJobId')
 
-      const result = await processKlingRecreateJob({
+      const result = await runKlingRecreateAction({
         queueJobId: id,
         userId: job.user_id,
         input,
@@ -2087,6 +2087,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         [id, JSON.stringify({
           videoUrl: result.videoUrl ?? null,
           cached: result.cached ?? false,
+          awaitingApproval: result.awaitingApproval ?? false,
           progressAt: new Date().toISOString(),
           stage: 'done',
         })],

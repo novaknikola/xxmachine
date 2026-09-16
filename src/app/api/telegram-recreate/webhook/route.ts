@@ -2,10 +2,13 @@ import { NextRequest, NextResponse } from 'next/server'
 import { one, query, rows } from '@/lib/db'
 import {
   sendText, answerCallbackQuery, editMessageReplyMarkup, editMessageText,
-  confirmRecreateKeyboard, settingsKeyboard,
+  confirmRecreateKeyboard, settingsKeyboard, shotModeKeyboard, stillPromptChoiceKeyboard,
 } from '@/lib/telegram-recreate'
-import { addUrlsToPending, attachPhotoFromTelegram, claimPending, clearPending, getPending, setAwaiting, setAwaitingVariation } from '@/lib/kling-recreate/pending'
-import { enqueueKlingRecreateJobs, enqueueKlingVariationJobs } from '@/lib/kling-recreate/enqueue'
+import {
+  addUrlsToPending, attachPhotoFromTelegram, claimPending, clearPending, getPending, setAwaiting,
+  setAwaitingVariation, setPendingCustomPrompt, setPendingShotMode,
+} from '@/lib/kling-recreate/pending'
+import { enqueueKlingAction, enqueueKlingRecreateJobs, enqueueKlingVariationJobs } from '@/lib/kling-recreate/enqueue'
 import { formatSettingsHtml, getKlingSettings, saveKlingSettings } from '@/lib/kling-recreate/settings'
 import {
   isVariationAwaiting,
@@ -79,12 +82,39 @@ function batchStatusText(opts: {
   ].join('\n')
 }
 
+/**
+ * Once the batch has both a photo and >=1 URL, two questions are asked ONCE
+ * each before the Confirm button appears — shot mode first (it changes how
+ * the whole job behaves, so it has to be settled before anything runs), then
+ * an optional custom still prompt. custom_prompt uses '' (not null) as the
+ * "asked, declined" sentinel so this cascade doesn't re-ask on every later
+ * message in the same batch (e.g. adding one more URL).
+ */
 async function showBatch(chatId: number, userId: string) {
   const pending = await getPending(chatId)
   const urls = pending?.urls ?? []
   const photoUrl = pending?.photo_url ?? null
   const hasDefault = !photoUrl && !!(await defaultReference(userId))
   const ready = urls.length > 0 && !!(photoUrl || hasDefault)
+
+  if (ready && !pending?.shot_mode) {
+    await sendText(
+      chatId,
+      'One shot, or one still per camera/action beat (multi-shot)? Multi-shot re-anchors identity at ' +
+        'each beat instead of only at the start — steadier, but more Seedream calls.',
+      shotModeKeyboard(),
+    )
+    return
+  }
+  if (ready && pending?.custom_prompt == null) {
+    await sendText(
+      chatId,
+      '✍️ Add a specific instruction for the character still(s) before they\'re generated? (wardrobe, pose tweak, anything) — or skip.',
+      stillPromptChoiceKeyboard(),
+    )
+    return
+  }
+
   await sendText(
     chatId,
     batchStatusText({ photoUrl, defaultPhoto: hasDefault, urls }),
@@ -232,6 +262,12 @@ export async function POST(req: NextRequest) {
         )
         return NextResponse.json({ ok: true })
       }
+      if (pending?.awaiting === 'custom_prompt') {
+        await setPendingCustomPrompt(chatId, message.text)
+        await setAwaiting(chatId, null)
+        await showBatch(chatId, userId)
+        return NextResponse.json({ ok: true })
+      }
       if (pending?.awaiting === 'negative_prompt') {
         await saveKlingSettings(userId, { negative_prompt: message.text })
         await setAwaiting(chatId, null)
@@ -275,6 +311,59 @@ export async function POST(req: NextRequest) {
         await clearPending(chatId)
         await answerCallbackQuery(cb.id, 'Cancelled')
         if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
+        return NextResponse.json({ ok: true })
+      }
+
+      if (parts[1] === 'shotmode') {
+        const mode = parts[2]
+        if (mode === 'one_shot' || mode === 'multi_shot') {
+          await setPendingShotMode(chatId, mode)
+        }
+        await answerCallbackQuery(cb.id, mode === 'multi_shot' ? 'Multi-shot' : 'One shot')
+        if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
+        await showBatch(chatId, userId)
+        return NextResponse.json({ ok: true })
+      }
+
+      if (parts[1] === 'stillprompt') {
+        if (parts[2] === 'add') {
+          await setAwaiting(chatId, 'custom_prompt')
+          await answerCallbackQuery(cb.id)
+          if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
+          await sendText(chatId, '✍️ Send the instruction for the still(s) as your next message.')
+          return NextResponse.json({ ok: true })
+        }
+        // skip: '' (not null) marks the question as asked so showBatch never re-asks it.
+        await setPendingCustomPrompt(chatId, '')
+        await answerCallbackQuery(cb.id, 'Skipped')
+        if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
+        await showBatch(chatId, userId)
+        return NextResponse.json({ ok: true })
+      }
+
+      // ── Approval gates — Approve/Regenerate on the still, then on the prompt ──
+      if (parts[1] === 'stillok' || parts[1] === 'stillrg' || parts[1] === 'promptok' || parts[1] === 'promptrg') {
+        const jobId = parts[2]
+        const job = await one<KlingRecreateJobRow>(
+          `SELECT id, status FROM kling_recreate_jobs WHERE id = $1 AND user_id = $2`,
+          [jobId, userId],
+        )
+        if (!job) {
+          await answerCallbackQuery(cb.id, 'Job not found')
+          return NextResponse.json({ ok: true })
+        }
+        const action =
+          parts[1] === 'stillok' ? 'approve_still' as const :
+          parts[1] === 'stillrg' ? 'regenerate_still' as const :
+          parts[1] === 'promptok' ? 'approve_prompt' as const :
+          'regenerate_prompt' as const
+        // Clear the buttons first so a double-tap cannot queue (and pay for) twice.
+        if (messageId) await editMessageReplyMarkup(chatId, messageId, {}).catch(() => {})
+        await answerCallbackQuery(
+          cb.id,
+          action === 'approve_prompt' ? 'Generating on Kling…' : 'Working…',
+        )
+        await enqueueKlingAction({ userId, chatId, jobId, action })
         return NextResponse.json({ ok: true })
       }
 
@@ -334,10 +423,12 @@ export async function POST(req: NextRequest) {
         const settings = await getKlingSettings(userId)
         const ids = await enqueueKlingRecreateJobs({
           userId, chatId, urls, referenceImageUrl: reference, settings,
+          shotMode: pending.shot_mode ?? 'one_shot',
+          customPrompt: pending.custom_prompt,
         })
         await sendText(
           chatId,
-          `🎬 Queued ${ids.length} Kling recreate job${ids.length === 1 ? '' : 's'}. I’ll send analysis, the character still, then the video.`,
+          `🎬 Queued ${ids.length} Kling recreate job${ids.length === 1 ? '' : 's'}. I’ll send analysis, then the character still(s) for approval, then the Kling prompt for approval, then the video.`,
         )
         return NextResponse.json({ ok: true })
       }

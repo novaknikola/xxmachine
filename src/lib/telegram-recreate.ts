@@ -152,6 +152,46 @@ export function confirmRecreateKeyboard(urlCount: number) {
   }
 }
 
+/** Asked once per batch, before analysis runs — decides one still vs one per shot. */
+export function shotModeKeyboard() {
+  return {
+    inline_keyboard: [[
+      { text: 'One shot', callback_data: 'kr:shotmode:one_shot' },
+      { text: 'Multi-shot', callback_data: 'kr:shotmode:multi_shot' },
+    ]],
+  }
+}
+
+/** Optional, asked right after shot mode — custom instruction for the character still(s). */
+export function stillPromptChoiceKeyboard() {
+  return {
+    inline_keyboard: [[
+      { text: '✍️ Add prompt', callback_data: 'kr:stillprompt:add' },
+      { text: '⏭ Skip', callback_data: 'kr:stillprompt:skip' },
+    ]],
+  }
+}
+
+/** Gate 1: character still(s) generated, before the Kling prompt is even built. */
+export function stillApprovalKeyboard(jobId: string) {
+  return {
+    inline_keyboard: [[
+      { text: '✅ Approve still', callback_data: `kr:stillok:${jobId}` },
+      { text: '🔁 Regenerate', callback_data: `kr:stillrg:${jobId}` },
+    ]],
+  }
+}
+
+/** Gate 2: the actual Kling prompt/shots, before the paid Kling call fires. */
+export function promptApprovalKeyboard(jobId: string) {
+  return {
+    inline_keyboard: [[
+      { text: '✅ Approve → Kling', callback_data: `kr:promptok:${jobId}` },
+      { text: '🔁 Regenerate', callback_data: `kr:promptrg:${jobId}` },
+    ]],
+  }
+}
+
 export function settingsKeyboard() {
   return {
     inline_keyboard: [
