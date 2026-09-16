@@ -13,7 +13,6 @@ import { syncKlingAnalysisSheetSafe } from './sheet-sync'
 import {
   buildKlingI2VPayload,
   clampKlingDuration,
-  clampShotDuration,
   generateKlingI2V,
   type KlingI2VInput,
   type KlingVariant,
