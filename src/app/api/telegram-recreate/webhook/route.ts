@@ -109,7 +109,9 @@ async function showBatch(chatId: number, userId: string) {
   if (ready && pending?.custom_prompt == null) {
     await sendText(
       chatId,
-      '✍️ Add a specific instruction for the character still before it\'s generated? (wardrobe, pose tweak, anything) — or skip.',
+      '✍️ Add a specific instruction for the character still before it\'s generated? ' +
+        '(wardrobe, pose tweak — and if more than one person is in the scene, say which role ' +
+        'your photo plays, e.g. "the maid" or "the blonde woman on the left") — or skip.',
       stillPromptChoiceKeyboard(),
     )
     return

@@ -9,7 +9,7 @@
  * confirmed working live in that Python pipeline this session.
  */
 import { callGrok, GROK_FAST } from '@/lib/grok'
-import { KEYFRAME_IDENTITY_LOCK, PRESERVE_MOTION_CUE, REMOVE_ONSCREEN_TEXT } from '@/lib/monitor/copy-paste-spec'
+import { PRESERVE_MOTION_CUE, REMOVE_ONSCREEN_TEXT } from '@/lib/monitor/copy-paste-spec'
 import type { KlingVideoContext } from './types'
 
 const SYSTEM = `You convert a shot/beat breakdown of a short-form video into a Seedance
@@ -166,52 +166,56 @@ export async function applyDialogueCorrection(opts: {
 }
 
 /**
- * Deterministic (no Grok call) keyframe edit prompts — NOT the narrative,
- * from-scratch style used elsewhere in this file. Ported directly from the
- * already-proven Copy-Paste feature's renderKeyframeEditPrompt/
- * renderEndKeyframeEditPrompt (src/lib/monitor/copy-paste-spec.ts).
+ * Deterministic (no Grok call) keyframe edit prompts. TEXT-ONLY generation —
+ * no source video frame as an image input, per explicit user correction
+ * (2026-09-17), reverting an earlier same-day change that passed the actual
+ * source frame as "image 1" (the Copy-Paste pattern). That fix solved the
+ * WRONG problem: it made the edit model copy whoever was visually prominent
+ * in the real frame, which is not necessarily the character the user wants
+ * their own identity mapped onto (confirmed live: a scene where the maid
+ * drives the visible action, but the user's lead character was a different,
+ * less-prominent person in frame).
  *
- * Why this replaced an earlier from-scratch-text approach (2026-09-17): that
- * version asked Grok to identify "the main character" from a text summary
- * alone and omit their appearance — it failed on a 3-person scene, fully
- * describing the wrong woman's hair/build in the prompt, which then
- * overrode the identity-reference image entirely (confirmed live: the
- * rendered end frame showed a different woman altogether). The fix is
- * structural, not a better prompt: give the edit model the ACTUAL source
- * video frame as "image 1" and let it resolve "the main subject" visually
- * (whoever is prominent/foreground in that real frame) — exactly how
- * Copy-Paste already does this reliably. No text description of who's the
- * lead is needed at all.
+ * The actual fix is `customPrompt` (row.custom_prompt): the Telegram flow
+ * already asks, per job, "add a specific instruction for the still" before
+ * generation (see webhook route's stillprompt gate) — that free-text field
+ * is where the user states the lead role explicitly (e.g. "the maid" /
+ * "the blonde woman on the left"), and it is threaded through here as the
+ * authoritative role line. When absent, this falls back to a generic
+ * single-main-character instruction; for any scene with more than one
+ * person, the user should use the instruction prompt to disambiguate.
  */
+function leadRoleLine(customPrompt?: string | null): string {
+  const trimmed = customPrompt?.trim()
+  return trimmed
+    ? `The identity-reference person plays this role in the scene: ${trimmed}. Give ONLY this role/character the identity-reference person's face and body — everyone else described below keeps their own separate appearance.`
+    : 'The identity-reference person is the single main character in this scene — the one the camera and story center on. If more than one person is described below, do not blend their features together; only one of them is the identity-reference person.'
+}
+
 export function renderFirstFrameEditPrompt(context: KlingVideoContext, customPrompt?: string | null): string {
   const bits = [
-    'Image 1 is the scene reference, image 2 is the identity reference.',
-    'Keep the exact pose, camera framing, and background from image 1 unchanged.',
-    "Replace the main subject's face and body identity with the person from image 2.",
-    context.setting && `Environment: ${context.setting}.`,
+    'The attached image is the identity reference photo: generate a brand new photorealistic first frame of the scene below, starring this exact person — same face, same body, same skin tone as the reference photo.',
+    leadRoleLine(customPrompt),
+    context.setting && `Scene: ${context.setting}`,
     context.camera && `Camera: ${context.camera}.`,
-    `Body and skin come from image 2, not image 1: ${KEYFRAME_IDENTITY_LOCK}.`,
-    PRESERVE_MOTION_CUE,
     REMOVE_ONSCREEN_TEXT,
     'Photorealistic, natural skin texture, no beauty filter, no AI skin smoothing.',
-    'Do not add any other people. Do not change the composition, angle, or background.',
-    customPrompt?.trim(),
+    'Do not add extra people beyond what the scene describes.',
   ].filter(Boolean)
   return bits.join(' ')
 }
 
-export function renderEndFrameEditPrompt(context: KlingVideoContext): string {
+export function renderEndFrameEditPrompt(context: KlingVideoContext, customPrompt?: string | null): string {
   const bits = [
-    'Image 1 is the scene reference, image 2 is the identity reference, image 3 is the matching start frame of the same shot.',
-    'Keep the exact pose, camera framing, and background from image 1 unchanged.',
-    "Replace the main subject's face and body identity with the person from image 2.",
-    'The person must look IDENTICAL to the person in image 3 — same face, same hair colour and styling, same wardrobe, same skin tone and lighting. Only the pose and framing differ.',
-    context.setting && `Environment: ${context.setting}.`,
+    'Image 1 is the just-generated first frame of this same shot, image 2 is the identity reference photo.',
+    'Generate the END frame of the same continuous shot: the person must look IDENTICAL to image 1 — same face, same hair colour and styling, same wardrobe, same skin tone and lighting. Only the pose and framing advance to match the action described below.',
+    leadRoleLine(customPrompt),
+    context.character_action && `Action across the shot: ${context.character_action}`,
     context.camera && `Camera: ${context.camera}.`,
     PRESERVE_MOTION_CUE,
     REMOVE_ONSCREEN_TEXT,
     'Photorealistic, natural skin texture, no beauty filter, no AI skin smoothing.',
-    'Do not add any other people. Do not change the composition, angle, or background.',
+    'Do not add extra people beyond what the scene describes. Do not change the background/setting from image 1.',
   ].filter(Boolean)
   return bits.join(' ')
 }

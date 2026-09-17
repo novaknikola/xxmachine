@@ -120,20 +120,24 @@ async function sendDoneVideo(
 }
 
 /**
- * Generates BOTH keyframe stills via Nano Banana Pro Edit, using the SAME
- * proven pattern as Copy-Paste's own keyframe edit (see seedance-prompt.ts's
- * renderFirstFrameEditPrompt/renderEndFrameEditPrompt): the ACTUAL source
- * video frame is passed as the edit's "scene reference" image, so "the main
- * subject" is resolved VISUALLY by the edit model (whoever is prominent in
- * that real frame) rather than guessed from a text description — a from-
- * scratch text-only version of this tried and failed on a 3-person scene
- * (2026-09-17, confirmed live: it fully described the wrong woman's
- * appearance and the identity reference got ignored).
- *   - First frame: [source video's first frame, identity reference photo].
- *   - End frame: [source video's last frame, identity reference photo, the
- *     just-built first-frame result] — the third image pins wardrobe/hair/
- *     skin continuity to the already-generated first frame, not just a
- *     fresh identity swap, so the pair reads as the same continuous shot.
+ * Generates BOTH keyframe stills via Nano Banana Pro Edit — TEXT-DRIVEN, no
+ * source video frame as an image input (reverted 2026-09-17 per explicit
+ * user correction; the source-frame approach tried right before this was
+ * confirmed live to put the wrong character in the end frame anyway, since
+ * "prominent in the real frame" isn't the same thing as "the character the
+ * user wants their own identity mapped onto" — e.g. a scene where the maid
+ * drives the visible action but the user's identity replaces a different,
+ * less-prominent character).
+ *   - First frame: [identity reference photo] + text prompt only.
+ *   - End frame: [just-built first-frame result, identity reference photo]
+ *     + text prompt — no source last frame either.
+ * The "who is the lead" ambiguity that caused the earlier (2026-09-17,
+ * pre-source-frame) text-only attempt to fail is resolved by threading
+ * row.custom_prompt — the existing per-job "add a specific instruction"
+ * question already asked in the Telegram flow before stills are generated
+ * (see webhook route's stillprompt gate) — through as the authoritative
+ * lead-role line, e.g. "the maid". No new gate needed; the infrastructure
+ * already existed for this.
  * Seedance has no per-shot re-anchoring image like Kling's multi_prompt did,
  * so there is only ever one first/end pair per job — the multi-still/
  * shot_mode branch this used to have is gone; shot_mode/shot_stills stay in
@@ -153,19 +157,11 @@ async function generateStills(opts: {
     duration_sec: null, aspect_ratio: '9:16', shots: [], prompt_mode: 'prompt' as const,
   }
 
-  const sourceFrames = await rows<{ t_sec: number; image_url: string }>(
-    `SELECT t_sec, image_url FROM kling_recreate_frames WHERE job_id = $1 ORDER BY t_sec ASC`,
-    [row.id],
-  )
-  if (!sourceFrames.length) throw new Error('No source frames stored — cannot build keyframe stills')
-  const sourceFirstFrame = sourceFrames[0].image_url
-  const sourceLastFrame = sourceFrames[sourceFrames.length - 1].image_url
-
   const firstFramePrompt = renderFirstFrameEditPrompt(ctx, row.custom_prompt)
-  const lastFramePrompt = renderEndFrameEditPrompt(ctx)
+  const lastFramePrompt = renderEndFrameEditPrompt(ctx, row.custom_prompt)
 
   const firstOutputs = await editImageNanoBananaPro({
-    imageUrls: [sourceFirstFrame, reference],
+    imageUrls: [reference],
     prompt: firstFramePrompt,
     apiKey: opts.apiKey,
   })
@@ -173,7 +169,7 @@ async function generateStills(opts: {
   const preparedFirst = await prepareKlingImage(firstOutputs[0], `kling-recreate/${row.user_id}/${row.id}/first-frame.jpg`)
 
   const endOutputs = await editImageNanoBananaPro({
-    imageUrls: [sourceLastFrame, reference, preparedFirst.url],
+    imageUrls: [preparedFirst.url, reference],
     prompt: lastFramePrompt,
     apiKey: opts.apiKey,
   })
