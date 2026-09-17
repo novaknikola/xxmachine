@@ -300,7 +300,7 @@ export async function processKlingRecreateJob(opts: {
       frames: extracted.frames.map(f => ({ t_sec: f.t_sec, description: null })), context: null,
     }).catch(err => { console.error('[kling-recreate] idea bank failed:', err); return 0 })
 
-    const analysis = await analyzeOneFpsVideo(extracted, videoUrl)
+    const analysis = await analyzeOneFpsVideo(extracted, videoUrl, row.custom_prompt)
     masterPrompt = analysis.master_prompt
     context = analysis.context
     sourceDuration = analysis.context.duration_sec ?? sourceDuration
@@ -572,6 +572,7 @@ async function regeneratePrompt(opts: {
   const analysis = await analyzeOneFpsVideoFromFrames({
     frames, duration: sourceDuration,
     aspectRatio: existingContext?.aspect_ratio ?? '9:16', transcript,
+    manualContext: row.custom_prompt,
   })
 
   await updateRecreate(row.id, { context: analysis.context, master_prompt: analysis.master_prompt })

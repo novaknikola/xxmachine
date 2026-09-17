@@ -192,13 +192,22 @@ const SYNTHESIS_SYSTEM =
   'Never use "steadily", "smoothly", "gently", "calmly", "consistently", "playfully", "flirtatiously", ' +
   'or "dynamically" as a substitute for describing what actually happens — name the phase/action/words ' +
   'instead. Do not invent anything not present in the per-frame descriptions or transcript. Precision and ' +
-  'natural prose are both required — a mechanical checklist is not more precise, it is just worse writing.'
+  'natural prose are both required — a mechanical checklist is not more precise, it is just worse writing.\n\n' +
+  'MANUAL CONTEXT (optional, may be given below): a loose, informal note from the person requesting this ' +
+  'recreation — sometimes dictated from memory or a quick voice note, possibly in Serbian, possibly with ' +
+  'the dialogue attributed to the wrong speaker or shots out of order. Use it only as a hint for what to ' +
+  'expect (the general idea, roughly which lines go where) — the per-frame descriptions and any real audio ' +
+  'transcript above are ground truth and OVERRIDE it whenever they conflict (same priority rule as speech ' +
+  'attribution above: trust what the frames/transcript actually show, not what the note assumed). Never ' +
+  'copy Serbian words into your output — translate the gist into English only where it helps interpret ' +
+  'ambiguous framing or dialogue.'
 
 async function synthesizeContext(opts: {
   frames: FrameDescription[]
   duration: number | null
   aspectRatio: string
   transcript: string
+  manualContext?: string | null
 }): Promise<Pick<KlingVideoContext, 'setting' | 'hook' | 'character_action' | 'camera' | 'speech' | 'shots' | 'capture_style'> & { master_prompt: string }> {
   const timeline = opts.frames
     .map(f => `${f.t_sec.toFixed(1)}s: ${f.description}`)
@@ -214,12 +223,13 @@ async function synthesizeContext(opts: {
       role: 'user',
       content: [
         `Duration: ${opts.duration != null ? `${opts.duration.toFixed(1)}s` : 'unknown'}. Aspect: ${opts.aspectRatio}.`,
+        opts.manualContext?.trim() ? `Manual context (see rules above for priority): ${opts.manualContext.trim()}` : '',
         opts.transcript ? `Timestamped transcript:\n${opts.transcript}` : 'No speech transcript.',
         `Per-frame descriptions (~2fps, already tracks what changed each moment):\n${timeline}`,
         'Follow the rules above exactly. Cross-check before returning: does character_action name ' +
           'every distinct beat visible in the per-frame timeline? Do shots cover 0s to the end with no ' +
           'gap and no repeated pose between consecutive shots? If not, fix it before returning.',
-      ].join('\n'),
+      ].filter(Boolean).join('\n'),
     }],
   })
   const shotsRaw = Array.isArray(parsed.shots) ? parsed.shots : []
@@ -257,6 +267,7 @@ async function buildAnalysisFromFrames(opts: {
   duration: number | null
   aspectRatio: string
   transcript: string
+  manualContext?: string | null
 }): Promise<KlingAnalysis> {
   const synthesized = await synthesizeContext(opts)
 
@@ -290,6 +301,7 @@ async function buildAnalysisFromFrames(opts: {
 export async function analyzeOneFpsVideo(
   extract: OneFpsExtract,
   videoUrl: string,
+  manualContext?: string | null,
 ): Promise<KlingAnalysis> {
   const chunks: OneFpsExtract['frames'][] = []
   for (let i = 0; i < extract.frames.length; i += CHUNK) {
@@ -316,7 +328,7 @@ export async function analyzeOneFpsVideo(
   }
 
   return buildAnalysisFromFrames({
-    frames, duration: extract.duration, aspectRatio: extract.aspectRatio, transcript,
+    frames, duration: extract.duration, aspectRatio: extract.aspectRatio, transcript, manualContext,
   })
 }
 
@@ -331,6 +343,7 @@ export async function analyzeOneFpsVideoFromFrames(opts: {
   duration: number | null
   aspectRatio: string
   transcript: string
+  manualContext?: string | null
 }): Promise<KlingAnalysis> {
   return buildAnalysisFromFrames(opts)
 }

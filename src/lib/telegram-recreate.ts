@@ -133,6 +133,30 @@ export async function downloadTelegramFile(fileId: string): Promise<{
   }
 }
 
+/**
+ * Fetch a voice note the user sent to THIS bot (Telegram voice messages are
+ * OGG/Opus). Same file_id -> getFile -> download pattern as
+ * downloadTelegramFile above, kept as a separate function since that one
+ * validates/normalizes the extension to images only.
+ */
+export async function downloadTelegramVoice(fileId: string): Promise<{
+  buffer: ArrayBuffer
+  mimeType: string
+  filename: string
+}> {
+  const file = await call('getFile', { file_id: fileId }) as { file_path?: string }
+  if (!file?.file_path) throw new Error('Telegram getFile returned no path')
+
+  const res = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`)
+  if (!res.ok) throw new Error(`Telegram file download failed (${res.status})`)
+
+  return {
+    buffer: await res.arrayBuffer(),
+    mimeType: res.headers.get('content-type') ?? 'audio/ogg',
+    filename: file.file_path.split('/').pop() || 'voice.oga',
+  }
+}
+
 export function variationChoiceKeyboard(jobId: string) {
   return {
     inline_keyboard: [[

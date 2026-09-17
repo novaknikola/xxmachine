@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import { one, query, rows } from '@/lib/db'
 import {
   sendText, answerCallbackQuery, editMessageReplyMarkup,
-  confirmRecreateKeyboard, stillPromptChoiceKeyboard,
+  confirmRecreateKeyboard, stillPromptChoiceKeyboard, downloadTelegramVoice,
 } from '@/lib/telegram-recreate'
+import { transcribeVoiceNote } from '@/lib/grok'
 import {
   addUrlsToPending, attachPhotoFromTelegram, claimPending, clearPending, getPending, setAwaiting,
   setAwaitingVariation, setPendingCustomPrompt,
@@ -217,6 +218,40 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true })
     }
 
+    /**
+     * A voice note is only meaningful right now as the answer to "Add a
+     * specific instruction?" (the custom_prompt gate) — it has no other
+     * interpretation in this bot (unlike text, which could be reel URLs or
+     * a dialogue correction), so it's handled the same way that text branch
+     * is: transcribe it via xAI STT and store the result exactly like a
+     * typed instruction. This is also the "manual context" input this
+     * session's user asked for (matching the Python idea-bank pipeline's
+     * loose, dictated-along "Manuelna skripta" column) — see analyze.ts's
+     * synthesizeContext, which now takes row.custom_prompt as an optional
+     * hint layered under the real per-frame/audio analysis.
+     */
+    if (message?.voice) {
+      const pendingVoice = await getPending(chatId)
+      if (pendingVoice?.awaiting === 'custom_prompt') {
+        try {
+          const { buffer, mimeType, filename } = await downloadTelegramVoice(message.voice.file_id)
+          const transcript = await transcribeVoiceNote(buffer, filename, mimeType)
+          if (!transcript) {
+            await sendText(chatId, "Couldn't make out any speech in that voice note — try again or type it instead.")
+            return NextResponse.json({ ok: true })
+          }
+          await setPendingCustomPrompt(chatId, transcript)
+          await setAwaiting(chatId, null)
+          await sendText(chatId, `🎙️ Got it: <i>${escapeHtml(transcript)}</i>`)
+          await showBatch(chatId, userId)
+        } catch (err) {
+          console.error('[kling-recreate] voice transcription failed:', err)
+          await sendText(chatId, '⚠️ Could not transcribe that voice note — try again or type the instruction instead.')
+        }
+      }
+      return NextResponse.json({ ok: true })
+    }
+
     if (message?.text && !message.text.startsWith('/')) {
       const pending = await getPending(chatId)
       if (isVariationAwaiting(pending?.awaiting)) {
@@ -314,7 +349,7 @@ export async function POST(req: NextRequest) {
           await setAwaiting(chatId, 'custom_prompt')
           await answerCallbackQuery(cb.id)
           if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
-          await sendText(chatId, '✍️ Send the instruction for the still as your next message.')
+          await sendText(chatId, '✍️ Send the instruction as text, or 🎙️ a voice note — describe the scene/dialogue loosely, it just needs to be a rough guide.')
           return NextResponse.json({ ok: true })
         }
         // skip: '' (not null) marks the question as asked so showBatch never re-asks it.

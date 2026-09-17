@@ -89,3 +89,33 @@ export async function callGrok(opts: GrokOptions): Promise<string> {
 export function base64ImageContent(base64: string, mimeType = 'image/jpeg'): ImageContent {
   return { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64}` } }
 }
+
+/**
+ * xAI's /v1/stt — for short user-supplied audio (a Telegram voice note),
+ * not the source-reel transcript (that's transcribeSourceSpeech in
+ * copy-paste-spec.ts, a separate Hugging Face Whisper pipeline sized for a
+ * whole video file). Mirrors reels-analiza's transcribe_audio (Python),
+ * confirmed working there.
+ */
+export async function transcribeVoiceNote(buffer: ArrayBuffer, filename: string, mimeType: string): Promise<string> {
+  const key = process.env.XAI_API_KEY
+  if (!key) throw new Error('XAI_API_KEY is not configured')
+
+  const form = new FormData()
+  form.append('file', new Blob([buffer], { type: mimeType }), filename)
+
+  const res = await fetch('https://api.x.ai/v1/stt', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${key}` },
+    body: form,
+    signal: AbortSignal.timeout(60_000),
+  })
+  if (!res.ok) throw new Error(`xAI STT failed (${res.status}): ${(await res.text()).slice(0, 300)}`)
+
+  const data = await res.json() as { text?: string; words?: Array<{ text?: string }> }
+  if (data.text) return data.text.trim()
+  if (Array.isArray(data.words) && data.words.length) {
+    return data.words.map(w => w.text ?? '').join(' ').trim()
+  }
+  return ''
+}
