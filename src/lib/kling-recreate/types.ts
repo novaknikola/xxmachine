@@ -56,6 +56,16 @@ export interface KlingVideoContext {
   aspect_ratio: string
   shots: KlingShotBeat[]
   /**
+   * Ported from the Python idea-bank analyzer's capture-device judgment
+   * (2026-09-17): whether the source is genuinely produced/broadcast footage
+   * (real studio rig, multicam) or phone/consumer-camera footage (the
+   * default for nearly all short-form social content, even a staged skit).
+   * Drives which opener/quality-tag language the still prompts use — never
+   * default to cinematic/studio wording for content that's realistically
+   * phone-shot, it pushes the image model toward an unwanted glossy look.
+   */
+  capture_style?: 'produced' | 'phone' | null
+  /**
    * How the Kling payload was filled:
    * - `multi_prompt` when analysis produced 2–6 shot beats (max 6).
    * - `prompt` otherwise (single master textual prompt).

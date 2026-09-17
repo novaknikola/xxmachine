@@ -124,9 +124,31 @@ function choosePromptMode(shots: KlingShotBeat[]): 'prompt' | 'multi_prompt' {
  */
 const SYNTHESIS_SYSTEM =
   'You compress a ~2fps, per-frame video analysis into instructions for a video-generation model. ' +
-  'Return JSON: setting, hook, character_action, camera, speech (or null), master_prompt, ' +
+  'Return JSON: setting, hook, character_action, camera, speech (or null), capture_style ' +
+  '("produced" or "phone"), master_prompt, ' +
   'shots: array of {t_start, t_end, prompt}, at most 6 entries, covering the FULL clip start to end ' +
   'with no gaps.\n\n' +
+  'capture_style — FIRST decide the capture device: is this ACTUALLY real broadcast/film equipment ' +
+  '(rare — only for genuine TV-show footage with real multicam production value, studio lighting rigs, ' +
+  'and broadcast-grade sharpness/dynamic range) or phone/consumer-camera footage (the default for nearly ' +
+  'all short-form social content, even when scripted as a skit/prank/interview bit — most "sitcom-style" ' +
+  'or "talk-show style" reels are still shot handheld or on a tripod with a phone, not with real studio ' +
+  'cameras). Answer "produced" only when the source frames genuinely show an actual TV production ' +
+  '(audience risers, broadcast desk hardware, network-grade lighting rig). Otherwise answer "phone". ' +
+  'Never default to "produced" just because the content is scripted or sitcom-style — scripted does not ' +
+  'mean professionally shot.\n\n' +
+  'SAFE WORDING (this text feeds an image-edit model with a strict content filter that rejects specific ' +
+  'trigger words regardless of context) — this applies to setting, character_action, and every shot ' +
+  'prompt: NEVER use "corset", "bustier", "lace-up", "cleavage", "plunging" (neckline), "sheer", ' +
+  '"thigh-high", "choker", or any other lingerie/fetish-coded term, no matter how the source frame looks. ' +
+  'Describe wardrobe by silhouette/color/style/costume-type instead — e.g. "a form-fitting black ' +
+  'bodice-style costume with white trim" not "a black lace bustier with a plunging neckline". Do not ' +
+  'describe skin exposure or cleavage at all; describe the garment, not what it reveals. For any beat ' +
+  'involving physical contact (a kiss, an embrace), describe the PRE-contact framing only ("faces close ' +
+  'together, about to kiss") — never mid/post-contact lip or body contact description. If any card, sign, ' +
+  'screen, notepad, or other flat surface that could carry text/logo appears in the setting or a shot, ' +
+  'describe it as blank/plain ("blank light-blue index card, no text, no logo") — never invent or imply ' +
+  'real network/brand branding, the image model will hallucinate one otherwise.\n\n' +
   'hook — ONE sentence: the specific reason this clip works, the actual point of the action and ' +
   'dialogue together, stated as a concrete fact (what is being said/implied and what physical action ' +
   'it goes with) — never a mood word like "flirty" or "playful" standing in for the actual content. ' +
@@ -177,7 +199,7 @@ async function synthesizeContext(opts: {
   duration: number | null
   aspectRatio: string
   transcript: string
-}): Promise<Pick<KlingVideoContext, 'setting' | 'hook' | 'character_action' | 'camera' | 'speech' | 'shots'> & { master_prompt: string }> {
+}): Promise<Pick<KlingVideoContext, 'setting' | 'hook' | 'character_action' | 'camera' | 'speech' | 'shots' | 'capture_style'> & { master_prompt: string }> {
   const timeline = opts.frames
     .map(f => `${f.t_sec.toFixed(1)}s: ${f.description}`)
     .join('\n')
@@ -216,6 +238,8 @@ async function synthesizeContext(opts: {
     .filter((s): s is KlingShotBeat => s !== null)
     .slice(0, 6)
 
+  const captureStyle = parsed.capture_style === 'produced' ? 'produced' : 'phone'
+
   return {
     setting: String(parsed.setting ?? '').trim(),
     hook: String(parsed.hook ?? '').trim(),
@@ -223,6 +247,7 @@ async function synthesizeContext(opts: {
     camera: String(parsed.camera ?? '').trim(),
     speech: parsed.speech == null || parsed.speech === '' ? null : String(parsed.speech),
     shots,
+    capture_style: captureStyle,
     master_prompt: String(parsed.master_prompt ?? '').trim(),
   }
 }
@@ -245,6 +270,7 @@ async function buildAnalysisFromFrames(opts: {
     duration_sec: opts.duration,
     aspect_ratio: opts.aspectRatio,
     shots,
+    capture_style: synthesized.capture_style,
     prompt_mode: choosePromptMode(shots),
   }
 

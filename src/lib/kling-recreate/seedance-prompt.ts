@@ -206,10 +206,24 @@ function leadRoleLine(customPrompt?: string | null): string {
     : 'The identity-reference person is the single main character in this scene — the one the camera and story center on. Give ONLY that character the identity-reference person\'s exact face, body and skin tone from the attached photo; if more than one person is described below, do not blend their features together.'
 }
 
+/**
+ * Ported from the Python idea-bank analyzer's capture-device judgment: never
+ * default to cinematic/studio language for content that's realistically
+ * phone-shot (the common case for short-form social video, even a staged
+ * skit) — that pushes the image model toward an unwanted glossy TV-still
+ * look. `context.capture_style` is set once, during synthesis, from the
+ * actual source frames.
+ */
+function styleOpener(captureStyle: KlingVideoContext['capture_style']): string {
+  return captureStyle === 'produced'
+    ? 'A cinematic production still, high-resolution — professional studio lighting, hyper-realistic detail, precise anatomical accuracy, flawless fabric textures, shallow cinematic depth of field.'
+    : 'A candid high-resolution phone photo — natural mixed lighting with a slight handheld phone-camera quality, photorealistic, natural skin and fabric detail, authentic candid social-media snapshot quality.'
+}
+
 export function renderFirstFrameEditPrompt(context: KlingVideoContext, customPrompt?: string | null): string {
   const firstBeat = context.shots?.[0]?.prompt?.trim() || context.character_action
   const bits = [
-    'A cinematic, photorealistic production still, high-resolution — hyper-realistic detail, precise anatomical accuracy, flawless skin and fabric texture, natural lighting true to the scene, shallow cinematic depth of field.',
+    styleOpener(context.capture_style),
     'The attached photo is the identity reference.',
     leadRoleLine(customPrompt),
     firstBeat && `This still is the opening instant of the shot, frozen exactly here: ${firstBeat}`,
@@ -231,7 +245,9 @@ export function renderEndFrameEditPrompt(context: KlingVideoContext, customPromp
     context.camera && `(For framing/lighting context only — this still is a single frozen instant, not the whole camera move: ${context.camera})`,
     PRESERVE_MOTION_CUE,
     REMOVE_ONSCREEN_TEXT,
-    'Photorealistic, hyper-realistic detail, natural skin texture, no beauty filter, no AI skin smoothing.',
+    context.capture_style === 'produced'
+      ? 'Photorealistic, hyper-realistic detail, natural skin texture, no beauty filter, no AI skin smoothing.'
+      : 'Photorealistic, natural skin and fabric detail, authentic candid social-media snapshot quality, no beauty filter, no AI skin smoothing.',
     'Do not add extra people beyond what the scene describes. Do not change the background/setting from image 1.',
   ].filter(Boolean)
   return bits.join(' ')
