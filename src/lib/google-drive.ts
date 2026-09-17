@@ -236,6 +236,37 @@ export async function ensureChildFolder(
   return keepId
 }
 
+/**
+ * Always creates a brand-new child folder — never finds-and-reuses an
+ * existing one by name. If `baseName` is taken among the parent's current
+ * children, appends " 1", " 2", ... until a free name is found.
+ *
+ * Used for the archive tree's character-level folder only: find-and-reuse
+ * there once silently latched onto a folder that had since been moved
+ * elsewhere in Drive (nested under a manually-created "Prvi Testovi" test
+ * folder), so every future upload for that character kept landing in the
+ * wrong place with nothing to notice. A brand-new folder each time a
+ * character is first resolved, numbered on any name collision, means a
+ * stray same-named folder anywhere else in Drive can never get silently
+ * adopted again.
+ */
+export async function createUniqueChildFolder(
+  parentId: string,
+  baseName: string,
+  accessToken?: string,
+): Promise<string> {
+  let candidate = baseName
+  let suffix = 1
+  for (;;) {
+    const existing = await findChildFolders(parentId, candidate, accessToken)
+    if (existing.length === 0) break
+    candidate = `${baseName} ${suffix}`
+    suffix++
+  }
+  const created = await createDriveFolder(candidate, parentId, accessToken)
+  return created.id
+}
+
 const MULTIPART_MAX_BYTES = 4 * 1024 * 1024
 
 /**
