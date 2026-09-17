@@ -313,7 +313,13 @@ export async function POST(req: NextRequest) {
 
       const added = await addUrlsToPending({ chatId, userId, text: message.text })
       if (!added) {
-        await sendText(chatId, 'Paste Instagram reel URL(s), or send a reference photo.')
+        // No reel URL(s) in this text at all — same fallback as a voice
+        // note: treat it as manual context (the "Manuelna skripta" input)
+        // rather than rejecting it, so it works whether typed or spoken,
+        // at any point, without requiring "Add prompt" to be tapped first.
+        await setPendingCustomPrompt(chatId, userId, message.text)
+        await sendText(chatId, `📝 Saved as manual context for the next recreate: <i>${escapeHtml(message.text)}</i>`)
+        await showBatch(chatId, userId)
         return NextResponse.json({ ok: true })
       }
       const bits = [
