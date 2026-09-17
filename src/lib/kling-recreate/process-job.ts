@@ -1,12 +1,11 @@
 import { one, query, rows } from '@/lib/db'
 import { getUserApiKey } from '@/lib/user-config'
-import { generateCopyPasteKeyframe } from '@/lib/monitor/replicate'
 import { uploadImageFromUrl } from '@/lib/supabase-storage'
 import {
-  sendPhoto, sendText, sendVideo,
+  sendMediaGroup, sendPhoto, sendText, sendVideo,
   variationChoiceKeyboard, stillApprovalKeyboard, dialogueApprovalKeyboard, promptApprovalKeyboard,
 } from '@/lib/telegram-recreate'
-import { analyzeOneFpsVideo, analyzeOneFpsVideoFromFrames, renderRecreateKeyframePrompt } from './analyze'
+import { analyzeOneFpsVideo, analyzeOneFpsVideoFromFrames } from './analyze'
 import { extractOneFpsFrames } from './frames'
 import { bankFreshIdeas } from './ideas'
 import { syncKlingAnalysisSheetSafe } from './sheet-sync'
@@ -18,7 +17,11 @@ import {
   type SeedanceI2VInput,
   type SeedanceVariant,
 } from './seedance-client'
-import { applyDialogueCorrection, buildSeedancePrompt, extractDialogueSummary, formatSeedancePromptSummary } from './seedance-prompt'
+import { editImageNanoBananaPro } from './nano-banana-client'
+import {
+  applyDialogueCorrection, buildKeyframePrompts, buildSeedancePrompt,
+  extractDialogueSummary, formatSeedancePromptSummary,
+} from './seedance-prompt'
 import { prepareKlingImage } from './kling-image'
 import { resolveRecreateVideoUrl } from './scrape'
 import { applyVariationToSeedanceInput, variationSkipsUpstream } from './variation'
@@ -60,6 +63,9 @@ async function updateRecreate(
     context: unknown
     master_prompt: string
     character_image_url: string | null
+    end_frame_image_url: string | null
+    first_frame_prompt: string | null
+    last_frame_prompt: string | null
     shot_stills: unknown
     kling_video_url: string
     kling_variant: string
@@ -114,18 +120,25 @@ async function sendDoneVideo(
 }
 
 /**
- * Generates a single character still, identity-locked to the reference photo
- * (image1=scene ref, image2=identity ref — see renderRecreateKeyframePrompt).
- * Seedance has no per-shot re-anchoring image like Kling's multi_prompt did,
- * so there is only ever one still per job now — the multi-still/shot_mode
- * branch this used to have is gone; shot_mode/shot_stills stay in the schema
+ * Generates BOTH keyframe stills via Nano Banana Pro Edit, per this
+ * session's explicit ask (2026-09-17):
+ *   - First frame: edit input = [identity reference photo] only.
+ *   - End frame: edit input = [identity reference photo, the just-built
+ *     first frame] — carries wardrobe/scene continuity forward, not just
+ *     identity, so the two stills read as the same continuous shot.
+ * Both prompts are built by buildKeyframePrompts, which never describes the
+ * main character's physical appearance (the reference photo attachment
+ * supplies that) — see seedance-prompt.ts's KEYFRAME_SYSTEM. Seedance has no
+ * per-shot re-anchoring image like Kling's multi_prompt did, so there is
+ * only ever one first/end pair per job — the multi-still/shot_mode branch
+ * this used to have is gone; shot_mode/shot_stills stay in the schema
  * unused rather than migrated away.
  */
-async function generateStill(opts: {
+async function generateStills(opts: {
   row: KlingRecreateJobRow
   context: KlingVideoContext | null
   apiKey: string
-}): Promise<{ characterUrl: string }> {
+}): Promise<{ firstFrameUrl: string; endFrameUrl: string; firstFramePrompt: string; lastFramePrompt: string }> {
   const { row } = opts
   const reference = row.reference_image_url
   if (!reference) throw new Error('No reference photo on this job')
@@ -134,33 +147,51 @@ async function generateStill(opts: {
     setting: '', hook: '', character_action: '', camera: '', speech: null,
     duration_sec: null, aspect_ratio: '9:16', shots: [], prompt_mode: 'prompt' as const,
   }
-  const aspectRatio = ctx.aspect_ratio === '16:9' || ctx.aspect_ratio === '1:1' || ctx.aspect_ratio === '9:16'
-    ? ctx.aspect_ratio
-    : 'other'
 
-  const firstFrame = await one<{ image_url: string }>(
-    `SELECT image_url FROM kling_recreate_frames WHERE job_id = $1 ORDER BY t_sec ASC LIMIT 1`,
+  const frameDescs = await rows<{ t_sec: number; description: string | null }>(
+    `SELECT t_sec, description FROM kling_recreate_frames WHERE job_id = $1 ORDER BY t_sec ASC`,
     [row.id],
   )
-  if (!firstFrame) throw new Error('No source frames stored — cannot build character still')
-  const keyframe = await generateCopyPasteKeyframe({
-    sourceFrameUrl: firstFrame.image_url,
-    referenceImageUrl: reference,
-    prompt: renderRecreateKeyframePrompt(ctx, row.custom_prompt),
-    aspectRatio,
-    itemId: row.id,
-    slot: 'keyframe',
-  }, opts.apiKey)
-  const prepared = await prepareKlingImage(keyframe.imageUrl, `kling-recreate/${row.user_id}/${row.id}/character.jpg`)
-  return { characterUrl: prepared.url }
+  if (!frameDescs.length) throw new Error('No source frames stored — cannot build keyframe prompts')
+  const firstFrameDescription = frameDescs[0]?.description ?? null
+  const lastFrameDescription = frameDescs[frameDescs.length - 1]?.description ?? null
+
+  const { firstFramePrompt, lastFramePrompt } = await buildKeyframePrompts({
+    context: ctx, firstFrameDescription, lastFrameDescription,
+  })
+  const firstPromptFinal = row.custom_prompt ? `${firstFramePrompt} ${row.custom_prompt.trim()}` : firstFramePrompt
+
+  const firstOutputs = await editImageNanoBananaPro({
+    imageUrls: [reference],
+    prompt: firstPromptFinal,
+    apiKey: opts.apiKey,
+  })
+  if (!firstOutputs.length) throw new Error('Nano Banana Pro: no first-frame output')
+  const preparedFirst = await prepareKlingImage(firstOutputs[0], `kling-recreate/${row.user_id}/${row.id}/first-frame.jpg`)
+
+  const endOutputs = await editImageNanoBananaPro({
+    imageUrls: [reference, preparedFirst.url],
+    prompt: lastFramePrompt,
+    apiKey: opts.apiKey,
+  })
+  if (!endOutputs.length) throw new Error('Nano Banana Pro: no end-frame output')
+  const preparedEnd = await prepareKlingImage(endOutputs[0], `kling-recreate/${row.user_id}/${row.id}/end-frame.jpg`)
+
+  return {
+    firstFrameUrl: preparedFirst.url,
+    endFrameUrl: preparedEnd.url,
+    firstFramePrompt,
+    lastFramePrompt,
+  }
 }
 
 function buildSeedanceInput(opts: {
   image: string
   prompt: string
   sourceDuration: number | null
+  lastImage?: string | null
 }): SeedanceI2VInput {
-  return {
+  const input: SeedanceI2VInput = {
     variant: SEEDANCE_VARIANT,
     image: opts.image,
     prompt: opts.prompt,
@@ -168,6 +199,8 @@ function buildSeedanceInput(opts: {
     resolution: SEEDANCE_RESOLUTION_DEFAULT,
     generate_audio: true,
   }
+  if (opts.lastImage) input.last_image = opts.lastImage
+  return input
 }
 
 /**
@@ -216,7 +249,10 @@ export async function processKlingRecreateJob(opts: {
     const sourceDuration = row.duration_sec != null ? Number(row.duration_sec) : null
     const basePrompt = row.seedance_prompt || masterPrompt || ''
     const seedanceInput = applyVariationToSeedanceInput(
-      buildSeedanceInput({ image: row.character_image_url, prompt: basePrompt, sourceDuration }),
+      buildSeedanceInput({
+        image: row.character_image_url, prompt: basePrompt, sourceDuration,
+        lastImage: row.end_frame_image_url,
+      }),
       note,
     )
     if (!seedanceInput.prompt) {
@@ -303,20 +339,23 @@ export async function processKlingRecreateJob(opts: {
 
   await updateRecreate(row.id, { status: 'still' })
   await heartbeat(opts.queueJobId, 'still', { progress: 55 })
-  const { characterUrl } = await generateStill({ row, context, apiKey })
+  const { firstFrameUrl, endFrameUrl, firstFramePrompt, lastFramePrompt } = await generateStills({ row, context, apiKey })
   await updateRecreate(row.id, {
-    character_image_url: characterUrl,
+    character_image_url: firstFrameUrl,
+    end_frame_image_url: endFrameUrl,
+    first_frame_prompt: firstFramePrompt,
+    last_frame_prompt: lastFramePrompt,
     status: 'awaiting_still_approval',
   })
   await heartbeat(opts.queueJobId, 'awaiting_still_approval', { progress: 65 })
 
   if (chatId != null) {
     try {
-      await sendPhoto(chatId, characterUrl, '🖼️ Character still ready — review before Seedance.')
+      await sendMediaGroup(chatId, [firstFrameUrl, endFrameUrl], '🖼️ First frame + end frame ready — review before Seedance.')
     } catch {
-      await notify(chatId, '🖼️ Character still ready — review before Seedance.')
+      await notify(chatId, '🖼️ First frame + end frame ready — review before Seedance.')
     }
-    await notify(chatId, 'Approve to check the dialogue attribution, or regenerate the still.', stillApprovalKeyboard(row.id))
+    await notify(chatId, 'Approve both to check the dialogue attribution, or regenerate.', stillApprovalKeyboard(row.id))
   }
 
   return { ok: true, awaitingApproval: true }
@@ -376,19 +415,26 @@ async function regenerateStill(opts: {
   const apiKey = await getUserApiKey(opts.userId, 'wavespeed_api_key')
   const context = (row.context ?? null) as KlingVideoContext | null
 
-  await updateRecreate(row.id, { character_image_url: null, status: 'still' })
+  await updateRecreate(row.id, {
+    character_image_url: null, end_frame_image_url: null,
+    first_frame_prompt: null, last_frame_prompt: null, status: 'still',
+  })
   await heartbeat(opts.queueJobId, 'still', { progress: 55 })
-  const { characterUrl } = await generateStill({ row, context, apiKey })
-  await updateRecreate(row.id, { character_image_url: characterUrl, status: 'awaiting_still_approval' })
+  const { firstFrameUrl, endFrameUrl, firstFramePrompt, lastFramePrompt } = await generateStills({ row, context, apiKey })
+  await updateRecreate(row.id, {
+    character_image_url: firstFrameUrl, end_frame_image_url: endFrameUrl,
+    first_frame_prompt: firstFramePrompt, last_frame_prompt: lastFramePrompt,
+    status: 'awaiting_still_approval',
+  })
   await heartbeat(opts.queueJobId, 'awaiting_still_approval', { progress: 65 })
 
   if (chatId != null) {
     try {
-      await sendPhoto(chatId, characterUrl, '🖼️ Regenerated character still.')
+      await sendMediaGroup(chatId, [firstFrameUrl, endFrameUrl], '🖼️ Regenerated — first frame + end frame.')
     } catch {
-      await notify(chatId, '🖼️ Regenerated character still.')
+      await notify(chatId, '🖼️ Regenerated — first frame + end frame.')
     }
-    await notify(chatId, 'Approve to check the dialogue attribution, or regenerate again.', stillApprovalKeyboard(row.id))
+    await notify(chatId, 'Approve both to check the dialogue attribution, or regenerate again.', stillApprovalKeyboard(row.id))
   }
   return { ok: true, awaitingApproval: true }
 }
@@ -421,7 +467,10 @@ async function approveDialogue(opts: {
   }, row.confirmed_dialogue)
   if (!prompt.trim()) throw new Error('Seedance prompt synthesis returned nothing')
 
-  const seedanceInput = buildSeedanceInput({ image: row.character_image_url, prompt, sourceDuration })
+  const seedanceInput = buildSeedanceInput({
+    image: row.character_image_url, prompt, sourceDuration,
+    lastImage: row.end_frame_image_url,
+  })
 
   await updateRecreate(row.id, {
     status: 'awaiting_prompt_approval',
@@ -511,7 +560,8 @@ async function regeneratePrompt(opts: {
 
   await query(
     `UPDATE kling_recreate_jobs
-        SET master_prompt = NULL, character_image_url = NULL, shot_stills = NULL,
+        SET master_prompt = NULL, character_image_url = NULL, end_frame_image_url = NULL,
+            first_frame_prompt = NULL, last_frame_prompt = NULL, shot_stills = NULL,
             seedance_prompt = NULL, confirmed_dialogue = NULL,
             status = 'analyzing', updated_at = now()
       WHERE id = $1`,
@@ -530,17 +580,21 @@ async function regeneratePrompt(opts: {
   await notify(chatId, '🧠 Re-analyzed. Building a new character still…')
 
   await updateRecreate(row.id, { status: 'still' })
-  const { characterUrl } = await generateStill({ row, context: analysis.context, apiKey })
-  await updateRecreate(row.id, { character_image_url: characterUrl, status: 'awaiting_still_approval' })
+  const { firstFrameUrl, endFrameUrl, firstFramePrompt, lastFramePrompt } = await generateStills({ row, context: analysis.context, apiKey })
+  await updateRecreate(row.id, {
+    character_image_url: firstFrameUrl, end_frame_image_url: endFrameUrl,
+    first_frame_prompt: firstFramePrompt, last_frame_prompt: lastFramePrompt,
+    status: 'awaiting_still_approval',
+  })
   await heartbeat(opts.queueJobId, 'awaiting_still_approval', { progress: 65 })
 
   if (chatId != null) {
     try {
-      await sendPhoto(chatId, characterUrl, '🖼️ New analysis — character still ready.')
+      await sendMediaGroup(chatId, [firstFrameUrl, endFrameUrl], '🖼️ New analysis — first frame + end frame ready.')
     } catch {
-      await notify(chatId, '🖼️ New analysis — character still ready.')
+      await notify(chatId, '🖼️ New analysis — first frame + end frame ready.')
     }
-    await notify(chatId, 'Approve to check the dialogue attribution, or regenerate.', stillApprovalKeyboard(row.id))
+    await notify(chatId, 'Approve both to check the dialogue attribution, or regenerate.', stillApprovalKeyboard(row.id))
   }
   return { ok: true, awaitingApproval: true }
 }

@@ -113,7 +113,15 @@ export interface KlingRecreateJobRow {
   reference_image_url: string | null
   context: KlingVideoContext | Record<string, unknown> | null
   master_prompt: string | null
+  /** Holds the FIRST-frame Nano Banana Pro Edit result (identity reference
+   * photo alone as the edit input). */
   character_image_url: string | null
+  /** The END-frame Nano Banana Pro Edit result (identity reference photo +
+   * the first frame, for wardrobe/scene continuity) — used as Seedance's
+   * last_image. */
+  end_frame_image_url?: string | null
+  first_frame_prompt?: string | null
+  last_frame_prompt?: string | null
   /** Column name kept as-is (kling_*) to avoid a needless rename migration —
    * holds the Seedance render result now, not Kling. */
   kling_video_url: string | null
