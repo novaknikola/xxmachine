@@ -5,7 +5,7 @@ import { uploadBuffer } from '@/lib/supabase-storage'
 import { MAX_RECREATE_URLS, type KlingShotMode } from './types'
 import { variationAwaitingValue } from './variation'
 
-const PENDING_COLUMNS = 'chat_id, user_id, photo_url, urls, awaiting, shot_mode, custom_prompt'
+const PENDING_COLUMNS = 'chat_id, user_id, photo_url, urls, awaiting, shot_mode, custom_prompt, reference_photos'
 
 export interface RecreatePending {
   chat_id: string | number
@@ -15,6 +15,7 @@ export interface RecreatePending {
   awaiting: string | null
   shot_mode: KlingShotMode | null
   custom_prompt: string | null
+  reference_photos: Record<string, string>
 }
 
 export async function getPending(chatId: number): Promise<RecreatePending | null> {
@@ -32,7 +33,7 @@ export async function upsertPending(chatId: number, userId: string): Promise<Rec
   const existing = await getPending(chatId)
   if (existing) return existing
   const row = await one<RecreatePending>(
-    `INSERT INTO telegram_recreate_pending (chat_id, user_id) VALUES ($1, $2) RETURNING chat_id, user_id, photo_url, urls, awaiting, shot_mode, custom_prompt`,
+    `INSERT INTO telegram_recreate_pending (chat_id, user_id) VALUES ($1, $2) RETURNING ${PENDING_COLUMNS}`,
     [chatId, userId],
   )
   return row!
@@ -46,7 +47,7 @@ export async function setPendingPhoto(chatId: number, userId: string, photoUrl: 
        photo_url = EXCLUDED.photo_url,
        user_id = EXCLUDED.user_id,
        updated_at = now()
-     RETURNING chat_id, user_id, photo_url, urls, awaiting, shot_mode, custom_prompt`,
+     RETURNING ${PENDING_COLUMNS}`,
     [chatId, userId, photoUrl],
   )
   return row!
@@ -61,6 +62,34 @@ export async function attachPhotoFromTelegram(opts: {
   const path = `kling-recreate-refs/${opts.userId}/${Date.now()}.${extension}`
   const photoUrl = await uploadBuffer(buffer, path, contentType)
   return setPendingPhoto(opts.chatId, opts.userId, photoUrl)
+}
+
+/**
+ * Multi-identity path: a photo sent WITH a caption is that character's
+ * named reference, merged into reference_photos (a name->url map) instead
+ * of overwriting the single photo_url. Upsert so this can be the very first
+ * thing sent, same reasoning as setPendingCustomPrompt.
+ */
+export async function attachNamedPhotoFromTelegram(opts: {
+  chatId: number
+  userId: string
+  fileId: string
+  name: string
+}): Promise<RecreatePending> {
+  const { buffer, contentType, extension } = await downloadTelegramFile(opts.fileId)
+  const path = `kling-recreate-refs/${opts.userId}/${Date.now()}.${extension}`
+  const photoUrl = await uploadBuffer(buffer, path, contentType)
+  const row = await one<RecreatePending>(
+    `INSERT INTO telegram_recreate_pending (chat_id, user_id, reference_photos, updated_at)
+     VALUES ($1, $2, jsonb_build_object($3::text, $4::text), now())
+     ON CONFLICT (chat_id) DO UPDATE SET
+       reference_photos = telegram_recreate_pending.reference_photos || jsonb_build_object($3::text, $4::text),
+       user_id = EXCLUDED.user_id,
+       updated_at = now()
+     RETURNING ${PENDING_COLUMNS}`,
+    [opts.chatId, opts.userId, opts.name, photoUrl],
+  )
+  return row!
 }
 
 export interface AddUrlsResult {
@@ -97,7 +126,7 @@ export async function addUrlsToPending(opts: {
     `UPDATE telegram_recreate_pending
         SET urls = urls || $2::text[], user_id = $3, updated_at = now()
       WHERE chat_id = $1
-      RETURNING chat_id, user_id, photo_url, urls, awaiting, shot_mode, custom_prompt`,
+      RETURNING ${PENDING_COLUMNS}`,
     [opts.chatId, toAdd, opts.userId],
   )
 
@@ -161,7 +190,7 @@ export async function claimPending(chatId: number): Promise<RecreatePending | nu
   return one<RecreatePending>(
     `DELETE FROM telegram_recreate_pending
       WHERE chat_id = $1 AND coalesce(array_length(urls, 1), 0) > 0
-      RETURNING chat_id, user_id, photo_url, urls, awaiting, shot_mode, custom_prompt`,
+      RETURNING ${PENDING_COLUMNS}`,
     [chatId],
   )
 }
@@ -172,7 +201,7 @@ export async function claimPendingForScript(chatId: number): Promise<RecreatePen
   return one<RecreatePending>(
     `DELETE FROM telegram_recreate_pending
       WHERE chat_id = $1 AND coalesce(custom_prompt, '') <> ''
-      RETURNING chat_id, user_id, photo_url, urls, awaiting, shot_mode, custom_prompt`,
+      RETURNING ${PENDING_COLUMNS}`,
     [chatId],
   )
 }

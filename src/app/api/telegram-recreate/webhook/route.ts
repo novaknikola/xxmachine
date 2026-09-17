@@ -6,8 +6,9 @@ import {
 } from '@/lib/telegram-recreate'
 import { transcribeVoiceNote } from '@/lib/grok'
 import {
-  addUrlsToPending, attachPhotoFromTelegram, claimPending, claimPendingForScript, clearPending,
-  getPending, setAwaiting, setAwaitingVariation, setPendingCustomPrompt,
+  addUrlsToPending, attachNamedPhotoFromTelegram, attachPhotoFromTelegram, claimPending,
+  claimPendingForScript, clearPending, getPending, setAwaiting, setAwaitingVariation,
+  setPendingCustomPrompt,
 } from '@/lib/kling-recreate/pending'
 import {
   enqueueKlingAction, enqueueKlingRecreateJobs, enqueueKlingScriptOnlyJob, enqueueKlingVariationJobs,
@@ -44,6 +45,7 @@ const HELP = [
   'I scrape the reel, describe it at ~2fps, build a character still, confirm the dialogue attribution with you, then animate it with Seedance 2.5.',
   '',
   'No reel? Send a photo + a written or spoken scene script instead (setting, action, dialogue) and I’ll generate the whole video from that alone.',
+  'More than one real person in the scene? Send each one’s photo separately, captioned with how that character is described (e.g. a photo captioned "Tiana", or "the maid").',
   '',
   '/ideas — recent banked niche ideas (not rendered)',
   '/cancel — clear the current batch',
@@ -83,12 +85,15 @@ function batchStatusText(opts: {
   defaultPhoto: boolean
   urls: string[]
   customPrompt?: string | null
+  namedPhotoNames?: string[]
 }): string {
-  const photo = opts.photoUrl
-    ? '📸 Photo: attached'
-    : opts.defaultPhoto
-      ? '📸 Photo: using account default'
-      : '📸 Photo: missing — send one, or set a default in dashboard Settings'
+  const photo = opts.namedPhotoNames?.length
+    ? `📸 Characters: ${opts.namedPhotoNames.map(n => escapeHtml(n)).join(', ')}`
+    : opts.photoUrl
+      ? '📸 Photo: attached'
+      : opts.defaultPhoto
+        ? '📸 Photo: using account default'
+        : '📸 Photo: missing — send one, or set a default in dashboard Settings'
   const script = opts.customPrompt?.trim()
     ? `📝 Script: ${escapeHtml(opts.customPrompt.trim().slice(0, 60))}${opts.customPrompt.trim().length > 60 ? '…' : ''}`
     : null
@@ -118,11 +123,14 @@ async function showBatch(chatId: number, userId: string) {
   const pending = await getPending(chatId)
   const urls = pending?.urls ?? []
   const photoUrl = pending?.photo_url ?? null
-  const hasDefault = !photoUrl && !!(await defaultReference(userId))
-  const ready = urls.length > 0 && !!(photoUrl || hasDefault)
-  // No URL at all, but a photo + a real (non-empty, non-skipped) script —
-  // offer the script-only path instead of just repeating "paste a URL".
-  const scriptOnlyReady = !ready && urls.length === 0 && !!(photoUrl || hasDefault) && !!pending?.custom_prompt?.trim()
+  const namedPhotoNames = Object.keys(pending?.reference_photos ?? {})
+  const hasDefault = !photoUrl && !namedPhotoNames.length && !!(await defaultReference(userId))
+  const hasIdentity = !!(photoUrl || hasDefault || namedPhotoNames.length)
+  const ready = urls.length > 0 && hasIdentity
+  // No URL at all, but at least one identity photo + a real (non-empty,
+  // non-skipped) script — offer the script-only path instead of just
+  // repeating "paste a URL".
+  const scriptOnlyReady = !ready && urls.length === 0 && hasIdentity && !!pending?.custom_prompt?.trim()
 
   if (ready && pending?.custom_prompt == null) {
     await sendText(
@@ -137,7 +145,7 @@ async function showBatch(chatId: number, userId: string) {
 
   await sendText(
     chatId,
-    batchStatusText({ photoUrl, defaultPhoto: hasDefault, urls, customPrompt: pending?.custom_prompt }),
+    batchStatusText({ photoUrl, defaultPhoto: hasDefault, urls, customPrompt: pending?.custom_prompt, namedPhotoNames }),
     ready ? confirmRecreateKeyboard(urls.length) : (scriptOnlyReady ? scriptOnlyKeyboard() : undefined),
   )
 }
@@ -230,7 +238,12 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true })
       }
       const largest = message.photo[message.photo.length - 1]
-      await attachPhotoFromTelegram({ chatId, userId, fileId: largest.file_id })
+      const photoName = (message.caption as string | undefined)?.trim()
+      if (photoName) {
+        await attachNamedPhotoFromTelegram({ chatId, userId, fileId: largest.file_id, name: photoName })
+      } else {
+        await attachPhotoFromTelegram({ chatId, userId, fileId: largest.file_id })
+      }
       await showBatch(chatId, userId)
       return NextResponse.json({ ok: true })
     }
@@ -318,7 +331,8 @@ export async function POST(req: NextRequest) {
 
       if (pending?.awaiting === 'script_lead_character') {
         const leadCharacter = message.text.trim()
-        const reference = pending.photo_url || await defaultReference(userId)
+        const namedPhotos = pending.reference_photos ?? {}
+        const reference = pending.photo_url || await defaultReference(userId) || Object.values(namedPhotos)[0]
         if (!leadCharacter || !pending.custom_prompt?.trim() || !reference) {
           await setAwaiting(chatId, null)
           await sendText(chatId, 'That script-only batch expired — tap "Generate from script" again.')
@@ -331,7 +345,7 @@ export async function POST(req: NextRequest) {
         }
         await enqueueKlingScriptOnlyJob({
           userId, chatId, referenceImageUrl: reference,
-          script: claimed.custom_prompt!, leadCharacter,
+          script: claimed.custom_prompt!, leadCharacter, referencePhotos: claimed.reference_photos,
         })
         await sendText(
           chatId,
@@ -393,6 +407,35 @@ export async function POST(req: NextRequest) {
       }
 
       if (parts[1] === 'scriptonly') {
+        const open = await getPending(chatId)
+        const namedPhotos = open?.reference_photos ?? {}
+        // Already have named photos (one per captioned character) — nothing
+        // left to ask, the names ARE the lead-character answer.
+        if (Object.keys(namedPhotos).length) {
+          const reference = open?.photo_url || await defaultReference(userId) || Object.values(namedPhotos)[0]
+          if (!open?.custom_prompt?.trim() || !reference) {
+            await answerCallbackQuery(cb.id, 'Need a photo and a script')
+            return NextResponse.json({ ok: true })
+          }
+          const claimed = await claimPendingForScript(chatId)
+          if (!claimed) {
+            await answerCallbackQuery(cb.id, 'Already queued')
+            return NextResponse.json({ ok: true })
+          }
+          await answerCallbackQuery(cb.id, 'Queued…')
+          if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
+          await enqueueKlingScriptOnlyJob({
+            userId, chatId, referenceImageUrl: reference,
+            script: claimed.custom_prompt!, referencePhotos: claimed.reference_photos,
+          })
+          await sendText(
+            chatId,
+            `🎬 Queued script-only recreate (${escapeHtml(Object.keys(namedPhotos).join(', '))}). ` +
+              `I’ll send the analysis, then the character still for approval, then a quick dialogue check, ` +
+              `then the Seedance prompt for approval, then the video.`,
+          )
+          return NextResponse.json({ ok: true })
+        }
         await setAwaiting(chatId, 'script_lead_character')
         await answerCallbackQuery(cb.id)
         if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
@@ -485,7 +528,8 @@ export async function POST(req: NextRequest) {
       if (parts[1] === 'go') {
         const open = await getPending(chatId)
         const urls = open?.urls ?? []
-        const reference = open?.photo_url || await defaultReference(userId)
+        const namedPhotos = open?.reference_photos ?? {}
+        const reference = open?.photo_url || await defaultReference(userId) || Object.values(namedPhotos)[0]
         if (!urls.length || !reference) {
           await answerCallbackQuery(cb.id, 'Need a photo and at least one reel URL')
           return NextResponse.json({ ok: true })
@@ -500,6 +544,7 @@ export async function POST(req: NextRequest) {
         const ids = await enqueueKlingRecreateJobs({
           userId, chatId, urls, referenceImageUrl: reference,
           customPrompt: pending.custom_prompt,
+          referencePhotos: pending.reference_photos,
         })
         await sendText(
           chatId,

@@ -192,18 +192,52 @@ export async function applyDialogueCorrection(opts: {
  * thing NOT ported from that pipeline: that pipeline has no identity photo
  * at all, so it freely describes the lead's face/hair/body in prose. Here an
  * actual reference photo carries the identity, so the lead's own physical
- * description is still deliberately omitted (leadRoleLine only states their
- * ROLE, never their appearance) — describing it in text is what caused the
- * original wrong-woman bug this session fixed twice already. The fix for
- * flatness instead is pulling the SPECIFIC first/last beat's pose and action
- * (context.shots[0]/[last].prompt — already detailed prose from analysis)
- * rather than only the generic whole-scene setting.
+ * description is still deliberately omitted (identityLines only states
+ * their ROLE/NAME, never their appearance) — describing it in text is what
+ * caused the original wrong-woman bug this session fixed twice already. The
+ * fix for flatness instead is pulling the SPECIFIC first/last beat's pose
+ * and action (context.shots[0]/[last].prompt — already detailed prose from
+ * analysis) rather than only the generic whole-scene setting.
+ *
+ * Extended 2026-09-18 for scenes needing MORE than one real identity at
+ * once (e.g. two named characters from a script, both with their own
+ * reference photo) — see NamedIdentityPhoto/identityLines below. The
+ * single-unnamed-photo case (still the common one) is unchanged.
  */
-function leadRoleLine(customPrompt?: string | null): string {
-  const trimmed = customPrompt?.trim()
-  return trimmed
-    ? `The identity-reference person plays this role in the scene: ${trimmed}. Give ONLY this role/character the identity-reference person's exact face, body and skin tone from the attached photo — everyone else in the scene keeps their own separate appearance exactly as described below, unaffected by the reference photo.`
-    : 'The identity-reference person is the single main character in this scene — the one the camera and story center on. Give ONLY that character the identity-reference person\'s exact face, body and skin tone from the attached photo; if more than one person is described below, do not blend their features together.'
+/** One real reference photo, optionally labelled with how that character is
+ * identified in the scene/script (a role like "the maid", or a script's own
+ * character name like "Tiana"). `name: null` is the plain single-photo
+ * fallback with no label at all. */
+export interface NamedIdentityPhoto {
+  name: string | null
+}
+
+/**
+ * Identity-mapping line(s) for the edit prompt. `imageOffset` is the index
+ * (1-based) of the FIRST identity photo among the images actually sent to
+ * Nano Banana Pro — 1 for the first-frame call (only identity photos, no
+ * scene-reference image), 2 for the end-frame call (image 1 is the
+ * just-built first frame, identity photos start at 2).
+ *
+ * Multi-identity support added 2026-09-18 per explicit user ask — scenes
+ * with more than one real person need each one kept distinct, not one real
+ * + others freely generated. The single-unnamed-photo branch below is
+ * BYTE-FOR-BYTE the original leadRoleLine(null) wording — that's still the
+ * overwhelmingly common case and must not change behaviour.
+ */
+export function identityLines(photos: NamedIdentityPhoto[], imageOffset: number): string {
+  if (photos.length === 1 && !photos[0].name) {
+    return 'The identity-reference person is the single main character in this scene — the one the camera and story center on. Give ONLY that character the identity-reference person\'s exact face, body and skin tone from the attached photo; if more than one person is described below, do not blend their features together.'
+  }
+  if (photos.length === 1) {
+    return `The attached photo is the identity reference for "${photos[0].name}" — wherever the scene describes ${photos[0].name}, give that character this exact face, body and skin tone from the photo. Everyone else in the scene keeps their own separate appearance exactly as described below, unaffected by the reference photo.`
+  }
+  return photos
+    .map((p, i) => {
+      const label = p.name ?? `person ${i + 1}`
+      return `Image ${i + imageOffset} is the identity reference for "${label}" — wherever the scene describes ${label}, give that character this exact face, body and skin tone from this image; do not use it for any other character, and do not blend it with the other identity photos.`
+    })
+    .join(' ')
 }
 
 /**
@@ -220,12 +254,12 @@ function styleOpener(captureStyle: KlingVideoContext['capture_style']): string {
     : 'A candid high-resolution phone photo — natural mixed lighting with a slight handheld phone-camera quality, photorealistic, natural skin and fabric detail, authentic candid social-media snapshot quality.'
 }
 
-export function renderFirstFrameEditPrompt(context: KlingVideoContext, customPrompt?: string | null): string {
+export function renderFirstFrameEditPrompt(context: KlingVideoContext, photos: NamedIdentityPhoto[]): string {
   const firstBeat = context.shots?.[0]?.prompt?.trim() || context.character_action
   const bits = [
     styleOpener(context.capture_style),
-    'The attached photo is the identity reference.',
-    leadRoleLine(customPrompt),
+    photos.length > 1 ? 'The attached photos are identity references, one per named character.' : 'The attached photo is the identity reference.',
+    identityLines(photos, 1),
     firstBeat && `This still is the opening instant of the shot, frozen exactly here: ${firstBeat}`,
     context.setting && `Scene and environment: ${context.setting}`,
     context.camera && `(For framing/lighting context only — this still is a single frozen instant, not the whole camera move: ${context.camera})`,
@@ -235,12 +269,14 @@ export function renderFirstFrameEditPrompt(context: KlingVideoContext, customPro
   return bits.join(' ')
 }
 
-export function renderEndFrameEditPrompt(context: KlingVideoContext, customPrompt?: string | null): string {
+export function renderEndFrameEditPrompt(context: KlingVideoContext, photos: NamedIdentityPhoto[]): string {
   const lastBeat = context.shots?.[context.shots.length - 1]?.prompt?.trim() || context.character_action
   const bits = [
-    'Image 1 is the just-generated first frame of this same shot, image 2 is the identity reference photo.',
-    'Generate the END frame of the same continuous shot: the person must look IDENTICAL to image 1 — same face, same hair colour and styling, same wardrobe, same skin tone and lighting. Only the pose and framing advance.',
-    leadRoleLine(customPrompt),
+    photos.length > 1
+      ? 'Image 1 is the just-generated first frame of this same shot, the remaining images are identity reference photos, one per named character.'
+      : 'Image 1 is the just-generated first frame of this same shot, image 2 is the identity reference photo.',
+    'Generate the END frame of the same continuous shot: every person must look IDENTICAL to image 1 — same face, same hair colour and styling, same wardrobe, same skin tone and lighting. Only the pose and framing advance.',
+    identityLines(photos, 2),
     lastBeat && `This still is the closing instant of the shot, frozen exactly here: ${lastBeat}`,
     context.camera && `(For framing/lighting context only — this still is a single frozen instant, not the whole camera move: ${context.camera})`,
     PRESERVE_MOTION_CUE,

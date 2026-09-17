@@ -167,29 +167,46 @@ async function sendDoneVideo(
  * shot_mode branch this used to have is gone; shot_mode/shot_stills stay in
  * the schema unused rather than migrated away.
  */
+/**
+ * Resolves how many real identities this job needs and what each is called.
+ * reference_photos (name->url map) wins when present — the multi-identity
+ * path (2026-09-18). Otherwise falls back to the single reference_image_url,
+ * labelled with whatever role/name the job already carries (lead_character
+ * for a script-only job, custom_prompt for a normal one) — this is exactly
+ * the pre-existing single-photo behaviour, unchanged.
+ */
+export function namedPhotosFromRow(row: KlingRecreateJobRow): { name: string | null; url: string }[] {
+  const map = row.reference_photos
+  if (map && typeof map === 'object') {
+    const entries = Object.entries(map).filter((e): e is [string, string] => !!e[1])
+    if (entries.length) return entries.map(([name, url]) => ({ name, url }))
+  }
+  if (row.reference_image_url) {
+    const label = (row.is_script_only ? row.lead_character : row.custom_prompt)?.trim() || null
+    return [{ name: label, url: row.reference_image_url }]
+  }
+  return []
+}
+
 async function generateStills(opts: {
   row: KlingRecreateJobRow
   context: KlingVideoContext | null
   apiKey: string
 }): Promise<{ firstFrameUrl: string; endFrameUrl: string; firstFramePrompt: string; lastFramePrompt: string }> {
   const { row } = opts
-  const reference = row.reference_image_url
-  if (!reference) throw new Error('No reference photo on this job')
+  const photos = namedPhotosFromRow(row)
+  if (!photos.length) throw new Error('No reference photo(s) on this job')
 
   const ctx = opts.context ?? {
     setting: '', hook: '', character_action: '', camera: '', speech: null,
     duration_sec: null, aspect_ratio: '9:16', shots: [], prompt_mode: 'prompt' as const,
   }
 
-  // For a script-only job, custom_prompt IS the whole script (not a short
-  // role label) — lead_character (asked separately, see webhook route's
-  // "scriptonly" gate) is the actual role-line input there instead.
-  const roleLabel = row.is_script_only ? row.lead_character : row.custom_prompt
-  const firstFramePrompt = renderFirstFrameEditPrompt(ctx, roleLabel)
-  const lastFramePrompt = renderEndFrameEditPrompt(ctx, roleLabel)
+  const firstFramePrompt = renderFirstFrameEditPrompt(ctx, photos)
+  const lastFramePrompt = renderEndFrameEditPrompt(ctx, photos)
 
   const firstOutputs = await editImageNanoBananaPro({
-    imageUrls: [reference],
+    imageUrls: photos.map(p => p.url),
     prompt: firstFramePrompt,
     apiKey: opts.apiKey,
   })
@@ -197,7 +214,7 @@ async function generateStills(opts: {
   const preparedFirst = await prepareKlingImage(firstOutputs[0], `kling-recreate/${row.user_id}/${row.id}/first-frame.jpg`)
 
   const endOutputs = await editImageNanoBananaPro({
-    imageUrls: [preparedFirst.url, reference],
+    imageUrls: [preparedFirst.url, ...photos.map(p => p.url)],
     prompt: lastFramePrompt,
     apiKey: opts.apiKey,
   })

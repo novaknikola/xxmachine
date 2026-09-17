@@ -166,6 +166,11 @@ export interface KlingRecreateJobRow {
    * reference photo plays — used in place of custom_prompt (which is the
    * whole script here, not a short role label) as the leadRoleLine input. */
   lead_character?: string | null
+  /** Multi-identity path: name -> reference photo URL, one entry per real
+   * person to preserve in the scene (e.g. {"Tiana": "...", "Dianna": "..."}).
+   * When absent/empty, reference_image_url is the single/default identity —
+   * see namedPhotosFromRow in process-job.ts. */
+  reference_photos?: Record<string, string> | null
 }
 
 export const MAX_RECREATE_URLS = 30

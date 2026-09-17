@@ -127,6 +127,7 @@ export interface VariationJobDraft {
   videoUrl: string | null
   durationSec: number | string | null
   referenceImageUrl: string | null
+  referencePhotos: Record<string, string> | null
   characterImageUrl: string
   masterPrompt: string
   context: KlingVideoContext | Record<string, unknown> | null
@@ -142,7 +143,7 @@ export interface VariationJobDraft {
 export function buildVariationJobDrafts(
   parent: Pick<
     KlingRecreateJobRow,
-    'id' | 'source_url' | 'video_url' | 'duration_sec' | 'reference_image_url'
+    'id' | 'source_url' | 'video_url' | 'duration_sec' | 'reference_image_url' | 'reference_photos'
     | 'character_image_url' | 'master_prompt' | 'context' | 'settings'
   >,
   change: string,
@@ -159,6 +160,7 @@ export function buildVariationJobDrafts(
     videoUrl: parent.video_url,
     durationSec: parent.duration_sec,
     referenceImageUrl: parent.reference_image_url,
+    referencePhotos: parent.reference_photos ?? null,
     characterImageUrl: parent.character_image_url!,
     masterPrompt: master,
     context: parent.context,
