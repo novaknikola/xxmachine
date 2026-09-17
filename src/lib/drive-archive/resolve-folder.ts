@@ -1,5 +1,5 @@
 import { withClient, one } from '@/lib/db'
-import { ensureChildFolder } from '@/lib/google-drive'
+import { ensureChildFolder, createUniqueChildFolder } from '@/lib/google-drive'
 import { ensureDriveRootFolder } from './ensure-root-folder'
 import {
   driveFormatFolderName,
@@ -23,6 +23,12 @@ async function ensureCachedSegment(
     kind: string
     stage: string
     dateKey: string
+    /**
+     * Character-level folder only: on a cache miss, always create a brand-new
+     * folder (numbered on any name collision) instead of finding-and-reusing
+     * an existing one — see createUniqueChildFolder's doc comment for why.
+     */
+    createFresh?: boolean
   },
 ): Promise<string> {
   const cached = await client.query<{ folder_id: string }>(
@@ -31,7 +37,9 @@ async function ensureCachedSegment(
   )
   if (cached.rows[0]?.folder_id) return cached.rows[0].folder_id
 
-  const folderId = await ensureChildFolder(opts.parentId, opts.name, opts.accessToken)
+  const folderId = opts.createFresh
+    ? await createUniqueChildFolder(opts.parentId, opts.name, opts.accessToken)
+    : await ensureChildFolder(opts.parentId, opts.name, opts.accessToken)
 
   await client.query(
     `INSERT INTO drive_folders
@@ -171,6 +179,7 @@ export async function resolveArchiveFolder(opts: {
         kind: kindCache,
         stage: '_',
         dateKey: '_',
+        createFresh: true,
       })
 
       const formatFolderId = await ensureCachedSegment(client, {
