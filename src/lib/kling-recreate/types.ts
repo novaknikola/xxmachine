@@ -1,42 +1,26 @@
-import type { KlingVariant, KlingShotType } from './kling-client'
+import type { SeedanceVariant } from './seedance-client'
 
-export type { KlingVariant, KlingShotType }
-
-export interface KlingUserSettings {
-  variant: KlingVariant
-  duration_mode: 'auto' | 'fixed'
-  duration_sec: number | null
-  sound: boolean
-  cfg_scale: number
-  shot_type: KlingShotType
-  negative_prompt: string | null
-  element_list: string[]
-}
-
-export const DEFAULT_KLING_SETTINGS: KlingUserSettings = {
-  variant: 'pro',
-  duration_mode: 'auto',
-  duration_sec: null,
-  sound: true,
-  cfg_scale: 0.5,
-  shot_type: 'customize',
-  negative_prompt: null,
-  element_list: [],
-}
+export type { SeedanceVariant }
 
 /**
- * 'analyze' (default, omit for old callers): scrape -> analyze -> still(s) ->
- * stop for still approval. 'approve_still': build the final Kling prompt(s)
- * from the approved still(s) -> stop for prompt approval. 'regenerate_still':
- * clear the still(s) and redo just that step off the existing analysis.
- * 'approve_prompt': fire the actual paid Kling call. 'regenerate_prompt':
- * redo the synthesis (shots/master_prompt) off the already-extracted 1fps
- * frame descriptions, then redo the still(s) for the new shots.
+ * 'analyze' (default, omit for old callers): scrape -> analyze -> still ->
+ * stop for still approval. 'approve_still': derive the dialogue summary from
+ * the approved still's analysis -> stop for dialogue-attribution approval.
+ * 'regenerate_still': clear the still and redo just that step off the
+ * existing analysis. 'approve_dialogue': dialogue confirmed as-is -> build
+ * the Seedance prompt -> stop for prompt approval. 'correct_dialogue': user
+ * sent a free-text speaker correction -> re-derive the summary with that
+ * correction applied, still awaiting confirmation. 'approve_prompt': fire
+ * the actual paid Seedance call. 'regenerate_prompt': redo the synthesis
+ * (shots/master_prompt) off the already-extracted 1fps frame descriptions,
+ * then redo the still for the new shots.
  */
 export type KlingRecreateAction =
   | 'analyze'
   | 'approve_still'
   | 'regenerate_still'
+  | 'approve_dialogue'
+  | 'correct_dialogue'
   | 'approve_prompt'
   | 'regenerate_prompt'
 
@@ -44,6 +28,9 @@ export interface KlingRecreateQueueInput {
   recreateJobId: string
   chatId: number
   action?: KlingRecreateAction
+  /** Only used with action: 'correct_dialogue' — the user's free-text
+   * speaker-attribution correction. */
+  correction?: string
 }
 
 export interface KlingShotBeat {
@@ -91,6 +78,7 @@ export type KlingRecreateStatus =
   | 'analyzing'
   | 'still'
   | 'awaiting_still_approval'
+  | 'awaiting_dialogue_approval'
   | 'awaiting_prompt_approval'
   | 'rendering'
   | 'done'
@@ -126,10 +114,17 @@ export interface KlingRecreateJobRow {
   context: KlingVideoContext | Record<string, unknown> | null
   master_prompt: string | null
   character_image_url: string | null
+  /** Column name kept as-is (kling_*) to avoid a needless rename migration —
+   * holds the Seedance render result now, not Kling. */
   kling_video_url: string | null
   kling_variant: string | null
+  /** Holds the built Seedance payload (buildSeedanceI2VPayload output) once
+   * the prompt gate is approved — same role kling_request had for Kling. */
   kling_request: Record<string, unknown> | null
-  settings: KlingUserSettings | Record<string, unknown>
+  /** Kept as loose JSON — Kling-only settings (variant/cfg/sound/shot_type/
+   * negative_prompt/element_list) are no longer read or written; the column
+   * itself is left in place rather than dropped (see plan doc). */
+  settings: Record<string, unknown>
   status: KlingRecreateStatus
   error: string | null
   parent_job_id?: string | null
@@ -137,6 +132,13 @@ export interface KlingRecreateJobRow {
   shot_mode?: KlingShotMode | null
   custom_prompt?: string | null
   shot_stills?: KlingShotStill[] | null
+  /** The Seedance prompt text once built (before payload assembly) — stored
+   * so the dialogue gate's re-derivation and the prompt-approval message can
+   * both read it back without re-calling Grok. */
+  seedance_prompt?: string | null
+  /** Free-text speaker-attribution correction from the dialogue gate, if the
+   * user sent one — folded into buildSeedancePrompt with top priority. */
+  confirmed_dialogue?: string | null
 }
 
 export const MAX_RECREATE_URLS = 30

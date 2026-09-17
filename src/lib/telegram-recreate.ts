@@ -152,17 +152,7 @@ export function confirmRecreateKeyboard(urlCount: number) {
   }
 }
 
-/** Asked once per batch, before analysis runs — decides one still vs one per shot. */
-export function shotModeKeyboard() {
-  return {
-    inline_keyboard: [[
-      { text: 'One shot', callback_data: 'kr:shotmode:one_shot' },
-      { text: 'Multi-shot', callback_data: 'kr:shotmode:multi_shot' },
-    ]],
-  }
-}
-
-/** Optional, asked right after shot mode — custom instruction for the character still(s). */
+/** Optional, asked before analysis runs — custom instruction for the character still. */
 export function stillPromptChoiceKeyboard() {
   return {
     inline_keyboard: [[
@@ -172,7 +162,7 @@ export function stillPromptChoiceKeyboard() {
   }
 }
 
-/** Gate 1: character still(s) generated, before the Kling prompt is even built. */
+/** Gate 1: character still generated, before dialogue attribution is checked. */
 export function stillApprovalKeyboard(jobId: string) {
   return {
     inline_keyboard: [[
@@ -182,53 +172,23 @@ export function stillApprovalKeyboard(jobId: string) {
   }
 }
 
-/** Gate 2: the actual Kling prompt/shots, before the paid Kling call fires. */
-export function promptApprovalKeyboard(jobId: string) {
+/** Gate 2 (new): "who says what" confirmed before the Seedance prompt is
+ * built — a free-text reply while this gate is open is treated as a
+ * correction (see correctDialogue in process-job.ts), not a new command. */
+export function dialogueApprovalKeyboard(jobId: string) {
   return {
     inline_keyboard: [[
-      { text: '✅ Approve → Kling', callback_data: `kr:promptok:${jobId}` },
-      { text: '🔁 Regenerate', callback_data: `kr:promptrg:${jobId}` },
+      { text: '✅ Confirm', callback_data: `kr:dialogueok:${jobId}` },
     ]],
   }
 }
 
-export function settingsKeyboard() {
+/** Gate 3: the actual Seedance prompt, before the paid Seedance call fires. */
+export function promptApprovalKeyboard(jobId: string) {
   return {
-    inline_keyboard: [
-      [
-        { text: 'Std', callback_data: 'kr:set:variant:std' },
-        { text: 'Pro', callback_data: 'kr:set:variant:pro' },
-        { text: '4K', callback_data: 'kr:set:variant:4k' },
-      ],
-      [
-        { text: 'Dur auto', callback_data: 'kr:set:dur:auto' },
-        { text: '3s', callback_data: 'kr:set:dur:3' },
-        { text: '5s', callback_data: 'kr:set:dur:5' },
-        { text: '10s', callback_data: 'kr:set:dur:10' },
-        { text: '15s', callback_data: 'kr:set:dur:15' },
-      ],
-      [
-        { text: 'Sound on', callback_data: 'kr:set:sound:on' },
-        { text: 'Sound off', callback_data: 'kr:set:sound:off' },
-      ],
-      [
-        { text: 'CFG 0.3', callback_data: 'kr:set:cfg:0.3' },
-        { text: '0.5', callback_data: 'kr:set:cfg:0.5' },
-        { text: '0.7', callback_data: 'kr:set:cfg:0.7' },
-        { text: '1.0', callback_data: 'kr:set:cfg:1' },
-      ],
-      [
-        { text: 'Shot customize', callback_data: 'kr:set:shot:customize' },
-        { text: 'Intelligence', callback_data: 'kr:set:shot:intelligence' },
-      ],
-      [
-        { text: '✍️ Negative prompt', callback_data: 'kr:set:neg' },
-        { text: 'Clear neg', callback_data: 'kr:set:negclear' },
-      ],
-      [
-        { text: '🧩 Element IDs', callback_data: 'kr:set:els' },
-        { text: 'Clear elements', callback_data: 'kr:set:elsclear' },
-      ],
-    ],
+    inline_keyboard: [[
+      { text: '✅ Approve → Seedance', callback_data: `kr:promptok:${jobId}` },
+      { text: '🔁 Regenerate', callback_data: `kr:promptrg:${jobId}` },
+    ]],
   }
 }

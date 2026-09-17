@@ -2,19 +2,22 @@ import { one } from '@/lib/db'
 import { internalBaseUrl } from '@/lib/internal-url'
 import { buildVariationJobDrafts } from './variation'
 import type {
-  KlingRecreateAction, KlingRecreateJobRow, KlingRecreateQueueInput, KlingShotMode, KlingUserSettings,
+  KlingRecreateAction, KlingRecreateJobRow, KlingRecreateQueueInput,
 } from './types'
 
 const CRON_SECRET = process.env.CRON_SECRET
 const IMMEDIATE_FIRES = 2
+/** Kept as a literal — Kling-only per-user settings (variant/cfg/sound/
+ * shot_type/etc) are gone; shot_mode is likewise fixed since Seedance has no
+ * per-shot re-anchoring image, only ever one still per job now. */
+const SEEDANCE_VARIANT_DEFAULT = 'standard'
+const SHOT_MODE_DEFAULT = 'one_shot'
 
 export async function enqueueKlingRecreateJobs(opts: {
   userId: string
   chatId: number
   urls: string[]
   referenceImageUrl: string
-  settings: KlingUserSettings
-  shotMode: KlingShotMode
   customPrompt?: string | null
 }): Promise<string[]> {
   const queueIds: string[] = []
@@ -31,9 +34,9 @@ export async function enqueueKlingRecreateJobs(opts: {
         opts.chatId,
         sourceUrl,
         opts.referenceImageUrl,
-        JSON.stringify(opts.settings),
-        opts.settings.variant,
-        opts.shotMode,
+        '{}',
+        SEEDANCE_VARIANT_DEFAULT,
+        SHOT_MODE_DEFAULT,
         opts.customPrompt?.trim() || null,
       ],
     )
@@ -74,11 +77,13 @@ export async function enqueueKlingAction(opts: {
   chatId: number
   jobId: string
   action: KlingRecreateAction
+  correction?: string
 }): Promise<string> {
   const input: KlingRecreateQueueInput = {
     recreateJobId: opts.jobId,
     chatId: opts.chatId,
     action: opts.action,
+    ...(opts.correction ? { correction: opts.correction } : {}),
   }
   const queued = await one<{ id: string }>(
     `INSERT INTO generation_queue (user_id, job_type, input, total_items)
@@ -137,7 +142,7 @@ export async function enqueueKlingVariationJobs(opts: {
         draft.masterPrompt,
         JSON.stringify(draft.context ?? {}),
         JSON.stringify(draft.settings ?? {}),
-        (opts.parent.settings as KlingUserSettings)?.variant ?? opts.parent.kling_variant ?? 'pro',
+        opts.parent.kling_variant ?? SEEDANCE_VARIANT_DEFAULT,
         draft.parentJobId,
         draft.variationNote,
       ],

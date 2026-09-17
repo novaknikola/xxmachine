@@ -1,5 +1,5 @@
-import type { KlingI2VInput } from './kling-client'
-import type { KlingRecreateJobRow, KlingUserSettings, KlingVideoContext } from './types'
+import type { SeedanceI2VInput } from './seedance-client'
+import type { KlingRecreateJobRow, KlingVideoContext } from './types'
 
 export const VARIATION_COUNT_MIN = 1
 export const VARIATION_COUNT_MAX = 6
@@ -93,20 +93,8 @@ export function applyVariationDelta(base: string, change: string): string {
   return body ? `${body}\n\n${delta}` : delta
 }
 
-/** Keep the parent's prompt XOR multi_prompt choice; apply the delta to whichever is set. */
-export function applyVariationToKlingInput(input: KlingI2VInput, change: string): KlingI2VInput {
-  const next: KlingI2VInput = { ...input }
-  if (next.multi_prompt?.length) {
-    next.multi_prompt = next.multi_prompt.map(shot => ({
-      ...shot,
-      prompt: applyVariationDelta(shot.prompt, change),
-    }))
-    delete next.prompt
-  } else {
-    next.prompt = applyVariationDelta(next.prompt ?? '', change)
-    delete next.multi_prompt
-  }
-  return next
+export function applyVariationToSeedanceInput(input: SeedanceI2VInput, change: string): SeedanceI2VInput {
+  return { ...input, prompt: applyVariationDelta(input.prompt ?? '', change) }
 }
 
 export function variationSkipsUpstream(row: { parent_job_id?: string | null }): boolean {
@@ -142,7 +130,7 @@ export interface VariationJobDraft {
   characterImageUrl: string
   masterPrompt: string
   context: KlingVideoContext | Record<string, unknown> | null
-  settings: KlingUserSettings | Record<string, unknown>
+  settings: Record<string, unknown>
   variationNote: string
   skipScrape: true
   skipAnalyze: true

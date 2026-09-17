@@ -3,32 +3,35 @@ import { getUserApiKey } from '@/lib/user-config'
 import { generateCopyPasteKeyframe } from '@/lib/monitor/replicate'
 import { uploadImageFromUrl } from '@/lib/supabase-storage'
 import {
-  sendPhoto, sendMediaGroup, sendText, sendVideo,
-  variationChoiceKeyboard, stillApprovalKeyboard, promptApprovalKeyboard,
+  sendPhoto, sendText, sendVideo,
+  variationChoiceKeyboard, stillApprovalKeyboard, dialogueApprovalKeyboard, promptApprovalKeyboard,
 } from '@/lib/telegram-recreate'
 import { analyzeOneFpsVideo, analyzeOneFpsVideoFromFrames, renderRecreateKeyframePrompt } from './analyze'
 import { extractOneFpsFrames } from './frames'
 import { bankFreshIdeas } from './ideas'
 import { syncKlingAnalysisSheetSafe } from './sheet-sync'
 import {
-  buildKlingI2VPayload,
-  clampKlingDuration,
-  generateKlingI2V,
-  type KlingI2VInput,
-  type KlingVariant,
-} from './kling-client'
+  buildSeedanceI2VPayload,
+  clampSeedanceDuration,
+  generateSeedanceI2V,
+  SEEDANCE_RESOLUTION_DEFAULT,
+  type SeedanceI2VInput,
+  type SeedanceVariant,
+} from './seedance-client'
+import { applyDialogueCorrection, buildSeedancePrompt, extractDialogueSummary, formatSeedancePromptSummary } from './seedance-prompt'
 import { prepareKlingImage } from './kling-image'
 import { resolveRecreateVideoUrl } from './scrape'
-import { normalizeSettings } from './settings'
-import { applyVariationToKlingInput, variationSkipsUpstream } from './variation'
+import { applyVariationToSeedanceInput, variationSkipsUpstream } from './variation'
 import type {
   KlingRecreateJobRow,
   KlingRecreateQueueInput,
-  KlingShotBeat,
-  KlingShotStill,
-  KlingUserSettings,
   KlingVideoContext,
 } from './types'
+
+/** Fixed default — Kling-style per-user variant/quality settings are gone
+ * (see plan doc); Seedance's own "spicy" endpoint is chosen only when a job
+ * needs it, which isn't wired up as a user choice in this pass. */
+const SEEDANCE_VARIANT: SeedanceVariant = 'standard'
 
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -61,6 +64,8 @@ async function updateRecreate(
     kling_video_url: string
     kling_variant: string
     kling_request: unknown
+    seedance_prompt: string | null
+    confirmed_dialogue: string | null
     error: string | null
   }>,
 ) {
@@ -80,75 +85,8 @@ async function updateRecreate(
   )
 }
 
-function durationForKling(sourceSec: number | null, settings: KlingUserSettings): number {
-  if (settings.duration_mode === 'fixed' && settings.duration_sec != null) {
-    return clampKlingDuration(settings.duration_sec)
-  }
-  return clampKlingDuration(sourceSec)
-}
-
-function allocateShotDurations(shots: KlingShotBeat[], total: number) {
-  const n = shots.length
-  const base = Math.floor(total / n)
-  let remainder = total - base * n
-  return shots.map(s => {
-    const d = base + (remainder > 0 ? 1 : 0)
-    if (remainder > 0) remainder--
-    return { prompt: s.prompt, duration: Math.max(1, d) }
-  })
-}
-
-/**
- * multi_shot only actually applies when the analysis found >=2 beats — a
- * clip with one continuous beat has nothing to split, so it silently behaves
- * like one_shot regardless of what the user picked. one_shot always ignores
- * shots even if the analysis found several.
- */
-function effectivePromptMode(
-  shotMode: 'one_shot' | 'multi_shot' | null | undefined,
-  shots: KlingShotBeat[],
-): 'prompt' | 'multi_prompt' {
-  if (shotMode === 'multi_shot' && shots.length >= 2 && shots.length <= 6) return 'multi_prompt'
-  return 'prompt'
-}
-
-function buildKlingInput(opts: {
-  settings: KlingUserSettings
-  image: string
-  masterPrompt: string
-  context: KlingVideoContext | null
-  sourceDuration: number | null
-  shotMode: 'one_shot' | 'multi_shot' | null | undefined
-  shotStills: KlingShotStill[] | null
-}): KlingI2VInput {
-  const duration = durationForKling(opts.sourceDuration, opts.settings)
-  const shots = (opts.context?.shots ?? []).filter(s => s.prompt.trim()).slice(0, 6)
-  const mode = effectivePromptMode(opts.shotMode, shots)
-
-  const input: KlingI2VInput = {
-    variant: opts.settings.variant,
-    image: opts.image,
-    duration,
-    cfg_scale: opts.settings.cfg_scale,
-    sound: opts.settings.sound,
-    shot_type: opts.settings.shot_type,
-  }
-
-  if (mode === 'multi_prompt') {
-    const allocated = allocateShotDurations(shots, duration)
-    input.multi_prompt = allocated.map((shot, i) => {
-      // Re-anchors identity at this shot's own still instead of only at t=0 —
-      // the whole reason multi-shot is worth the extra generation step (see
-      // KlingMultiPromptItem.image doc comment).
-      const still = opts.shotStills?.find(s => s.t_start === shots[i].t_start)
-      return still ? { ...shot, image: still.image_url } : shot
-    })
-  } else {
-    input.prompt = opts.masterPrompt
-  }
-  if (opts.settings.negative_prompt) input.negative_prompt = opts.settings.negative_prompt
-  if (opts.settings.element_list.length) input.element_list = opts.settings.element_list
-  return input
+function durationForSeedance(sourceSec: number | null): number {
+  return clampSeedanceDuration(sourceSec, SEEDANCE_VARIANT)
 }
 
 async function notify(chatId: number | string | null | undefined, text: string, keyboard?: object) {
@@ -176,56 +114,18 @@ async function sendDoneVideo(
 }
 
 /**
- * One human-readable summary of exactly what will be sent to Kling — the
- * content of the prompt-approval message. Mirrors the shape of the real
- * payload closely enough that approving this and approving the actual
- * buildKlingI2VPayload output mean the same thing.
+ * Generates a single character still, identity-locked to the reference photo
+ * (image1=scene ref, image2=identity ref — see renderRecreateKeyframePrompt).
+ * Seedance has no per-shot re-anchoring image like Kling's multi_prompt did,
+ * so there is only ever one still per job now — the multi-still/shot_mode
+ * branch this used to have is gone; shot_mode/shot_stills stay in the schema
+ * unused rather than migrated away.
  */
-function formatPromptSummary(input: KlingI2VInput, context: KlingVideoContext | null): string {
-  const lines: string[] = [
-    `🎬 <b>Ready for Kling ${escapeHtml(input.variant)}</b> · ${input.duration}s` +
-      `${input.multi_prompt?.length ? ` · ${input.multi_prompt.length} shots` : ' · single prompt'}`,
-  ]
-  if (context?.hook) lines.push(`<b>Hook:</b> ${escapeHtml(context.hook)}`)
-  if (input.multi_prompt?.length) {
-    for (const [i, shot] of input.multi_prompt.entries()) {
-      lines.push(`\n<b>Shot ${i + 1}</b> (${shot.duration ?? '?'}s)${shot.image ? ' 🖼️' : ''}:\n${escapeHtml(shot.prompt)}`)
-    }
-  } else if (input.prompt) {
-    lines.push(`\n${escapeHtml(input.prompt)}`)
-  }
-  return lines.join('\n')
-}
-
-/**
- * Picks, for one shot's time range, the extracted 1fps frame closest to its
- * midpoint — the most representative moment of that beat, same idea as
- * Copy-Paste's best-face-frame selection but per-shot instead of per-clip.
- */
-async function nearestFrameForShot(jobId: string, shot: KlingShotBeat): Promise<{ image_url: string } | null> {
-  const mid = (shot.t_start + shot.t_end) / 2
-  return one<{ image_url: string }>(
-    `SELECT image_url FROM kling_recreate_frames
-      WHERE job_id = $1
-      ORDER BY abs(t_sec - $2) ASC
-      LIMIT 1`,
-    [jobId, mid],
-  )
-}
-
-/**
- * Generates the character still(s) for a job whose analysis is already
- * stored: one still (from the first frame) for one_shot mode, or one still
- * PER shot (each anchored to that shot's own nearest source frame) for
- * multi_shot mode when the analysis actually found >=2 beats. Stops short of
- * building the Kling payload — that happens in approveKlingStill, after a
- * human has looked at these.
- */
-async function generateStills(opts: {
+async function generateStill(opts: {
   row: KlingRecreateJobRow
   context: KlingVideoContext | null
   apiKey: string
-}): Promise<{ characterUrl: string; shotStills: KlingShotStill[] | null }> {
+}): Promise<{ characterUrl: string }> {
   const { row } = opts
   const reference = row.reference_image_url
   if (!reference) throw new Error('No reference photo on this job')
@@ -237,58 +137,45 @@ async function generateStills(opts: {
   const aspectRatio = ctx.aspect_ratio === '16:9' || ctx.aspect_ratio === '1:1' || ctx.aspect_ratio === '9:16'
     ? ctx.aspect_ratio
     : 'other'
-  const shots = (ctx.shots ?? []).filter(s => s.prompt.trim()).slice(0, 6)
-  const wantMulti = row.shot_mode === 'multi_shot' && shots.length >= 2
 
-  if (!wantMulti) {
-    const firstFrame = await one<{ image_url: string }>(
-      `SELECT image_url FROM kling_recreate_frames WHERE job_id = $1 ORDER BY t_sec ASC LIMIT 1`,
-      [row.id],
-    )
-    if (!firstFrame) throw new Error('No source frames stored — cannot build character still')
-    const keyframe = await generateCopyPasteKeyframe({
-      sourceFrameUrl: firstFrame.image_url,
-      referenceImageUrl: reference,
-      prompt: renderRecreateKeyframePrompt(ctx, row.custom_prompt),
-      aspectRatio,
-      itemId: row.id,
-      slot: 'keyframe',
-    }, opts.apiKey)
-    const prepared = await prepareKlingImage(keyframe.imageUrl, `kling-recreate/${row.user_id}/${row.id}/character.jpg`)
-    return { characterUrl: prepared.url, shotStills: null }
-  }
+  const firstFrame = await one<{ image_url: string }>(
+    `SELECT image_url FROM kling_recreate_frames WHERE job_id = $1 ORDER BY t_sec ASC LIMIT 1`,
+    [row.id],
+  )
+  if (!firstFrame) throw new Error('No source frames stored — cannot build character still')
+  const keyframe = await generateCopyPasteKeyframe({
+    sourceFrameUrl: firstFrame.image_url,
+    referenceImageUrl: reference,
+    prompt: renderRecreateKeyframePrompt(ctx, row.custom_prompt),
+    aspectRatio,
+    itemId: row.id,
+    slot: 'keyframe',
+  }, opts.apiKey)
+  const prepared = await prepareKlingImage(keyframe.imageUrl, `kling-recreate/${row.user_id}/${row.id}/character.jpg`)
+  return { characterUrl: prepared.url }
+}
 
-  // One still per shot, in order — sequential (not parallel) so a failure on
-  // shot 3 doesn't leave 4/5/6 half-billed while 1/2 succeeded and the error
-  // is unclear about which shot actually broke.
-  const shotStills: KlingShotStill[] = []
-  for (const shot of shots) {
-    const sourceFrame = await nearestFrameForShot(row.id, shot)
-    if (!sourceFrame) continue
-    const keyframe = await generateCopyPasteKeyframe({
-      sourceFrameUrl: sourceFrame.image_url,
-      referenceImageUrl: reference,
-      prompt: renderRecreateKeyframePrompt(ctx, row.custom_prompt),
-      aspectRatio,
-      itemId: row.id,
-      slot: 'keyframe',
-    }, opts.apiKey)
-    const prepared = await prepareKlingImage(
-      keyframe.imageUrl,
-      `kling-recreate/${row.user_id}/${row.id}/shot-${shot.t_start}.jpg`,
-    )
-    shotStills.push({ t_start: shot.t_start, t_end: shot.t_end, image_url: prepared.url })
+function buildSeedanceInput(opts: {
+  image: string
+  prompt: string
+  sourceDuration: number | null
+}): SeedanceI2VInput {
+  return {
+    variant: SEEDANCE_VARIANT,
+    image: opts.image,
+    prompt: opts.prompt,
+    duration: durationForSeedance(opts.sourceDuration),
+    resolution: SEEDANCE_RESOLUTION_DEFAULT,
+    generate_audio: true,
   }
-  if (!shotStills.length) throw new Error('Could not build any per-shot character stills')
-  return { characterUrl: shotStills[0].image_url, shotStills }
 }
 
 /**
- * Phase 1: scrape -> 1fps analyze -> character still(s). Stops at
- * 'awaiting_still_approval' instead of continuing to Kling — a human checks
- * the still(s) before anything paid beyond Seedream runs. Re-invoking this
- * while already awaiting approval (or beyond) is a no-op: it must never
- * regenerate a paid still or re-send the same notification on a cron retry.
+ * Phase 1: scrape -> 1fps analyze -> character still. Stops at
+ * 'awaiting_still_approval' instead of continuing — a human checks the still
+ * before anything paid beyond Seedream runs. Re-invoking this while already
+ * past this stage is a no-op: it must never regenerate a paid still or
+ * re-send the same notification on a cron retry.
  */
 export async function processKlingRecreateJob(opts: {
   queueJobId: string
@@ -301,7 +188,6 @@ export async function processKlingRecreateJob(opts: {
   )
   if (!row) throw new Error('kling_recreate_jobs row not found')
   const chatId = opts.input.chatId ?? row.chat_id
-  const settings = normalizeSettings(row.settings)
   const apiKey = await getUserApiKey(opts.userId, 'wavespeed_api_key')
 
   if (row.kling_video_url) {
@@ -313,12 +199,13 @@ export async function processKlingRecreateJob(opts: {
     })
     return { ok: true, videoUrl: row.kling_video_url, cached: true }
   }
-  if (row.status === 'awaiting_still_approval' || row.status === 'awaiting_prompt_approval') {
+  if (row.status === 'awaiting_still_approval' || row.status === 'awaiting_dialogue_approval' || row.status === 'awaiting_prompt_approval') {
     return { ok: true, awaitingApproval: true }
   }
 
   // Variation children reuse the parent still + analysis and skip straight to
-  // rendering — no approval gate, the parent's still was already approved.
+  // rendering — no approval gates, the parent's still/dialogue/prompt were
+  // already approved.
   if (variationSkipsUpstream(row)) {
     if (!row.character_image_url) throw new Error('Variation job is missing the parent character still.')
     const note = (row.variation_note ?? '').trim()
@@ -327,23 +214,21 @@ export async function processKlingRecreateJob(opts: {
     const context = (row.context ?? null) as KlingVideoContext | null
     const masterPrompt = row.master_prompt
     const sourceDuration = row.duration_sec != null ? Number(row.duration_sec) : null
-    const klingInput = applyVariationToKlingInput(
-      buildKlingInput({
-        settings, image: row.character_image_url, masterPrompt: masterPrompt ?? '',
-        context, sourceDuration, shotMode: row.shot_mode, shotStills: row.shot_stills ?? null,
-      }),
+    const basePrompt = row.seedance_prompt || masterPrompt || ''
+    const seedanceInput = applyVariationToSeedanceInput(
+      buildSeedanceInput({ image: row.character_image_url, prompt: basePrompt, sourceDuration }),
       note,
     )
-    if (!klingInput.prompt && !klingInput.multi_prompt?.length) {
+    if (!seedanceInput.prompt) {
       throw new Error('Variation job has no parent prompt to apply the change to')
     }
     await syncKlingAnalysisSheetSafe({
       jobId: row.id, sourceUrl: row.source_url, durationSec: sourceDuration, context, masterPrompt,
       status: `variation: ${note}`, klingVideoUrl: null,
     })
-    return finishKlingRender({
-      row, queueJobId: opts.queueJobId, userId: opts.userId, chatId, settings,
-      masterPrompt, context, sourceDuration, klingInput, apiKey,
+    return finishSeedanceRender({
+      row, queueJobId: opts.queueJobId, userId: opts.userId, chatId,
+      masterPrompt, context, sourceDuration, seedanceInput, apiKey,
     })
   }
 
@@ -418,37 +303,31 @@ export async function processKlingRecreateJob(opts: {
 
   await updateRecreate(row.id, { status: 'still' })
   await heartbeat(opts.queueJobId, 'still', { progress: 55 })
-  const { characterUrl, shotStills } = await generateStills({ row: { ...row, custom_prompt: row.custom_prompt }, context, apiKey })
+  const { characterUrl } = await generateStill({ row, context, apiKey })
   await updateRecreate(row.id, {
     character_image_url: characterUrl,
-    shot_stills: shotStills,
     status: 'awaiting_still_approval',
   })
-  await heartbeat(opts.queueJobId, 'awaiting_still_approval', { progress: 70 })
+  await heartbeat(opts.queueJobId, 'awaiting_still_approval', { progress: 65 })
 
   if (chatId != null) {
-    const caption = shotStills
-      ? `🖼️ ${shotStills.length} character stills ready — one per shot. Review before Kling.`
-      : '🖼️ Character still ready — review before Kling.'
     try {
-      if (shotStills && shotStills.length > 1) {
-        await sendMediaGroup(chatId, shotStills.map(s => s.image_url), caption)
-      } else {
-        await sendPhoto(chatId, characterUrl, caption)
-      }
+      await sendPhoto(chatId, characterUrl, '🖼️ Character still ready — review before Seedance.')
     } catch {
-      await notify(chatId, caption)
+      await notify(chatId, '🖼️ Character still ready — review before Seedance.')
     }
-    await notify(chatId, 'Approve to build the Kling prompt, or regenerate the still(s).', stillApprovalKeyboard(row.id))
+    await notify(chatId, 'Approve to check the dialogue attribution, or regenerate the still.', stillApprovalKeyboard(row.id))
   }
 
   return { ok: true, awaitingApproval: true }
 }
 
 /**
- * Phase 2: still(s) approved -> build the actual Kling payload (including,
- * for multi-shot, the per-shot image anchors) and stop AGAIN for a human to
- * read the exact prompt(s) before the paid Kling call fires.
+ * Phase 2: still approved -> derive the compact speaker:line dialogue
+ * summary and stop for a human to confirm WHO says WHAT before the prompt is
+ * even built. Only the short list is shown here, never the full prompt (per
+ * this session's explicit ask) — catching a misattribution here is much
+ * cheaper than after the paid render.
  */
 async function approveStill(opts: {
   queueJobId: string
@@ -461,33 +340,28 @@ async function approveStill(opts: {
   )
   if (!row) throw new Error('kling_recreate_jobs row not found')
   if (row.status !== 'awaiting_still_approval' || !row.character_image_url) {
-    // Already handled (double-tap) or not at the right stage — no-op.
     return { ok: true, awaitingApproval: true }
   }
   const chatId = opts.input.chatId ?? row.chat_id
-  const settings = normalizeSettings(row.settings)
   const context = (row.context ?? null) as KlingVideoContext | null
-  const sourceDuration = row.duration_sec != null ? Number(row.duration_sec) : null
 
-  const klingInput = buildKlingInput({
-    settings, image: row.character_image_url, masterPrompt: row.master_prompt ?? '',
-    context, sourceDuration, shotMode: row.shot_mode, shotStills: row.shot_stills ?? null,
+  const summary = await extractDialogueSummary(context ?? {
+    setting: '', hook: '', character_action: '', camera: '', speech: null,
+    duration_sec: null, aspect_ratio: '9:16', shots: [], prompt_mode: 'prompt',
   })
-  if (!klingInput.prompt && !klingInput.multi_prompt?.length) {
-    throw new Error('Analysis produced no master prompt')
-  }
 
-  await updateRecreate(row.id, {
-    status: 'awaiting_prompt_approval',
-    kling_request: klingInput as unknown as Record<string, unknown>,
-    kling_variant: settings.variant,
-  })
-  await heartbeat(opts.queueJobId, 'awaiting_prompt_approval', { progress: 78 })
-  await notify(chatId, formatPromptSummary(klingInput, context), promptApprovalKeyboard(row.id))
+  await updateRecreate(row.id, { status: 'awaiting_dialogue_approval' })
+  await heartbeat(opts.queueJobId, 'awaiting_dialogue_approval', { progress: 72 })
+  await notify(
+    chatId,
+    `🗣️ <b>Who says what</b> — check this before I build the prompt:\n\n${escapeHtml(summary)}\n\n` +
+      `Looks right? Tap Confirm. Wrong? Just reply with the correction (e.g. "host says line 1, guest says line 2").`,
+    dialogueApprovalKeyboard(row.id),
+  )
   return { ok: true, awaitingApproval: true }
 }
 
-/** The still(s) missed — clear and redo off the existing analysis. Paid again, only on an explicit tap. */
+/** The still missed — clear and redo off the existing analysis. Paid again, only on an explicit tap. */
 async function regenerateStill(opts: {
   queueJobId: string
   userId: string
@@ -502,60 +376,114 @@ async function regenerateStill(opts: {
   const apiKey = await getUserApiKey(opts.userId, 'wavespeed_api_key')
   const context = (row.context ?? null) as KlingVideoContext | null
 
-  await updateRecreate(row.id, { character_image_url: null, shot_stills: null, status: 'still' })
+  await updateRecreate(row.id, { character_image_url: null, status: 'still' })
   await heartbeat(opts.queueJobId, 'still', { progress: 55 })
-  const { characterUrl, shotStills } = await generateStills({ row, context, apiKey })
-  await updateRecreate(row.id, { character_image_url: characterUrl, shot_stills: shotStills, status: 'awaiting_still_approval' })
-  await heartbeat(opts.queueJobId, 'awaiting_still_approval', { progress: 70 })
+  const { characterUrl } = await generateStill({ row, context, apiKey })
+  await updateRecreate(row.id, { character_image_url: characterUrl, status: 'awaiting_still_approval' })
+  await heartbeat(opts.queueJobId, 'awaiting_still_approval', { progress: 65 })
 
   if (chatId != null) {
-    const caption = shotStills
-      ? `🖼️ Regenerated — ${shotStills.length} character stills, one per shot.`
-      : '🖼️ Regenerated character still.'
     try {
-      if (shotStills && shotStills.length > 1) await sendMediaGroup(chatId, shotStills.map(s => s.image_url), caption)
-      else await sendPhoto(chatId, characterUrl, caption)
+      await sendPhoto(chatId, characterUrl, '🖼️ Regenerated character still.')
     } catch {
-      await notify(chatId, caption)
+      await notify(chatId, '🖼️ Regenerated character still.')
     }
-    await notify(chatId, 'Approve to build the Kling prompt, or regenerate again.', stillApprovalKeyboard(row.id))
+    await notify(chatId, 'Approve to check the dialogue attribution, or regenerate again.', stillApprovalKeyboard(row.id))
   }
   return { ok: true, awaitingApproval: true }
 }
 
-/** Prompt approved -> the actual paid Kling call. */
-async function approvePrompt(opts: {
+/**
+ * Dialogue confirmed as-is -> build the actual Seedance prompt and stop
+ * AGAIN for a human to read the exact prompt before the paid Seedance call
+ * fires.
+ */
+async function approveDialogue(opts: {
   queueJobId: string
   userId: string
   input: KlingRecreateQueueInput
-}): Promise<{ ok: true; videoUrl?: string; cached?: boolean; awaitingApproval?: boolean }> {
+}): Promise<{ ok: true; awaitingApproval: true }> {
   const row = await one<KlingRecreateJobRow>(
     `SELECT * FROM kling_recreate_jobs WHERE id = $1 AND user_id = $2`,
     [opts.input.recreateJobId, opts.userId],
   )
   if (!row) throw new Error('kling_recreate_jobs row not found')
-  if (row.kling_video_url) return { ok: true, videoUrl: row.kling_video_url, cached: true }
-  if (row.status !== 'awaiting_prompt_approval' || !row.kling_request) {
-    return { ok: true, awaitingApproval: row.status === 'awaiting_prompt_approval' }
+  if (row.status !== 'awaiting_dialogue_approval' || !row.character_image_url) {
+    return { ok: true, awaitingApproval: true }
   }
   const chatId = opts.input.chatId ?? row.chat_id
-  const settings = normalizeSettings(row.settings)
   const context = (row.context ?? null) as KlingVideoContext | null
   const sourceDuration = row.duration_sec != null ? Number(row.duration_sec) : null
-  const apiKey = await getUserApiKey(opts.userId, 'wavespeed_api_key')
-  const klingInput = row.kling_request as unknown as KlingI2VInput
 
-  return finishKlingRender({
-    row, queueJobId: opts.queueJobId, userId: opts.userId, chatId, settings,
-    masterPrompt: row.master_prompt, context, sourceDuration, klingInput, apiKey,
+  const prompt = await buildSeedancePrompt(context ?? {
+    setting: '', hook: '', character_action: '', camera: '', speech: null,
+    duration_sec: null, aspect_ratio: '9:16', shots: [], prompt_mode: 'prompt',
+  }, row.confirmed_dialogue)
+  if (!prompt.trim()) throw new Error('Seedance prompt synthesis returned nothing')
+
+  const seedanceInput = buildSeedanceInput({ image: row.character_image_url, prompt, sourceDuration })
+
+  await updateRecreate(row.id, {
+    status: 'awaiting_prompt_approval',
+    seedance_prompt: prompt,
+    kling_request: seedanceInput as unknown as Record<string, unknown>,
+    kling_variant: SEEDANCE_VARIANT,
   })
+  await heartbeat(opts.queueJobId, 'awaiting_prompt_approval', { progress: 82 })
+  await notify(
+    chatId,
+    formatSeedancePromptSummary({
+      prompt, durationSec: seedanceInput.duration ?? durationForSeedance(sourceDuration),
+      resolution: seedanceInput.resolution ?? SEEDANCE_RESOLUTION_DEFAULT,
+    }),
+    promptApprovalKeyboard(row.id),
+  )
+  return { ok: true, awaitingApproval: true }
+}
+
+/**
+ * User sent a free-text speaker correction while awaiting dialogue approval —
+ * re-derive the summary with that correction folded in (top priority over
+ * the beats' own prose) and show it again for a final confirm. Does NOT
+ * advance the status; the user still has to tap Confirm once they're happy.
+ */
+export async function correctDialogue(opts: {
+  queueJobId: string
+  userId: string
+  input: KlingRecreateQueueInput
+  correction: string
+}): Promise<{ ok: true; awaitingApproval: true }> {
+  const row = await one<KlingRecreateJobRow>(
+    `SELECT * FROM kling_recreate_jobs WHERE id = $1 AND user_id = $2`,
+    [opts.input.recreateJobId, opts.userId],
+  )
+  if (!row) throw new Error('kling_recreate_jobs row not found')
+  if (row.status !== 'awaiting_dialogue_approval') return { ok: true, awaitingApproval: true }
+  const chatId = opts.input.chatId ?? row.chat_id
+  const context = (row.context ?? null) as KlingVideoContext | null
+
+  const { summary, override } = await applyDialogueCorrection({
+    context: context ?? {
+      setting: '', hook: '', character_action: '', camera: '', speech: null,
+      duration_sec: null, aspect_ratio: '9:16', shots: [], prompt_mode: 'prompt',
+    },
+    correction: opts.correction,
+  })
+  await updateRecreate(row.id, { confirmed_dialogue: override })
+  await notify(
+    chatId,
+    `🗣️ <b>Updated</b>:\n\n${escapeHtml(summary)}\n\nGood now? Tap Confirm, or reply again with another fix.`,
+    dialogueApprovalKeyboard(row.id),
+  )
+  return { ok: true, awaitingApproval: true }
 }
 
 /**
  * The prompt/shots missed — redo the synthesis (NOT the per-frame Grok
  * description pass, that part was fine and re-running it would just re-spend
  * on identical work) off the already-stored 1fps frame descriptions, then
- * redo the still(s) for whatever shots come out this time.
+ * redo the still for whatever shots come out this time. Goes back through
+ * the dialogue gate too, since a re-synthesis can change attribution.
  */
 async function regeneratePrompt(opts: {
   queueJobId: string
@@ -581,12 +509,10 @@ async function regeneratePrompt(opts: {
   const existingContext = (row.context ?? null) as KlingVideoContext | null
   if (existingContext?.speech) transcript = existingContext.speech
 
-  // master_prompt has no "clear" path through updateRecreate's typed partial
-  // (it only ever sets a string) — cleared directly so the pending-checks
-  // elsewhere (`if (!masterPrompt)`) see a real re-analysis is needed.
   await query(
     `UPDATE kling_recreate_jobs
         SET master_prompt = NULL, character_image_url = NULL, shot_stills = NULL,
+            seedance_prompt = NULL, confirmed_dialogue = NULL,
             status = 'analyzing', updated_at = now()
       WHERE id = $1`,
     [row.id],
@@ -601,53 +527,75 @@ async function regeneratePrompt(opts: {
 
   await updateRecreate(row.id, { context: analysis.context, master_prompt: analysis.master_prompt })
   await heartbeat(opts.queueJobId, 'analyzed', { progress: 50 })
-  await notify(chatId, '🧠 Re-analyzed. Building new character still(s)…')
+  await notify(chatId, '🧠 Re-analyzed. Building a new character still…')
 
   await updateRecreate(row.id, { status: 'still' })
-  const { characterUrl, shotStills } = await generateStills({ row, context: analysis.context, apiKey })
-  await updateRecreate(row.id, { character_image_url: characterUrl, shot_stills: shotStills, status: 'awaiting_still_approval' })
-  await heartbeat(opts.queueJobId, 'awaiting_still_approval', { progress: 70 })
+  const { characterUrl } = await generateStill({ row, context: analysis.context, apiKey })
+  await updateRecreate(row.id, { character_image_url: characterUrl, status: 'awaiting_still_approval' })
+  await heartbeat(opts.queueJobId, 'awaiting_still_approval', { progress: 65 })
 
   if (chatId != null) {
-    const caption = shotStills
-      ? `🖼️ New analysis — ${shotStills.length} character stills, one per shot.`
-      : '🖼️ New analysis — character still ready.'
     try {
-      if (shotStills && shotStills.length > 1) await sendMediaGroup(chatId, shotStills.map(s => s.image_url), caption)
-      else await sendPhoto(chatId, characterUrl, caption)
+      await sendPhoto(chatId, characterUrl, '🖼️ New analysis — character still ready.')
     } catch {
-      await notify(chatId, caption)
+      await notify(chatId, '🖼️ New analysis — character still ready.')
     }
-    await notify(chatId, 'Approve to build the Kling prompt, or regenerate.', stillApprovalKeyboard(row.id))
+    await notify(chatId, 'Approve to check the dialogue attribution, or regenerate.', stillApprovalKeyboard(row.id))
   }
   return { ok: true, awaitingApproval: true }
 }
 
-async function finishKlingRender(opts: {
+/** Prompt approved -> the actual paid Seedance call. */
+async function approvePrompt(opts: {
+  queueJobId: string
+  userId: string
+  input: KlingRecreateQueueInput
+}): Promise<{ ok: true; videoUrl?: string; cached?: boolean; awaitingApproval?: boolean }> {
+  const row = await one<KlingRecreateJobRow>(
+    `SELECT * FROM kling_recreate_jobs WHERE id = $1 AND user_id = $2`,
+    [opts.input.recreateJobId, opts.userId],
+  )
+  if (!row) throw new Error('kling_recreate_jobs row not found')
+  if (row.kling_video_url) return { ok: true, videoUrl: row.kling_video_url, cached: true }
+  if (row.status !== 'awaiting_prompt_approval' || !row.kling_request) {
+    return { ok: true, awaitingApproval: row.status === 'awaiting_prompt_approval' }
+  }
+  const chatId = opts.input.chatId ?? row.chat_id
+  const context = (row.context ?? null) as KlingVideoContext | null
+  const sourceDuration = row.duration_sec != null ? Number(row.duration_sec) : null
+  const apiKey = await getUserApiKey(opts.userId, 'wavespeed_api_key')
+  const seedanceInput = row.kling_request as unknown as SeedanceI2VInput
+
+  return finishSeedanceRender({
+    row, queueJobId: opts.queueJobId, userId: opts.userId, chatId,
+    masterPrompt: row.master_prompt, context, sourceDuration, seedanceInput, apiKey,
+  })
+}
+
+async function finishSeedanceRender(opts: {
   row: KlingRecreateJobRow
   queueJobId: string
   userId: string
   chatId: number | string | null | undefined
-  settings: KlingUserSettings
   masterPrompt: string | null
   context: KlingVideoContext | null
   sourceDuration: number | null
-  klingInput: KlingI2VInput
+  seedanceInput: SeedanceI2VInput
   apiKey: string
 }): Promise<{ ok: true; videoUrl: string }> {
-  const { row, settings, klingInput } = opts
+  const { row, seedanceInput } = opts
   const existingRequestId =
     (row.kling_request as { _prediction_id?: string } | null)?._prediction_id ?? null
 
-  const payload = buildKlingI2VPayload(klingInput)
+  const payload = buildSeedanceI2VPayload(seedanceInput)
   await updateRecreate(row.id, {
     status: 'rendering',
-    kling_variant: settings.variant,
+    kling_variant: SEEDANCE_VARIANT,
     kling_request: existingRequestId ? { ...payload, _prediction_id: existingRequestId } : payload,
   })
-  await heartbeat(opts.queueJobId, 'rendering', { progress: 82 })
+  await heartbeat(opts.queueJobId, 'rendering', { progress: 88 })
 
-  const result = await generateKlingI2V(klingInput, opts.apiKey, {
+  const result = await generateSeedanceI2V(seedanceInput, opts.apiKey, {
     existingRequestId,
     onSubmitted: async (requestId, submitted) => {
       await updateRecreate(row.id, { kling_request: { ...submitted, _prediction_id: requestId } })
@@ -662,7 +610,7 @@ async function finishKlingRender(opts: {
   await updateRecreate(row.id, {
     status: 'done',
     kling_video_url: hosted,
-    kling_variant: settings.variant,
+    kling_variant: SEEDANCE_VARIANT,
     kling_request: { ...result.payload, _prediction_id: result.requestId, _model: result.model },
     error: null,
   })
@@ -674,9 +622,7 @@ async function finishKlingRender(opts: {
 
   const note = (row.variation_note ?? '').trim()
   const caption =
-    `✅ Kling 3.0 <code>${escapeHtml(settings.variant)}</code> · ` +
-    `${durationForKling(opts.sourceDuration, settings)}s` +
-    `${klingInput.multi_prompt?.length ? ' · multi-shot' : ''}` +
+    `✅ Seedance 2.5 · ${durationForSeedance(opts.sourceDuration)}s` +
     `${note ? ` · ${escapeHtml(note)}` : ''}`
   await sendDoneVideo(opts.chatId, row.id, hosted, caption)
 
@@ -692,6 +638,10 @@ export async function runKlingRecreateAction(opts: {
   switch (opts.input.action) {
     case 'approve_still': return approveStill(opts)
     case 'regenerate_still': return regenerateStill(opts)
+    case 'approve_dialogue': return approveDialogue(opts)
+    case 'correct_dialogue':
+      if (!opts.input.correction) throw new Error('correct_dialogue requires input.correction')
+      return correctDialogue({ ...opts, correction: opts.input.correction })
     case 'approve_prompt': return approvePrompt(opts)
     case 'regenerate_prompt': return regeneratePrompt(opts)
     case 'analyze':
@@ -699,5 +649,3 @@ export async function runKlingRecreateAction(opts: {
       return processKlingRecreateJob(opts)
   }
 }
-
-export type { KlingVariant }

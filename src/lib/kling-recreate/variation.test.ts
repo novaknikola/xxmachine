@@ -2,7 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   applyVariationDelta,
-  applyVariationToKlingInput,
+  applyVariationToSeedanceInput,
   buildVariationJobDrafts,
   clampVariationCount,
   parseVariationCallback,
@@ -14,7 +14,6 @@ import {
   variationSkipsUpstream,
   VARIATION_INSTRUCTION,
 } from './variation'
-import type { KlingI2VInput } from './kling-client'
 
 const PARENT = {
   id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
@@ -92,30 +91,14 @@ describe('variation prompt = parent + delta', () => {
     assert.ok(combined.includes('softer smile'))
   })
 
-  it('keeps prompt XOR multi_prompt and applies the delta to the active one', () => {
-    const single = applyVariationToKlingInput({
-      variant: 'pro',
+  it('applies the delta to the Seedance input prompt', () => {
+    const single = applyVariationToSeedanceInput({
+      variant: 'standard',
       image: PARENT.character_image_url,
       prompt: PARENT.master_prompt,
     }, 'make it night')
     assert.ok(single.prompt?.includes(PARENT.master_prompt))
     assert.ok(single.prompt?.includes('make it night'))
-    assert.equal(single.multi_prompt, undefined)
-
-    const multiIn: KlingI2VInput = {
-      variant: 'pro',
-      image: PARENT.character_image_url,
-      multi_prompt: [
-        { prompt: 'shot one', duration: 4 },
-        { prompt: 'shot two', duration: 4 },
-      ],
-    }
-    const multi = applyVariationToKlingInput(multiIn, 'look at camera')
-    assert.equal(multi.prompt, undefined)
-    assert.equal(multi.multi_prompt?.length, 2)
-    assert.ok(multi.multi_prompt?.[0].prompt.includes('shot one'))
-    assert.ok(multi.multi_prompt?.[0].prompt.includes('look at camera'))
-    assert.ok(multi.multi_prompt?.[1].prompt.includes('shot two'))
   })
 })
 

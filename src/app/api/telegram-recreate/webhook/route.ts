@@ -1,15 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { one, query, rows } from '@/lib/db'
 import {
-  sendText, answerCallbackQuery, editMessageReplyMarkup, editMessageText,
-  confirmRecreateKeyboard, settingsKeyboard, shotModeKeyboard, stillPromptChoiceKeyboard,
+  sendText, answerCallbackQuery, editMessageReplyMarkup,
+  confirmRecreateKeyboard, stillPromptChoiceKeyboard,
 } from '@/lib/telegram-recreate'
 import {
   addUrlsToPending, attachPhotoFromTelegram, claimPending, clearPending, getPending, setAwaiting,
-  setAwaitingVariation, setPendingCustomPrompt, setPendingShotMode,
+  setAwaitingVariation, setPendingCustomPrompt,
 } from '@/lib/kling-recreate/pending'
 import { enqueueKlingAction, enqueueKlingRecreateJobs, enqueueKlingVariationJobs } from '@/lib/kling-recreate/enqueue'
-import { formatSettingsHtml, getKlingSettings, saveKlingSettings } from '@/lib/kling-recreate/settings'
 import {
   isVariationAwaiting,
   parseVariationCallback,
@@ -17,29 +16,30 @@ import {
   planVariationCallback,
   variationAwaitingJobId,
 } from '@/lib/kling-recreate/variation'
-import type { KlingRecreateJobRow, KlingUserSettings } from '@/lib/kling-recreate/types'
-import type { KlingShotType, KlingVariant } from '@/lib/kling-recreate/kling-client'
+import type { KlingRecreateJobRow } from '@/lib/kling-recreate/types'
 
 /**
- * Webhook for @contentreplicatorbot — Kling 3.0 recreate pipeline.
+ * Webhook for @contentreplicatorbot — Seedance 2.5 recreate pipeline
+ * (previously Kling 3.0; see D:\VScode\reels-analiza\docs\SEEDANCE-2.5-I2V.md
+ * and the plan doc for the swap).
  *
  * Standalone route, own token (TELEGRAM_RECREATE_BOT_TOKEN), own chat_id
  * column (users.telegram_recreate_chat_id). The Copy-Paste webhook
  * (api/telegram/webhook) is never imported or modified by this file.
  *
  * Flow: /start → send identity photo and/or IG reel URL(s) → confirm →
- * kling_recreate_v1 jobs. /settings and /ideas are the other commands.
- * Pose-recreate format/count/carousel UX and copy_prompts_generate
- * submission are gone from this bot.
+ * kling_recreate_v1 jobs → still approval gate → dialogue-attribution gate
+ * (new — confirm WHO says WHAT before the prompt is built) → prompt approval
+ * gate → paid Seedance render. /ideas is the other command; /settings is
+ * gone (Kling-only per-user options no longer exist).
  */
 const CRON_SECRET = process.env.CRON_SECRET
 
 const HELP = [
-  '<b>Kling 3.0 Recreate</b>',
+  '<b>Seedance 2.5 Recreate</b>',
   'Send an Instagram reel URL and a reference photo of your character (or use the default photo from dashboard Settings).',
-  'I scrape the reel, describe it at 1fps, build a character still, and animate it with Kling 3.0.',
+  'I scrape the reel, describe it at ~2fps, build a character still, confirm the dialogue attribution with you, then animate it with Seedance 2.5.',
   '',
-  '/settings — variant, duration, sound, CFG, shot type, negative prompt',
   '/ideas — recent banked niche ideas (not rendered)',
   '/cancel — clear the current batch',
 ].join('\n')
@@ -64,6 +64,15 @@ async function defaultReference(userId: string): Promise<string | null> {
   return row?.default_reference_image_url ?? null
 }
 
+async function activeDialogueJob(userId: string, chatId: number): Promise<{ id: string } | null> {
+  return one<{ id: string }>(
+    `SELECT id FROM kling_recreate_jobs
+      WHERE user_id = $1 AND chat_id = $2 AND status = 'awaiting_dialogue_approval'
+      ORDER BY updated_at DESC LIMIT 1`,
+    [userId, chatId],
+  )
+}
+
 function batchStatusText(opts: {
   photoUrl: string | null
   defaultPhoto: boolean
@@ -83,12 +92,12 @@ function batchStatusText(opts: {
 }
 
 /**
- * Once the batch has both a photo and >=1 URL, two questions are asked ONCE
- * each before the Confirm button appears — shot mode first (it changes how
- * the whole job behaves, so it has to be settled before anything runs), then
- * an optional custom still prompt. custom_prompt uses '' (not null) as the
- * "asked, declined" sentinel so this cascade doesn't re-ask on every later
- * message in the same batch (e.g. adding one more URL).
+ * Once the batch has both a photo and >=1 URL, one optional question is
+ * asked before the Confirm button appears — a custom still prompt.
+ * custom_prompt uses '' (not null) as the "asked, declined" sentinel so this
+ * doesn't re-ask on every later message in the same batch (e.g. adding one
+ * more URL). The shot-mode question that used to sit here is gone — Seedance
+ * has no per-shot re-anchoring image, so there is only ever one still now.
  */
 async function showBatch(chatId: number, userId: string) {
   const pending = await getPending(chatId)
@@ -97,19 +106,10 @@ async function showBatch(chatId: number, userId: string) {
   const hasDefault = !photoUrl && !!(await defaultReference(userId))
   const ready = urls.length > 0 && !!(photoUrl || hasDefault)
 
-  if (ready && !pending?.shot_mode) {
-    await sendText(
-      chatId,
-      'One shot, or one still per camera/action beat (multi-shot)? Multi-shot re-anchors identity at ' +
-        'each beat instead of only at the start — steadier, but more Seedream calls.',
-      shotModeKeyboard(),
-    )
-    return
-  }
   if (ready && pending?.custom_prompt == null) {
     await sendText(
       chatId,
-      '✍️ Add a specific instruction for the character still(s) before they\'re generated? (wardrobe, pose tweak, anything) — or skip.',
+      '✍️ Add a specific instruction for the character still before it\'s generated? (wardrobe, pose tweak, anything) — or skip.',
       stillPromptChoiceKeyboard(),
     )
     return
@@ -183,12 +183,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true })
     }
 
-    if (message?.text?.startsWith('/settings')) {
-      const settings = await getKlingSettings(userId)
-      await sendText(chatId, formatSettingsHtml(settings), settingsKeyboard())
-      return NextResponse.json({ ok: true })
-    }
-
     if (message?.text?.startsWith('/ideas')) {
       const ideas = await rows<{ niche: string; prompt: string; created_at: string }>(
         `SELECT niche, prompt, created_at FROM kling_idea_bank
@@ -258,7 +252,7 @@ export async function POST(req: NextRequest) {
         await sendText(
           chatId,
           `🎬 Queued ${ids.length} variation${ids.length === 1 ? '' : 's'} — ` +
-            `<i>${escapeHtml(parsed.change)}</i>. I’ll send each Kling video when it’s ready.`,
+            `<i>${escapeHtml(parsed.change)}</i>. I’ll send each video when it’s ready.`,
         )
         return NextResponse.json({ ok: true })
       }
@@ -268,17 +262,16 @@ export async function POST(req: NextRequest) {
         await showBatch(chatId, userId)
         return NextResponse.json({ ok: true })
       }
-      if (pending?.awaiting === 'negative_prompt') {
-        await saveKlingSettings(userId, { negative_prompt: message.text })
-        await setAwaiting(chatId, null)
-        await sendText(chatId, formatSettingsHtml(await getKlingSettings(userId)), settingsKeyboard())
-        return NextResponse.json({ ok: true })
-      }
-      if (pending?.awaiting === 'elements') {
-        const ids = String(message.text).split(/[\s,]+/).map((token: string) => token.trim()).filter(Boolean).slice(0, 3)
-        await saveKlingSettings(userId, { element_list: ids })
-        await setAwaiting(chatId, null)
-        await sendText(chatId, formatSettingsHtml(await getKlingSettings(userId)), settingsKeyboard())
+
+      // A plain-text reply while a job is sitting at the dialogue-attribution
+      // gate is a speaker correction, not a new batch of reel URLs — check
+      // before falling through to addUrlsToPending.
+      const dialogueJob = await activeDialogueJob(userId, chatId)
+      if (dialogueJob) {
+        await enqueueKlingAction({
+          userId, chatId, jobId: dialogueJob.id,
+          action: 'correct_dialogue', correction: message.text,
+        })
         return NextResponse.json({ ok: true })
       }
 
@@ -314,23 +307,12 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true })
       }
 
-      if (parts[1] === 'shotmode') {
-        const mode = parts[2]
-        if (mode === 'one_shot' || mode === 'multi_shot') {
-          await setPendingShotMode(chatId, mode)
-        }
-        await answerCallbackQuery(cb.id, mode === 'multi_shot' ? 'Multi-shot' : 'One shot')
-        if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
-        await showBatch(chatId, userId)
-        return NextResponse.json({ ok: true })
-      }
-
       if (parts[1] === 'stillprompt') {
         if (parts[2] === 'add') {
           await setAwaiting(chatId, 'custom_prompt')
           await answerCallbackQuery(cb.id)
           if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
-          await sendText(chatId, '✍️ Send the instruction for the still(s) as your next message.')
+          await sendText(chatId, '✍️ Send the instruction for the still as your next message.')
           return NextResponse.json({ ok: true })
         }
         // skip: '' (not null) marks the question as asked so showBatch never re-asks it.
@@ -341,8 +323,9 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true })
       }
 
-      // ── Approval gates — Approve/Regenerate on the still, then on the prompt ──
-      if (parts[1] === 'stillok' || parts[1] === 'stillrg' || parts[1] === 'promptok' || parts[1] === 'promptrg') {
+      // ── Approval gates — still, then dialogue attribution, then prompt ──
+      if (parts[1] === 'stillok' || parts[1] === 'stillrg' || parts[1] === 'dialogueok'
+        || parts[1] === 'promptok' || parts[1] === 'promptrg') {
         const jobId = parts[2]
         const job = await one<KlingRecreateJobRow>(
           `SELECT id, status FROM kling_recreate_jobs WHERE id = $1 AND user_id = $2`,
@@ -355,13 +338,14 @@ export async function POST(req: NextRequest) {
         const action =
           parts[1] === 'stillok' ? 'approve_still' as const :
           parts[1] === 'stillrg' ? 'regenerate_still' as const :
+          parts[1] === 'dialogueok' ? 'approve_dialogue' as const :
           parts[1] === 'promptok' ? 'approve_prompt' as const :
           'regenerate_prompt' as const
         // Clear the buttons first so a double-tap cannot queue (and pay for) twice.
         if (messageId) await editMessageReplyMarkup(chatId, messageId, {}).catch(() => {})
         await answerCallbackQuery(
           cb.id,
-          action === 'approve_prompt' ? 'Generating on Kling…' : 'Working…',
+          action === 'approve_prompt' ? 'Generating on Seedance…' : 'Working…',
         )
         await enqueueKlingAction({ userId, chatId, jobId, action })
         return NextResponse.json({ ok: true })
@@ -420,60 +404,15 @@ export async function POST(req: NextRequest) {
         }
         await answerCallbackQuery(cb.id, 'Queued…')
         if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
-        const settings = await getKlingSettings(userId)
         const ids = await enqueueKlingRecreateJobs({
-          userId, chatId, urls, referenceImageUrl: reference, settings,
-          shotMode: pending.shot_mode ?? 'one_shot',
+          userId, chatId, urls, referenceImageUrl: reference,
           customPrompt: pending.custom_prompt,
         })
         await sendText(
           chatId,
-          `🎬 Queued ${ids.length} Kling recreate job${ids.length === 1 ? '' : 's'}. I’ll send analysis, then the character still(s) for approval, then the Kling prompt for approval, then the video.`,
+          `🎬 Queued ${ids.length} recreate job${ids.length === 1 ? '' : 's'}. I’ll send analysis, ` +
+            `then the character still for approval, then a quick dialogue check, then the Seedance prompt for approval, then the video.`,
         )
-        return NextResponse.json({ ok: true })
-      }
-
-      if (parts[1] === 'set') {
-        const field = parts[2]
-        const value = parts[3]
-        const patch: Partial<KlingUserSettings> = {}
-        if (field === 'variant' && (value === 'std' || value === 'pro' || value === '4k')) {
-          patch.variant = value as KlingVariant
-        } else if (field === 'dur') {
-          if (value === 'auto') {
-            patch.duration_mode = 'auto'
-            patch.duration_sec = null
-          } else {
-            patch.duration_mode = 'fixed'
-            patch.duration_sec = Number(value)
-          }
-        } else if (field === 'sound') {
-          patch.sound = value === 'on'
-        } else if (field === 'cfg') {
-          patch.cfg_scale = Number(value)
-        } else if (field === 'shot' && (value === 'customize' || value === 'intelligence')) {
-          patch.shot_type = value as KlingShotType
-        } else if (field === 'neg') {
-          await setAwaiting(chatId, 'negative_prompt')
-          await answerCallbackQuery(cb.id)
-          await sendText(chatId, '✍️ Send the negative prompt as your next message.')
-          return NextResponse.json({ ok: true })
-        } else if (field === 'negclear') {
-          patch.negative_prompt = null
-        } else if (field === 'els') {
-          await setAwaiting(chatId, 'elements')
-          await answerCallbackQuery(cb.id)
-          await sendText(chatId, '✍️ Send up to 3 Kling element IDs, comma-separated.')
-          return NextResponse.json({ ok: true })
-        } else if (field === 'elsclear') {
-          patch.element_list = []
-        }
-
-        const next = await saveKlingSettings(userId, patch)
-        await answerCallbackQuery(cb.id, 'Saved')
-        if (messageId) {
-          await editMessageText(chatId, messageId, formatSettingsHtml(next)).catch(() => {})
-        }
         return NextResponse.json({ ok: true })
       }
 

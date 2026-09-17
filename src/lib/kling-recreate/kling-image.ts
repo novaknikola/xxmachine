@@ -1,13 +1,25 @@
 import sharp from 'sharp'
 import { uploadBuffer } from '@/lib/supabase-storage'
-import {
-  KLING_IMAGE_MAX_ASPECT,
-  KLING_IMAGE_MAX_BYTES,
-  KLING_IMAGE_MIN_SIDE,
-  type KlingImageMeta,
-} from './kling-client'
 
 const JPEG_TYPE = 'image/jpeg'
+
+/**
+ * These constraints were originally Kling 3.0's own limits; kept as-is for
+ * the character-still prep step even after the Seedance swap (see plan doc)
+ * since they're a reasonably conservative, already-battle-tested target and
+ * Seedance's own image-input limits aren't documented precisely enough here
+ * to safely replace them with different numbers.
+ */
+const IMAGE_MAX_BYTES = 10 * 1024 * 1024
+const IMAGE_MIN_SIDE = 300
+const IMAGE_MAX_ASPECT = 2.5
+
+export interface KlingImageMeta {
+  contentType?: string | null
+  byteLength?: number | null
+  width?: number | null
+  height?: number | null
+}
 
 export interface PreparedKlingImage {
   url: string
@@ -38,23 +50,23 @@ export async function prepareKlingImage(
 
   let resized = false
 
-  if (width < KLING_IMAGE_MIN_SIDE || height < KLING_IMAGE_MIN_SIDE) {
-    const scale = Math.max(KLING_IMAGE_MIN_SIDE / width, KLING_IMAGE_MIN_SIDE / height)
-    width = Math.max(KLING_IMAGE_MIN_SIDE, Math.round(width * scale))
-    height = Math.max(KLING_IMAGE_MIN_SIDE, Math.round(height * scale))
+  if (width < IMAGE_MIN_SIDE || height < IMAGE_MIN_SIDE) {
+    const scale = Math.max(IMAGE_MIN_SIDE / width, IMAGE_MIN_SIDE / height)
+    width = Math.max(IMAGE_MIN_SIDE, Math.round(width * scale))
+    height = Math.max(IMAGE_MIN_SIDE, Math.round(height * scale))
     pipeline = pipeline.resize(width, height, { fit: 'fill' })
     resized = true
   }
 
   const aspect = width / height
-  if (aspect > KLING_IMAGE_MAX_ASPECT) {
-    const newWidth = Math.round(height * KLING_IMAGE_MAX_ASPECT)
+  if (aspect > IMAGE_MAX_ASPECT) {
+    const newWidth = Math.round(height * IMAGE_MAX_ASPECT)
     const left = Math.max(0, Math.round((width - newWidth) / 2))
     pipeline = pipeline.extract({ left, top: 0, width: newWidth, height })
     width = newWidth
     resized = true
-  } else if (aspect < 1 / KLING_IMAGE_MAX_ASPECT) {
-    const newHeight = Math.round(width * KLING_IMAGE_MAX_ASPECT)
+  } else if (aspect < 1 / IMAGE_MAX_ASPECT) {
+    const newHeight = Math.round(width * IMAGE_MAX_ASPECT)
     const top = Math.max(0, Math.round((height - newHeight) / 2))
     pipeline = pipeline.extract({ left: 0, top, width, height: newHeight })
     height = newHeight
@@ -63,12 +75,12 @@ export async function prepareKlingImage(
 
   let quality = 90
   let output = await pipeline.jpeg({ quality, mozjpeg: true }).toBuffer()
-  while (output.byteLength > KLING_IMAGE_MAX_BYTES && quality > 50) {
+  while (output.byteLength > IMAGE_MAX_BYTES && quality > 50) {
     quality -= 10
     output = await sharp(output).jpeg({ quality, mozjpeg: true }).toBuffer()
     resized = true
   }
-  if (output.byteLength > KLING_IMAGE_MAX_BYTES) {
+  if (output.byteLength > IMAGE_MAX_BYTES) {
     throw new Error('Character still is still over 10MB after recompress')
   }
 
