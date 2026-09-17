@@ -207,7 +207,26 @@ export async function POST(req: NextRequest) {
 
     if (message?.text?.startsWith('/cancel')) {
       await clearPending(chatId)
-      await sendText(chatId, '✖️ Batch cleared.')
+      // /cancel only ever cleared the draft batch — a job already sitting at
+      // an awaiting_*_approval gate (still/dialogue/prompt) kept living on
+      // and kept intercepting every later plain-text message as if it were
+      // a reply to THAT job (activeDialogueJob below has no time limit and
+      // isn't scoped to "the current batch"). Confirmed live 2026-09-18: a
+      // job left at awaiting_dialogue_approval silently hijacked new script/
+      // URL text as a "dialogue correction" long after /cancel + /start.
+      // Retire any such job for this chat too — no paid action fires from
+      // this, it only stops it from intercepting anything further.
+      const retired = await query(
+        `UPDATE kling_recreate_jobs SET status = 'failed', error = 'Cancelled by user', updated_at = now()
+          WHERE chat_id = $1 AND status IN ('awaiting_still_approval', 'awaiting_dialogue_approval', 'awaiting_prompt_approval')`,
+        [chatId],
+      )
+      await sendText(
+        chatId,
+        (retired.rowCount ?? 0) > 0
+          ? `✖️ Batch cleared, and ${retired.rowCount} pending job(s) waiting on your approval were cancelled too.`
+          : '✖️ Batch cleared.',
+      )
       return NextResponse.json({ ok: true })
     }
 

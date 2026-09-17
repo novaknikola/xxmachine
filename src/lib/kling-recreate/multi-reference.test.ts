@@ -38,7 +38,7 @@ describe('namedPhotosFromRow', () => {
       ...BASE_ROW,
       reference_image_url: 'https://x/fallback.jpg',
       reference_photos: { Tiana: 'https://x/tiana.jpg', Dianna: 'https://x/dianna.jpg' },
-    } as KlingRecreateJobRow)
+    } as unknown as KlingRecreateJobRow)
     assert.deepEqual(photos, [
       { name: 'Tiana', url: 'https://x/tiana.jpg' },
       { name: 'Dianna', url: 'https://x/dianna.jpg' },
