@@ -19,8 +19,8 @@ import {
 } from './seedance-client'
 import { editImageNanoBananaPro } from './nano-banana-client'
 import {
-  applyDialogueCorrection, buildKeyframePrompts, buildSeedancePrompt,
-  extractDialogueSummary, formatSeedancePromptSummary,
+  applyDialogueCorrection, buildSeedancePrompt, extractDialogueSummary,
+  formatSeedancePromptSummary, renderEndFrameEditPrompt, renderFirstFrameEditPrompt,
 } from './seedance-prompt'
 import { prepareKlingImage } from './kling-image'
 import { resolveRecreateVideoUrl } from './scrape'
@@ -120,19 +120,24 @@ async function sendDoneVideo(
 }
 
 /**
- * Generates BOTH keyframe stills via Nano Banana Pro Edit, per this
- * session's explicit ask (2026-09-17):
- *   - First frame: edit input = [identity reference photo] only.
- *   - End frame: edit input = [identity reference photo, the just-built
- *     first frame] — carries wardrobe/scene continuity forward, not just
- *     identity, so the two stills read as the same continuous shot.
- * Both prompts are built by buildKeyframePrompts, which never describes the
- * main character's physical appearance (the reference photo attachment
- * supplies that) — see seedance-prompt.ts's KEYFRAME_SYSTEM. Seedance has no
- * per-shot re-anchoring image like Kling's multi_prompt did, so there is
- * only ever one first/end pair per job — the multi-still/shot_mode branch
- * this used to have is gone; shot_mode/shot_stills stay in the schema
- * unused rather than migrated away.
+ * Generates BOTH keyframe stills via Nano Banana Pro Edit, using the SAME
+ * proven pattern as Copy-Paste's own keyframe edit (see seedance-prompt.ts's
+ * renderFirstFrameEditPrompt/renderEndFrameEditPrompt): the ACTUAL source
+ * video frame is passed as the edit's "scene reference" image, so "the main
+ * subject" is resolved VISUALLY by the edit model (whoever is prominent in
+ * that real frame) rather than guessed from a text description — a from-
+ * scratch text-only version of this tried and failed on a 3-person scene
+ * (2026-09-17, confirmed live: it fully described the wrong woman's
+ * appearance and the identity reference got ignored).
+ *   - First frame: [source video's first frame, identity reference photo].
+ *   - End frame: [source video's last frame, identity reference photo, the
+ *     just-built first-frame result] — the third image pins wardrobe/hair/
+ *     skin continuity to the already-generated first frame, not just a
+ *     fresh identity swap, so the pair reads as the same continuous shot.
+ * Seedance has no per-shot re-anchoring image like Kling's multi_prompt did,
+ * so there is only ever one first/end pair per job — the multi-still/
+ * shot_mode branch this used to have is gone; shot_mode/shot_stills stay in
+ * the schema unused rather than migrated away.
  */
 async function generateStills(opts: {
   row: KlingRecreateJobRow
@@ -148,29 +153,27 @@ async function generateStills(opts: {
     duration_sec: null, aspect_ratio: '9:16', shots: [], prompt_mode: 'prompt' as const,
   }
 
-  const frameDescs = await rows<{ t_sec: number; description: string | null }>(
-    `SELECT t_sec, description FROM kling_recreate_frames WHERE job_id = $1 ORDER BY t_sec ASC`,
+  const sourceFrames = await rows<{ t_sec: number; image_url: string }>(
+    `SELECT t_sec, image_url FROM kling_recreate_frames WHERE job_id = $1 ORDER BY t_sec ASC`,
     [row.id],
   )
-  if (!frameDescs.length) throw new Error('No source frames stored — cannot build keyframe prompts')
-  const firstFrameDescription = frameDescs[0]?.description ?? null
-  const lastFrameDescription = frameDescs[frameDescs.length - 1]?.description ?? null
+  if (!sourceFrames.length) throw new Error('No source frames stored — cannot build keyframe stills')
+  const sourceFirstFrame = sourceFrames[0].image_url
+  const sourceLastFrame = sourceFrames[sourceFrames.length - 1].image_url
 
-  const { firstFramePrompt, lastFramePrompt } = await buildKeyframePrompts({
-    context: ctx, firstFrameDescription, lastFrameDescription,
-  })
-  const firstPromptFinal = row.custom_prompt ? `${firstFramePrompt} ${row.custom_prompt.trim()}` : firstFramePrompt
+  const firstFramePrompt = renderFirstFrameEditPrompt(ctx, row.custom_prompt)
+  const lastFramePrompt = renderEndFrameEditPrompt(ctx)
 
   const firstOutputs = await editImageNanoBananaPro({
-    imageUrls: [reference],
-    prompt: firstPromptFinal,
+    imageUrls: [sourceFirstFrame, reference],
+    prompt: firstFramePrompt,
     apiKey: opts.apiKey,
   })
   if (!firstOutputs.length) throw new Error('Nano Banana Pro: no first-frame output')
   const preparedFirst = await prepareKlingImage(firstOutputs[0], `kling-recreate/${row.user_id}/${row.id}/first-frame.jpg`)
 
   const endOutputs = await editImageNanoBananaPro({
-    imageUrls: [reference, preparedFirst.url],
+    imageUrls: [sourceLastFrame, reference, preparedFirst.url],
     prompt: lastFramePrompt,
     apiKey: opts.apiKey,
   })

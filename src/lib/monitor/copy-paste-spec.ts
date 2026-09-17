@@ -114,7 +114,7 @@ export const NEGATIVE_PROMPT_TEMPLATE =
  * never survive into either keyframe edit. Shared because both keyframe prompts
  * (start and end) edit directly off a source video frame that likely has one.
  */
-const REMOVE_ONSCREEN_TEXT =
+export const REMOVE_ONSCREEN_TEXT =
   'Remove any on-screen text, captions, subtitles, or watermarks visible in image 1 — ' +
   'the output must be clean with no overlaid text, logos, or watermarks anywhere in frame.'
 
@@ -124,7 +124,7 @@ const REMOVE_ONSCREEN_TEXT =
  * nothing anatomical on purpose — it protects evidence already in the frame
  * rather than describing the body.
  */
-const PRESERVE_MOTION_CUE =
+export const PRESERVE_MOTION_CUE =
   'Preserve any motion blur, hair displacement, cloth movement and body lean present in image 1 — ' +
   'do not straighten the pose, do not settle the subject into a neutral standing position.'
 

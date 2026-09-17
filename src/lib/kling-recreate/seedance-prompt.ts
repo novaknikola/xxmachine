@@ -9,6 +9,7 @@
  * confirmed working live in that Python pipeline this session.
  */
 import { callGrok, GROK_FAST } from '@/lib/grok'
+import { KEYFRAME_IDENTITY_LOCK, PRESERVE_MOTION_CUE, REMOVE_ONSCREEN_TEXT } from '@/lib/monitor/copy-paste-spec'
 import type { KlingVideoContext } from './types'
 
 const SYSTEM = `You convert a shot/beat breakdown of a short-form video into a Seedance
@@ -164,96 +165,55 @@ export async function applyDialogueCorrection(opts: {
   return { summary, override: opts.correction.trim() }
 }
 
-const KEYFRAME_SYSTEM = `You write two image-generation prompts (first_frame_prompt and
-last_frame_prompt) for Nano Banana Pro Edit, following this exact template and voice —
-ported from the same house rules already validated in the Python idea-bank pipeline
-this session built:
+/**
+ * Deterministic (no Grok call) keyframe edit prompts — NOT the narrative,
+ * from-scratch style used elsewhere in this file. Ported directly from the
+ * already-proven Copy-Paste feature's renderKeyframeEditPrompt/
+ * renderEndKeyframeEditPrompt (src/lib/monitor/copy-paste-spec.ts).
+ *
+ * Why this replaced an earlier from-scratch-text approach (2026-09-17): that
+ * version asked Grok to identify "the main character" from a text summary
+ * alone and omit their appearance — it failed on a 3-person scene, fully
+ * describing the wrong woman's hair/build in the prompt, which then
+ * overrode the identity-reference image entirely (confirmed live: the
+ * rendered end frame showed a different woman altogether). The fix is
+ * structural, not a better prompt: give the edit model the ACTUAL source
+ * video frame as "image 1" and let it resolve "the main subject" visually
+ * (whoever is prominent/foreground in that real frame) — exactly how
+ * Copy-Paste already does this reliably. No text description of who's the
+ * lead is needed at all.
+ */
+export function renderFirstFrameEditPrompt(context: KlingVideoContext, customPrompt?: string | null): string {
+  const bits = [
+    'Image 1 is the scene reference, image 2 is the identity reference.',
+    'Keep the exact pose, camera framing, and background from image 1 unchanged.',
+    "Replace the main subject's face and body identity with the person from image 2.",
+    context.setting && `Environment: ${context.setting}.`,
+    context.camera && `Camera: ${context.camera}.`,
+    `Body and skin come from image 2, not image 1: ${KEYFRAME_IDENTITY_LOCK}.`,
+    PRESERVE_MOTION_CUE,
+    REMOVE_ONSCREEN_TEXT,
+    'Photorealistic, natural skin texture, no beauty filter, no AI skin smoothing.',
+    'Do not add any other people. Do not change the composition, angle, or background.',
+    customPrompt?.trim(),
+  ].filter(Boolean)
+  return bits.join(' ')
+}
 
-1. Opening sentence: FIRST decide whether this is genuinely professional/produced
-   footage (real studio lighting rig, broadcast-grade camera) or phone/consumer-camera
-   footage (the default for nearly all short-form social content, even a staged skit).
-   Then write the matching opener:
-     - If genuinely professional/produced: "A cinematic production still from a
-       [niche/show type], high-resolution photo." + a lighting line.
-     - If phone/consumer-camera (the common case): "A candid high-resolution phone
-       photo from a [niche/show type]." + a lighting line describing the REAL
-       practical/mixed lighting visible (not a studio rig).
-   Never default to the cinematic/studio opener just because the content is scripted —
-   scripted does not mean professionally shot.
-2. One paragraph PER character visible in the frame, in left-to-right screen order,
-   written in natural prose WITH pronouns ("she"/"he"/"her"/"his"). For the MAIN/
-   CENTRAL character (whoever the reference photo attachment supplies identity for):
-   a reference photo is supplied separately as an image attachment, so DO NOT describe
-   their physical appearance AT ALL — no skin, face, build, hair color, or hairstyle,
-   nothing. Their paragraph covers ONLY position in frame, expression/gaze, every
-   visible clothing item in detail, and pose/what they're doing or holding. Every
-   OTHER character (supporting cast) gets the full physical description as normal
-   (skin, face, build, hair, then clothing, then pose).
-   WARNING — this rule fails most often on tight close-ups of the main character's
-   face: a closed-eyes/parted-lips framing pulls you toward describing lashes, lip
-   texture/gloss, and hair strands as "part of the shot". They are NOT the same as
-   expression. Describe ONLY the state/action of each feature in verb form ("eyes
-   closed", "mouth softly parted") and STOP — no adjectives about how the feature
-   itself looks.
-3. A foreground/background paragraph: props, furniture, set dressing, background
-   elements, depth. Never mention captions, subtitles, on-screen text, or overlaid
-   words anywhere in this prompt, even if burned-in text is visible in the source —
-   the image generation must not render any text on screen. If any card, sign,
-   screen, or other flat surface that could carry text/logo is visible, describe it
-   as blank/plain — never invent or imply real network/brand branding.
-4. Close with a quality-tag line matching the capture-medium call from step 1: if
-   professional/produced, "Hyper-realistic, 8k resolution, precise anatomical
-   details, flawless fabric textures, cinematic depth of field."; if phone/consumer-
-   camera, "Photorealistic, high-resolution phone photo, natural skin and fabric
-   detail, authentic candid social-media snapshot quality."
-
-first_frame_prompt describes the literal FIRST moment of the clip. last_frame_prompt
-describes the literal LAST moment — the actual end state (expression/pose at that
-final beat), not a summary of the whole video. English only, no quality tags outside
-the closer, 120-220 words each, one paragraph each (character paragraphs can be
-separate sentences within it). Return ONLY a JSON object:
-{"first_frame_prompt": "...", "last_frame_prompt": "..."}`
-
-export async function buildKeyframePrompts(opts: {
-  context: KlingVideoContext
-  firstFrameDescription: string | null
-  lastFrameDescription: string | null
-}): Promise<{ firstFramePrompt: string; lastFramePrompt: string }> {
-  const user = [
-    `NICHE/HOOK: ${opts.context.hook || opts.context.setting || '(none given)'}`,
-    `ENVIRONMENT: ${opts.context.setting || '(none given)'}`,
-    `CAMERA: ${opts.context.camera || '(none given)'}`,
-    '',
-    `FIRST FRAME (literal, from vision analysis): ${opts.firstFrameDescription || '(no description available)'}`,
-    '',
-    `LAST FRAME (literal, from vision analysis): ${opts.lastFrameDescription || '(no description available)'}`,
-    '',
-    'The main/central character (whoever the reference photo will supply identity for) ' +
-      'is the one driving the hook/action — identify them from the descriptions above.',
-    '',
-    'Write first_frame_prompt and last_frame_prompt now, following the system rules exactly.',
-  ].join('\n')
-
-  const raw = await callGrok({
-    model: GROK_FAST,
-    temperature: 0.4,
-    maxTokens: 1536,
-    system: KEYFRAME_SYSTEM,
-    messages: [{ role: 'user', content: user }],
-  })
-  let parsed: { first_frame_prompt?: string; last_frame_prompt?: string } = {}
-  try {
-    const match = raw.match(/\{[\s\S]*\}/)
-    parsed = JSON.parse(match ? match[0] : raw)
-  } catch {
-    throw new Error('Keyframe prompt synthesis did not return valid JSON')
-  }
-  const firstFramePrompt = String(parsed.first_frame_prompt ?? '').trim()
-  const lastFramePrompt = String(parsed.last_frame_prompt ?? '').trim()
-  if (!firstFramePrompt || !lastFramePrompt) {
-    throw new Error('Keyframe prompt synthesis returned an empty prompt')
-  }
-  return { firstFramePrompt, lastFramePrompt }
+export function renderEndFrameEditPrompt(context: KlingVideoContext): string {
+  const bits = [
+    'Image 1 is the scene reference, image 2 is the identity reference, image 3 is the matching start frame of the same shot.',
+    'Keep the exact pose, camera framing, and background from image 1 unchanged.',
+    "Replace the main subject's face and body identity with the person from image 2.",
+    'The person must look IDENTICAL to the person in image 3 — same face, same hair colour and styling, same wardrobe, same skin tone and lighting. Only the pose and framing differ.',
+    context.setting && `Environment: ${context.setting}.`,
+    context.camera && `Camera: ${context.camera}.`,
+    PRESERVE_MOTION_CUE,
+    REMOVE_ONSCREEN_TEXT,
+    'Photorealistic, natural skin texture, no beauty filter, no AI skin smoothing.',
+    'Do not add any other people. Do not change the composition, angle, or background.',
+  ].filter(Boolean)
+  return bits.join(' ')
 }
 
 /**
