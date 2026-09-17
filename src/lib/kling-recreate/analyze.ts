@@ -202,36 +202,16 @@ const SYNTHESIS_SYSTEM =
   'copy Serbian words into your output — translate the gist into English only where it helps interpret ' +
   'ambiguous framing or dialogue.'
 
-async function synthesizeContext(opts: {
-  frames: FrameDescription[]
-  duration: number | null
-  aspectRatio: string
-  transcript: string
-  manualContext?: string | null
-}): Promise<Pick<KlingVideoContext, 'setting' | 'hook' | 'character_action' | 'camera' | 'speech' | 'shots' | 'capture_style'> & { master_prompt: string }> {
-  const timeline = opts.frames
-    .map(f => `${f.t_sec.toFixed(1)}s: ${f.description}`)
-    .join('\n')
+type SynthesizedContext = Pick<KlingVideoContext,
+  'setting' | 'hook' | 'character_action' | 'camera' | 'speech' | 'shots' | 'capture_style'
+> & { master_prompt: string }
 
-  const parsed = await callGrokJson({
-    model: GROK_FAST,
-    json: true,
-    temperature: 0.25,
-    maxTokens: 4096,
-    system: SYNTHESIS_SYSTEM,
-    messages: [{
-      role: 'user',
-      content: [
-        `Duration: ${opts.duration != null ? `${opts.duration.toFixed(1)}s` : 'unknown'}. Aspect: ${opts.aspectRatio}.`,
-        opts.manualContext?.trim() ? `Manual context (see rules above for priority): ${opts.manualContext.trim()}` : '',
-        opts.transcript ? `Timestamped transcript:\n${opts.transcript}` : 'No speech transcript.',
-        `Per-frame descriptions (~2fps, already tracks what changed each moment):\n${timeline}`,
-        'Follow the rules above exactly. Cross-check before returning: does character_action name ' +
-          'every distinct beat visible in the per-frame timeline? Do shots cover 0s to the end with no ' +
-          'gap and no repeated pose between consecutive shots? If not, fix it before returning.',
-      ].filter(Boolean).join('\n'),
-    }],
-  })
+/**
+ * Shared shape-parsing for both synthesis paths (real-video and
+ * script-only) — same JSON keys, same shot cap, same capture_style
+ * normalization either way, so this is the one place that logic lives.
+ */
+export function parseSynthesizedContext(parsed: Record<string, unknown>): SynthesizedContext {
   const shotsRaw = Array.isArray(parsed.shots) ? parsed.shots : []
   const shots: KlingShotBeat[] = shotsRaw
     .map((s): KlingShotBeat | null => {
@@ -260,6 +240,141 @@ async function synthesizeContext(opts: {
     capture_style: captureStyle,
     master_prompt: String(parsed.master_prompt ?? '').trim(),
   }
+}
+
+async function synthesizeContext(opts: {
+  frames: FrameDescription[]
+  duration: number | null
+  aspectRatio: string
+  transcript: string
+  manualContext?: string | null
+}): Promise<SynthesizedContext> {
+  const timeline = opts.frames
+    .map(f => `${f.t_sec.toFixed(1)}s: ${f.description}`)
+    .join('\n')
+
+  const parsed = await callGrokJson({
+    model: GROK_FAST,
+    json: true,
+    temperature: 0.25,
+    maxTokens: 4096,
+    system: SYNTHESIS_SYSTEM,
+    messages: [{
+      role: 'user',
+      content: [
+        `Duration: ${opts.duration != null ? `${opts.duration.toFixed(1)}s` : 'unknown'}. Aspect: ${opts.aspectRatio}.`,
+        opts.manualContext?.trim() ? `Manual context (see rules above for priority): ${opts.manualContext.trim()}` : '',
+        opts.transcript ? `Timestamped transcript:\n${opts.transcript}` : 'No speech transcript.',
+        `Per-frame descriptions (~2fps, already tracks what changed each moment):\n${timeline}`,
+        'Follow the rules above exactly. Cross-check before returning: does character_action name ' +
+          'every distinct beat visible in the per-frame timeline? Do shots cover 0s to the end with no ' +
+          'gap and no repeated pose between consecutive shots? If not, fix it before returning.',
+      ].filter(Boolean).join('\n'),
+    }],
+  })
+  return parseSynthesizedContext(parsed)
+}
+
+const SCRIPT_ONLY_SYSTEM =
+  'You convert a user-written scene script into the exact same structured breakdown a video-analysis ' +
+  'pipeline would produce from real footage — there is no source video, no frames, no audio here, the ' +
+  'written script IS the source. Return JSON: setting, hook, character_action, camera, speech (or null), ' +
+  'capture_style ("produced" or "phone"), master_prompt, shots: array of {t_start, t_end, prompt}, at ' +
+  'most 6 entries, covering the FULL invented scene start to end with no gaps.\n\n' +
+  'setting — invent concrete, specific physical detail (location, props, lighting, time of day) worthy of ' +
+  'the script\'s own detail level — if the script already specifies detail (e.g. "marble island, white ' +
+  'cabinets"), use it verbatim; fill in anything the script leaves vague with equally concrete, specific ' +
+  'invented detail, never a generic placeholder.\n\n' +
+  'hook — ONE sentence: the specific reason this scene works, stated as a concrete fact, never a mood word.\n\n' +
+  'character_action — the complete action from first to last beat, in order, as ONE flowing narrative, ' +
+  'not a checklist — same rules as a real-video breakdown.\n\n' +
+  'shots — same weight and rules as a real-video breakdown: natural director\'s-direction prose, 2-4 ' +
+  'sentences per shot, never a mechanical per-body-part checklist, no two consecutive shots repeating the ' +
+  'same pose/action. Invent plausible timestamps (t_start/t_end in seconds) that give each line of ' +
+  'dialogue and each described action enough time to land naturally (roughly 2-4s per beat) — these are ' +
+  'invented, not measured, but must still be gapless and monotonically increasing.\n\n' +
+  'DIALOGUE — the script already states who says each line; carry that attribution through as written ' +
+  '(there is no on-camera/off-camera ambiguity to resolve here, unlike a real video). Only resolve a ' +
+  'genuine internal contradiction in the script itself (e.g. the same tag used for two different people) ' +
+  'by the surrounding context.\n\n' +
+  'capture_style — judge from the script\'s own tone/setting whether this reads as genuinely produced/' +
+  'broadcast content or ordinary phone/social-video content (the default for nearly everything) — same ' +
+  'judgment call as a real-video breakdown, same rule: never default to "produced" just because a scene ' +
+  'is scripted/staged.\n\n' +
+  'SAFE WORDING — identical rule to a real-video breakdown: never use "corset", "bustier", "lace-up", ' +
+  '"cleavage", "plunging" (neckline), "sheer", "thigh-high", "choker", or other lingerie/fetish-coded ' +
+  'terms — describe wardrobe by silhouette/color/style instead. Physical-contact beats (a kiss, an ' +
+  'embrace) get pre-contact framing only. Any card/sign/screen described as blank, no invented branding.\n\n' +
+  'master_prompt — one flowing paragraph (not a list): setting, hook, the full character_action, camera, ' +
+  'and speech.\n\n' +
+  'Never use "steadily", "smoothly", "gently", "calmly", "consistently", "playfully", "flirtatiously", or ' +
+  '"dynamically" as a substitute for describing what actually happens.\n\n' +
+  'A STYLE REFERENCE block may be given below, drawn from a different, already-approved real analysis in ' +
+  'this same pipeline — match ONLY its level of technical/cinematic specificity and vocabulary (how ' +
+  'concretely it describes lighting, camera, ambient/wardrobe detail) — never reuse its setting, ' +
+  'characters, or plot, this new scene is entirely its own.\n\n' +
+  'LANGUAGE: entire output in English, every field. The script given to you may be in Serbian or mixed; ' +
+  'never copy non-English words into your output, translate the gist.'
+
+/**
+ * The script-only counterpart to synthesizeContext — no frames, no real
+ * video at all. Ported 2026-09-18 per the user's explicit ask: let the bot
+ * generate a full video from a typed/spoken scene script (no Instagram
+ * link), while still grounding the invented scene's technical voice
+ * (capture_style judgment, lighting/camera vocabulary, quality-tag wording)
+ * in a real prior analysis already in kling_recreate_jobs — never invented
+ * from a blank slate. duration_sec is computed from the parsed shots
+ * (max t_end), not trusted from the model's own arithmetic.
+ */
+export async function analyzeScriptOnly(opts: {
+  script: string
+  styleReference?: { setting: string; camera: string; capture_style: KlingVideoContext['capture_style'] } | null
+}): Promise<KlingAnalysis> {
+  const parsed = await callGrokJson({
+    model: GROK_FAST,
+    json: true,
+    temperature: 0.4,
+    maxTokens: 4096,
+    system: SCRIPT_ONLY_SYSTEM,
+    messages: [{
+      role: 'user',
+      content: [
+        `SCRIPT:\n${opts.script.trim()}`,
+        opts.styleReference ? [
+          '',
+          'STYLE REFERENCE (voice/specificity only — do not reuse its content):',
+          `Capture style was: ${opts.styleReference.capture_style ?? 'phone'}.`,
+          `Environment description example: ${opts.styleReference.setting}`,
+          `Camera description example: ${opts.styleReference.camera}`,
+        ].join('\n') : '',
+        '',
+        'Follow the rules above exactly.',
+      ].filter(Boolean).join('\n'),
+    }],
+  })
+  const synthesized = parseSynthesizedContext(parsed)
+  const duration = synthesized.shots.length
+    ? Math.max(...synthesized.shots.map(s => s.t_end))
+    : null
+
+  const context: KlingVideoContext = {
+    setting: synthesized.setting,
+    hook: synthesized.hook,
+    character_action: synthesized.character_action,
+    camera: synthesized.camera,
+    speech: synthesized.speech,
+    duration_sec: duration,
+    aspect_ratio: '9:16',
+    shots: synthesized.shots,
+    capture_style: synthesized.capture_style,
+    prompt_mode: choosePromptMode(synthesized.shots),
+  }
+
+  const master_prompt = synthesized.master_prompt
+    || [context.setting, context.hook, context.character_action, context.camera, context.speech]
+      .filter(Boolean).join(' ')
+
+  return { frames: [], context, master_prompt }
 }
 
 async function buildAnalysisFromFrames(opts: {

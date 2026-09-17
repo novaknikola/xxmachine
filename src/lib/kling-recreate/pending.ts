@@ -165,3 +165,14 @@ export async function claimPending(chatId: number): Promise<RecreatePending | nu
     [chatId],
   )
 }
+
+/** Same atomic claim as claimPending, for the script-only path — gated on a
+ * non-empty script instead of on urls (there are none for this path). */
+export async function claimPendingForScript(chatId: number): Promise<RecreatePending | null> {
+  return one<RecreatePending>(
+    `DELETE FROM telegram_recreate_pending
+      WHERE chat_id = $1 AND coalesce(custom_prompt, '') <> ''
+      RETURNING chat_id, user_id, photo_url, urls, awaiting, shot_mode, custom_prompt`,
+    [chatId],
+  )
+}

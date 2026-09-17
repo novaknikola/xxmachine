@@ -66,6 +66,59 @@ export async function enqueueKlingRecreateJobs(opts: {
 }
 
 /**
+ * No source reel at all — the entire video is generated from a typed/spoken
+ * scene script (custom_prompt holds the full script, not a short still
+ * instruction). source_url still can't be null (schema constraint), so a
+ * self-explanatory sentinel goes there instead of a real reel link; scrape
+ * and per-frame vision analysis are skipped entirely (see analyzeScriptOnly
+ * in analyze.ts and processKlingRecreateJob's is_script_only branch).
+ */
+export async function enqueueKlingScriptOnlyJob(opts: {
+  userId: string
+  chatId: number
+  referenceImageUrl: string
+  script: string
+  leadCharacter: string
+}): Promise<string> {
+  const sourceUrl = `script:${Math.random().toString(36).slice(2, 10)}`
+  const recreate = await one<{ id: string }>(
+    `INSERT INTO kling_recreate_jobs
+       (user_id, chat_id, source_url, reference_image_url, settings, kling_variant, status,
+        shot_mode, custom_prompt, is_script_only, lead_character)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'pending', $7, $8, true, $9)
+     RETURNING id`,
+    [
+      opts.userId,
+      opts.chatId,
+      sourceUrl,
+      opts.referenceImageUrl,
+      '{}',
+      SEEDANCE_VARIANT_DEFAULT,
+      SHOT_MODE_DEFAULT,
+      opts.script.trim(),
+      opts.leadCharacter.trim(),
+    ],
+  )
+  if (!recreate) throw new Error('Could not create kling_recreate_jobs row')
+
+  const input: KlingRecreateQueueInput = { recreateJobId: recreate.id, chatId: opts.chatId }
+  const queued = await one<{ id: string }>(
+    `INSERT INTO generation_queue (user_id, job_type, input, total_items)
+     VALUES ($1, 'kling_recreate_v1', $2, 1)
+     RETURNING id`,
+    [opts.userId, JSON.stringify(input)],
+  )
+  if (!queued) throw new Error('Could not queue kling_recreate_v1')
+
+  await one(
+    `UPDATE kling_recreate_jobs SET queue_job_id = $2 WHERE id = $1`,
+    [recreate.id, queued.id],
+  )
+  await claimAndFire([queued.id])
+  return queued.id
+}
+
+/**
  * Enqueues one action against an already-existing kling_recreate_jobs row —
  * the Approve/Regenerate buttons on both approval gates all go through this,
  * same claim-then-fire pattern as a fresh recreate so the request never blocks

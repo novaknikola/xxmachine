@@ -2,14 +2,16 @@ import { NextRequest, NextResponse } from 'next/server'
 import { one, query, rows } from '@/lib/db'
 import {
   sendText, answerCallbackQuery, editMessageReplyMarkup,
-  confirmRecreateKeyboard, stillPromptChoiceKeyboard, downloadTelegramVoice,
+  confirmRecreateKeyboard, stillPromptChoiceKeyboard, scriptOnlyKeyboard, downloadTelegramVoice,
 } from '@/lib/telegram-recreate'
 import { transcribeVoiceNote } from '@/lib/grok'
 import {
-  addUrlsToPending, attachPhotoFromTelegram, claimPending, clearPending, getPending, setAwaiting,
-  setAwaitingVariation, setPendingCustomPrompt,
+  addUrlsToPending, attachPhotoFromTelegram, claimPending, claimPendingForScript, clearPending,
+  getPending, setAwaiting, setAwaitingVariation, setPendingCustomPrompt,
 } from '@/lib/kling-recreate/pending'
-import { enqueueKlingAction, enqueueKlingRecreateJobs, enqueueKlingVariationJobs } from '@/lib/kling-recreate/enqueue'
+import {
+  enqueueKlingAction, enqueueKlingRecreateJobs, enqueueKlingScriptOnlyJob, enqueueKlingVariationJobs,
+} from '@/lib/kling-recreate/enqueue'
 import {
   isVariationAwaiting,
   parseVariationCallback,
@@ -40,6 +42,8 @@ const HELP = [
   '<b>Seedance 2.5 Recreate</b>',
   'Send an Instagram reel URL and a reference photo of your character (or use the default photo from dashboard Settings).',
   'I scrape the reel, describe it at ~2fps, build a character still, confirm the dialogue attribution with you, then animate it with Seedance 2.5.',
+  '',
+  'No reel? Send a photo + a written or spoken scene script instead (setting, action, dialogue) and I’ll generate the whole video from that alone.',
   '',
   '/ideas — recent banked niche ideas (not rendered)',
   '/cancel — clear the current batch',
@@ -78,18 +82,28 @@ function batchStatusText(opts: {
   photoUrl: string | null
   defaultPhoto: boolean
   urls: string[]
+  customPrompt?: string | null
 }): string {
   const photo = opts.photoUrl
     ? '📸 Photo: attached'
     : opts.defaultPhoto
       ? '📸 Photo: using account default'
       : '📸 Photo: missing — send one, or set a default in dashboard Settings'
+  const script = opts.customPrompt?.trim()
+    ? `📝 Script: ${escapeHtml(opts.customPrompt.trim().slice(0, 60))}${opts.customPrompt.trim().length > 60 ? '…' : ''}`
+    : null
+  const reelsLine = opts.urls.length
+    ? opts.urls.map(u => `• ${escapeHtml(u)}`).join('\n')
+    : script
+      ? 'Paste Instagram reel URL(s), or generate from your script alone (below).'
+      : 'Paste Instagram reel URL(s).'
   return [
     '<b>Recreate batch</b>',
     photo,
+    script,
     `🔗 Reels: ${opts.urls.length}`,
-    opts.urls.length ? opts.urls.map(u => `• ${escapeHtml(u)}`).join('\n') : 'Paste Instagram reel URL(s).',
-  ].join('\n')
+    reelsLine,
+  ].filter(Boolean).join('\n')
 }
 
 /**
@@ -106,6 +120,9 @@ async function showBatch(chatId: number, userId: string) {
   const photoUrl = pending?.photo_url ?? null
   const hasDefault = !photoUrl && !!(await defaultReference(userId))
   const ready = urls.length > 0 && !!(photoUrl || hasDefault)
+  // No URL at all, but a photo + a real (non-empty, non-skipped) script —
+  // offer the script-only path instead of just repeating "paste a URL".
+  const scriptOnlyReady = !ready && urls.length === 0 && !!(photoUrl || hasDefault) && !!pending?.custom_prompt?.trim()
 
   if (ready && pending?.custom_prompt == null) {
     await sendText(
@@ -120,8 +137,8 @@ async function showBatch(chatId: number, userId: string) {
 
   await sendText(
     chatId,
-    batchStatusText({ photoUrl, defaultPhoto: hasDefault, urls }),
-    ready ? confirmRecreateKeyboard(urls.length) : undefined,
+    batchStatusText({ photoUrl, defaultPhoto: hasDefault, urls, customPrompt: pending?.custom_prompt }),
+    ready ? confirmRecreateKeyboard(urls.length) : (scriptOnlyReady ? scriptOnlyKeyboard() : undefined),
   )
 }
 
@@ -299,6 +316,32 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true })
       }
 
+      if (pending?.awaiting === 'script_lead_character') {
+        const leadCharacter = message.text.trim()
+        const reference = pending.photo_url || await defaultReference(userId)
+        if (!leadCharacter || !pending.custom_prompt?.trim() || !reference) {
+          await setAwaiting(chatId, null)
+          await sendText(chatId, 'That script-only batch expired — tap "Generate from script" again.')
+          return NextResponse.json({ ok: true })
+        }
+        const claimed = await claimPendingForScript(chatId)
+        if (!claimed) {
+          await sendText(chatId, 'Already queued.')
+          return NextResponse.json({ ok: true })
+        }
+        await enqueueKlingScriptOnlyJob({
+          userId, chatId, referenceImageUrl: reference,
+          script: claimed.custom_prompt!, leadCharacter,
+        })
+        await sendText(
+          chatId,
+          `🎬 Queued script-only recreate (${escapeHtml(leadCharacter)} = your photo). ` +
+            `I’ll send the analysis, then the character still for approval, then a quick dialogue check, ` +
+            `then the Seedance prompt for approval, then the video.`,
+        )
+        return NextResponse.json({ ok: true })
+      }
+
       // A plain-text reply while a job is sitting at the dialogue-attribution
       // gate is a speaker correction, not a new batch of reel URLs — check
       // before falling through to addUrlsToPending.
@@ -346,6 +389,14 @@ export async function POST(req: NextRequest) {
         await clearPending(chatId)
         await answerCallbackQuery(cb.id, 'Cancelled')
         if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
+        return NextResponse.json({ ok: true })
+      }
+
+      if (parts[1] === 'scriptonly') {
+        await setAwaiting(chatId, 'script_lead_character')
+        await answerCallbackQuery(cb.id)
+        if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
+        await sendText(chatId, '🎭 Which character in your script is played by your reference photo? Just the name (e.g. Tiana).')
         return NextResponse.json({ ok: true })
       }
 

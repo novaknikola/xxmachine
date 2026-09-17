@@ -176,6 +176,17 @@ export function confirmRecreateKeyboard(urlCount: number) {
   }
 }
 
+/** Offered when a photo + a manual script exist but no reel URL has been
+ * pasted — generate the whole video from the script alone, no source reel. */
+export function scriptOnlyKeyboard() {
+  return {
+    inline_keyboard: [[
+      { text: '🎬 Generate from script (no reel)', callback_data: 'kr:scriptonly' },
+      { text: '✖️ Cancel', callback_data: 'kr:cancel' },
+    ]],
+  }
+}
+
 /** Optional, asked before analysis runs — custom instruction for the character still. */
 export function stillPromptChoiceKeyboard() {
   return {

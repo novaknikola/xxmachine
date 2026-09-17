@@ -5,7 +5,7 @@ import {
   sendMediaGroup, sendPhoto, sendText, sendVideo,
   variationChoiceKeyboard, stillApprovalKeyboard, dialogueApprovalKeyboard, promptApprovalKeyboard,
 } from '@/lib/telegram-recreate'
-import { analyzeOneFpsVideo, analyzeOneFpsVideoFromFrames } from './analyze'
+import { analyzeOneFpsVideo, analyzeOneFpsVideoFromFrames, analyzeScriptOnly } from './analyze'
 import { extractOneFpsFrames } from './frames'
 import { bankFreshIdeas } from './ideas'
 import { syncKlingAnalysisSheetSafe } from './sheet-sync'
@@ -95,6 +95,30 @@ function durationForSeedance(sourceSec: number | null): number {
   return clampSeedanceDuration(sourceSec, SEEDANCE_VARIANT)
 }
 
+/**
+ * Style-only anchor for a script-only job (no source video of its own to
+ * ground its technical voice in) — the most recent REAL, already-approved
+ * analysis for this user. Deliberately returns only setting/camera/
+ * capture_style, never hook/character_action/shots, so no plot/character
+ * content bleeds from one job into an unrelated one — see analyzeScriptOnly.
+ */
+async function loadStyleReferenceContext(userId: string): Promise<{
+  setting: string
+  camera: string
+  capture_style: KlingVideoContext['capture_style']
+} | null> {
+  const row = await one<{ context: KlingVideoContext | null }>(
+    `SELECT context FROM kling_recreate_jobs
+      WHERE user_id = $1 AND is_script_only = false AND context IS NOT NULL
+        AND status IN ('awaiting_still_approval', 'awaiting_dialogue_approval', 'awaiting_prompt_approval', 'rendering', 'done')
+      ORDER BY updated_at DESC LIMIT 1`,
+    [userId],
+  )
+  const ctx = row?.context
+  if (!ctx?.setting) return null
+  return { setting: ctx.setting, camera: ctx.camera ?? '', capture_style: ctx.capture_style ?? null }
+}
+
 async function notify(chatId: number | string | null | undefined, text: string, keyboard?: object) {
   if (chatId == null) return
   await sendText(chatId, text, keyboard).catch(err =>
@@ -157,8 +181,12 @@ async function generateStills(opts: {
     duration_sec: null, aspect_ratio: '9:16', shots: [], prompt_mode: 'prompt' as const,
   }
 
-  const firstFramePrompt = renderFirstFrameEditPrompt(ctx, row.custom_prompt)
-  const lastFramePrompt = renderEndFrameEditPrompt(ctx, row.custom_prompt)
+  // For a script-only job, custom_prompt IS the whole script (not a short
+  // role label) — lead_character (asked separately, see webhook route's
+  // "scriptonly" gate) is the actual role-line input there instead.
+  const roleLabel = row.is_script_only ? row.lead_character : row.custom_prompt
+  const firstFramePrompt = renderFirstFrameEditPrompt(ctx, roleLabel)
+  const lastFramePrompt = renderEndFrameEditPrompt(ctx, roleLabel)
 
   const firstOutputs = await editImageNanoBananaPro({
     imageUrls: [reference],
@@ -268,7 +296,7 @@ export async function processKlingRecreateJob(opts: {
   }
 
   let videoUrl = row.video_url
-  if (!videoUrl) {
+  if (!row.is_script_only && !videoUrl) {
     await updateRecreate(row.id, { status: 'scraping' })
     await heartbeat(opts.queueJobId, 'scraping', { progress: 5 })
     videoUrl = await resolveRecreateVideoUrl(opts.userId, row.source_url)
@@ -279,7 +307,29 @@ export async function processKlingRecreateJob(opts: {
   let masterPrompt = row.master_prompt
   let sourceDuration = row.duration_sec != null ? Number(row.duration_sec) : null
 
-  if (!masterPrompt) {
+  if (!masterPrompt && row.is_script_only) {
+    await updateRecreate(row.id, { status: 'analyzing' })
+    await heartbeat(opts.queueJobId, 'analyzing', { progress: 15 })
+
+    const styleReference = await loadStyleReferenceContext(opts.userId)
+    const analysis = await analyzeScriptOnly({ script: row.custom_prompt ?? '', styleReference })
+    masterPrompt = analysis.master_prompt
+    context = analysis.context
+    sourceDuration = analysis.context.duration_sec
+
+    await updateRecreate(row.id, { status: 'analyzing', duration_sec: sourceDuration, context, master_prompt: masterPrompt })
+    await heartbeat(opts.queueJobId, 'analyzed', { progress: 40 })
+    await syncKlingAnalysisSheetSafe({
+      jobId: row.id, sourceUrl: row.source_url, durationSec: sourceDuration, context, masterPrompt,
+      status: 'analyzing', klingVideoUrl: row.kling_video_url,
+    })
+    await notify(
+      chatId,
+      `🧠 Script-only analysis built — no source video used` +
+        `${sourceDuration != null ? `, ~${sourceDuration.toFixed(1)}s` : ''}.`,
+    )
+  } else if (!masterPrompt) {
+    if (!videoUrl) throw new Error('Missing video_url for a non-script-only job')
     await updateRecreate(row.id, { status: 'analyzing' })
     await heartbeat(opts.queueJobId, 'analyzing', { progress: 15 })
 
@@ -546,16 +596,19 @@ async function regeneratePrompt(opts: {
   const chatId = opts.input.chatId ?? row.chat_id
   const apiKey = await getUserApiKey(opts.userId, 'wavespeed_api_key')
 
-  const frameRows = await rows<{ t_sec: number; description: string | null }>(
-    `SELECT t_sec, description FROM kling_recreate_frames WHERE job_id = $1 ORDER BY t_sec ASC`,
-    [row.id],
-  )
-  const frames = frameRows.filter(f => f.description).map(f => ({ t_sec: Number(f.t_sec), description: f.description! }))
-  if (!frames.length) throw new Error('No stored frame descriptions to re-synthesize from')
-
-  let transcript = ''
   const existingContext = (row.context ?? null) as KlingVideoContext | null
-  if (existingContext?.speech) transcript = existingContext.speech
+
+  let frames: { t_sec: number; description: string }[] = []
+  let transcript = ''
+  if (!row.is_script_only) {
+    const frameRows = await rows<{ t_sec: number; description: string | null }>(
+      `SELECT t_sec, description FROM kling_recreate_frames WHERE job_id = $1 ORDER BY t_sec ASC`,
+      [row.id],
+    )
+    frames = frameRows.filter(f => f.description).map(f => ({ t_sec: Number(f.t_sec), description: f.description! }))
+    if (!frames.length) throw new Error('No stored frame descriptions to re-synthesize from')
+    if (existingContext?.speech) transcript = existingContext.speech
+  }
 
   await query(
     `UPDATE kling_recreate_jobs
@@ -569,11 +622,16 @@ async function regeneratePrompt(opts: {
   await heartbeat(opts.queueJobId, 'analyzing', { progress: 40 })
 
   const sourceDuration = row.duration_sec != null ? Number(row.duration_sec) : null
-  const analysis = await analyzeOneFpsVideoFromFrames({
-    frames, duration: sourceDuration,
-    aspectRatio: existingContext?.aspect_ratio ?? '9:16', transcript,
-    manualContext: row.custom_prompt,
-  })
+  const analysis = row.is_script_only
+    ? await analyzeScriptOnly({
+        script: row.custom_prompt ?? '',
+        styleReference: await loadStyleReferenceContext(opts.userId),
+      })
+    : await analyzeOneFpsVideoFromFrames({
+        frames, duration: sourceDuration,
+        aspectRatio: existingContext?.aspect_ratio ?? '9:16', transcript,
+        manualContext: row.custom_prompt,
+      })
 
   await updateRecreate(row.id, { context: analysis.context, master_prompt: analysis.master_prompt })
   await heartbeat(opts.queueJobId, 'analyzed', { progress: 50 })

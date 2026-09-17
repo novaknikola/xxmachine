@@ -157,6 +157,15 @@ export interface KlingRecreateJobRow {
   /** Free-text speaker-attribution correction from the dialogue gate, if the
    * user sent one — folded into buildSeedancePrompt with top priority. */
   confirmed_dialogue?: string | null
+  /** true when this job has no source reel at all — generated purely from a
+   * user-written script (custom_prompt holds the full script text, not a
+   * short still instruction). Skips scrape + per-frame vision analysis;
+   * see analyzeScriptOnly in analyze.ts. */
+  is_script_only?: boolean
+  /** For script-only jobs: which named character in the script the
+   * reference photo plays — used in place of custom_prompt (which is the
+   * whole script here, not a short role label) as the leadRoleLine input. */
+  lead_character?: string | null
 }
 
 export const MAX_RECREATE_URLS = 30
