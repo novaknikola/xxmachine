@@ -184,37 +184,54 @@ export async function applyDialogueCorrection(opts: {
  * authoritative role line. When absent, this falls back to a generic
  * single-main-character instruction; for any scene with more than one
  * person, the user should use the instruction prompt to disambiguate.
+ *
+ * Rewritten 2026-09-17 to read like the Python idea-bank pipeline's
+ * first_frame_prompt_safe/last_frame_prompt_safe (evocative, specific,
+ * cinematic-still voice) instead of a flat edit-instruction checklist — the
+ * user flagged the old wording as not matching that quality bar. The one
+ * thing NOT ported from that pipeline: that pipeline has no identity photo
+ * at all, so it freely describes the lead's face/hair/body in prose. Here an
+ * actual reference photo carries the identity, so the lead's own physical
+ * description is still deliberately omitted (leadRoleLine only states their
+ * ROLE, never their appearance) — describing it in text is what caused the
+ * original wrong-woman bug this session fixed twice already. The fix for
+ * flatness instead is pulling the SPECIFIC first/last beat's pose and action
+ * (context.shots[0]/[last].prompt — already detailed prose from analysis)
+ * rather than only the generic whole-scene setting.
  */
 function leadRoleLine(customPrompt?: string | null): string {
   const trimmed = customPrompt?.trim()
   return trimmed
-    ? `The identity-reference person plays this role in the scene: ${trimmed}. Give ONLY this role/character the identity-reference person's face and body — everyone else described below keeps their own separate appearance.`
-    : 'The identity-reference person is the single main character in this scene — the one the camera and story center on. If more than one person is described below, do not blend their features together; only one of them is the identity-reference person.'
+    ? `The identity-reference person plays this role in the scene: ${trimmed}. Give ONLY this role/character the identity-reference person's exact face, body and skin tone from the attached photo — everyone else in the scene keeps their own separate appearance exactly as described below, unaffected by the reference photo.`
+    : 'The identity-reference person is the single main character in this scene — the one the camera and story center on. Give ONLY that character the identity-reference person\'s exact face, body and skin tone from the attached photo; if more than one person is described below, do not blend their features together.'
 }
 
 export function renderFirstFrameEditPrompt(context: KlingVideoContext, customPrompt?: string | null): string {
+  const firstBeat = context.shots?.[0]?.prompt?.trim() || context.character_action
   const bits = [
-    'The attached image is the identity reference photo: generate a brand new photorealistic first frame of the scene below, starring this exact person — same face, same body, same skin tone as the reference photo.',
+    'A cinematic, photorealistic production still, high-resolution — hyper-realistic detail, precise anatomical accuracy, flawless skin and fabric texture, natural lighting true to the scene, shallow cinematic depth of field.',
+    'The attached photo is the identity reference.',
     leadRoleLine(customPrompt),
-    context.setting && `Scene: ${context.setting}`,
-    context.camera && `Camera: ${context.camera}.`,
+    firstBeat && `This still is the opening instant of the shot, frozen exactly here: ${firstBeat}`,
+    context.setting && `Scene and environment: ${context.setting}`,
+    context.camera && `(For framing/lighting context only — this still is a single frozen instant, not the whole camera move: ${context.camera})`,
     REMOVE_ONSCREEN_TEXT,
-    'Photorealistic, natural skin texture, no beauty filter, no AI skin smoothing.',
-    'Do not add extra people beyond what the scene describes.',
+    'No beauty filter, no AI skin smoothing. Do not add extra people beyond what the scene describes.',
   ].filter(Boolean)
   return bits.join(' ')
 }
 
 export function renderEndFrameEditPrompt(context: KlingVideoContext, customPrompt?: string | null): string {
+  const lastBeat = context.shots?.[context.shots.length - 1]?.prompt?.trim() || context.character_action
   const bits = [
     'Image 1 is the just-generated first frame of this same shot, image 2 is the identity reference photo.',
-    'Generate the END frame of the same continuous shot: the person must look IDENTICAL to image 1 — same face, same hair colour and styling, same wardrobe, same skin tone and lighting. Only the pose and framing advance to match the action described below.',
+    'Generate the END frame of the same continuous shot: the person must look IDENTICAL to image 1 — same face, same hair colour and styling, same wardrobe, same skin tone and lighting. Only the pose and framing advance.',
     leadRoleLine(customPrompt),
-    context.character_action && `Action across the shot: ${context.character_action}`,
-    context.camera && `Camera: ${context.camera}.`,
+    lastBeat && `This still is the closing instant of the shot, frozen exactly here: ${lastBeat}`,
+    context.camera && `(For framing/lighting context only — this still is a single frozen instant, not the whole camera move: ${context.camera})`,
     PRESERVE_MOTION_CUE,
     REMOVE_ONSCREEN_TEXT,
-    'Photorealistic, natural skin texture, no beauty filter, no AI skin smoothing.',
+    'Photorealistic, hyper-realistic detail, natural skin texture, no beauty filter, no AI skin smoothing.',
     'Do not add extra people beyond what the scene describes. Do not change the background/setting from image 1.',
   ].filter(Boolean)
   return bits.join(' ')
