@@ -125,11 +125,21 @@ export async function setPendingShotMode(chatId: number, mode: KlingShotMode): P
   )
 }
 
-/** Optional custom instruction for the character still(s), collected before Recreate fires. */
-export async function setPendingCustomPrompt(chatId: number, text: string | null): Promise<void> {
+/**
+ * Optional custom instruction / manual context, collected before Recreate
+ * fires. Upsert (not a plain UPDATE) so a voice note or typed note sent
+ * BEFORE any photo/URL — nothing to update yet — still lands: it creates the
+ * pending row early, the same way setPendingPhoto already can.
+ */
+export async function setPendingCustomPrompt(chatId: number, userId: string, text: string | null): Promise<void> {
   await query(
-    `UPDATE telegram_recreate_pending SET custom_prompt = $2, updated_at = now() WHERE chat_id = $1`,
-    [chatId, text],
+    `INSERT INTO telegram_recreate_pending (chat_id, user_id, custom_prompt, updated_at)
+     VALUES ($1, $2, $3, now())
+     ON CONFLICT (chat_id) DO UPDATE SET
+       custom_prompt = EXCLUDED.custom_prompt,
+       user_id = EXCLUDED.user_id,
+       updated_at = now()`,
+    [chatId, userId, text],
   )
 }
 

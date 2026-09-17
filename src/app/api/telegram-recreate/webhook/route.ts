@@ -219,35 +219,34 @@ export async function POST(req: NextRequest) {
     }
 
     /**
-     * A voice note is only meaningful right now as the answer to "Add a
-     * specific instruction?" (the custom_prompt gate) — it has no other
-     * interpretation in this bot (unlike text, which could be reel URLs or
-     * a dialogue correction), so it's handled the same way that text branch
-     * is: transcribe it via xAI STT and store the result exactly like a
-     * typed instruction. This is also the "manual context" input this
-     * session's user asked for (matching the Python idea-bank pipeline's
-     * loose, dictated-along "Manuelna skripta" column) — see analyze.ts's
-     * synthesizeContext, which now takes row.custom_prompt as an optional
-     * hint layered under the real per-frame/audio analysis.
+     * A voice note has no other meaning in this bot (unlike text, which
+     * could be reel URLs or a dialogue correction), so it always transcribes
+     * via xAI STT and lands in custom_prompt — this is the "manual context"
+     * input this session's user asked for (matching the Python idea-bank
+     * pipeline's loose, dictated-along "Manuelna skripta" column, which is
+     * supplied UP FRONT, not gated behind a button). Not gated on
+     * pending?.awaiting === 'custom_prompt' — deliberately reverted that
+     * gate (2026-09-18): a user who just sends a voice note without first
+     * tapping "Add prompt" got silently ignored (confirmed live, no pending
+     * row existed yet because they sent it before any URL/photo). Works at
+     * any point in the batch, including before a photo/URL exists at all —
+     * setPendingCustomPrompt upserts, same as setPendingPhoto.
      */
     if (message?.voice) {
-      const pendingVoice = await getPending(chatId)
-      if (pendingVoice?.awaiting === 'custom_prompt') {
-        try {
-          const { buffer, mimeType, filename } = await downloadTelegramVoice(message.voice.file_id)
-          const transcript = await transcribeVoiceNote(buffer, filename, mimeType)
-          if (!transcript) {
-            await sendText(chatId, "Couldn't make out any speech in that voice note — try again or type it instead.")
-            return NextResponse.json({ ok: true })
-          }
-          await setPendingCustomPrompt(chatId, transcript)
-          await setAwaiting(chatId, null)
-          await sendText(chatId, `🎙️ Got it: <i>${escapeHtml(transcript)}</i>`)
-          await showBatch(chatId, userId)
-        } catch (err) {
-          console.error('[kling-recreate] voice transcription failed:', err)
-          await sendText(chatId, '⚠️ Could not transcribe that voice note — try again or type the instruction instead.')
+      try {
+        const { buffer, mimeType, filename } = await downloadTelegramVoice(message.voice.file_id)
+        const transcript = await transcribeVoiceNote(buffer, filename, mimeType)
+        if (!transcript) {
+          await sendText(chatId, "Couldn't make out any speech in that voice note — try again or type it instead.")
+          return NextResponse.json({ ok: true })
         }
+        await setPendingCustomPrompt(chatId, userId, transcript)
+        await setAwaiting(chatId, null)
+        await sendText(chatId, `🎙️ Got it, saved as manual context for the next recreate: <i>${escapeHtml(transcript)}</i>`)
+        await showBatch(chatId, userId)
+      } catch (err) {
+        console.error('[kling-recreate] voice transcription failed:', err)
+        await sendText(chatId, '⚠️ Could not transcribe that voice note — try again or type the instruction instead.')
       }
       return NextResponse.json({ ok: true })
     }
@@ -294,7 +293,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true })
       }
       if (pending?.awaiting === 'custom_prompt') {
-        await setPendingCustomPrompt(chatId, message.text)
+        await setPendingCustomPrompt(chatId, userId, message.text)
         await setAwaiting(chatId, null)
         await showBatch(chatId, userId)
         return NextResponse.json({ ok: true })
@@ -353,7 +352,7 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ ok: true })
         }
         // skip: '' (not null) marks the question as asked so showBatch never re-asks it.
-        await setPendingCustomPrompt(chatId, '')
+        await setPendingCustomPrompt(chatId, userId, '')
         await answerCallbackQuery(cb.id, 'Skipped')
         if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
         await showBatch(chatId, userId)
