@@ -206,8 +206,14 @@ async function generateStills(opts: {
   const hasAmbiance = !!ambianceUrl
   const identityUrls = photos.map(p => p.url)
 
+  // Ambiance is deliberately first-frame only (2026-09-18, explicit user
+  // ask): the end frame's own prompt already requires the background/
+  // setting to stay IDENTICAL to the first-frame result, so the ambiance
+  // photo is redundant there — dropping it also keeps the end-frame image
+  // list one shorter, which matters given more reference images is exactly
+  // what's been hurting multi-identity reliability.
   const firstFramePrompt = renderFirstFrameEditPrompt(ctx, photos, hasAmbiance)
-  const lastFramePrompt = renderEndFrameEditPrompt(ctx, photos, hasAmbiance)
+  const lastFramePrompt = renderEndFrameEditPrompt(ctx, photos)
 
   const firstOutputs = await editImageNanoBananaPro({
     imageUrls: hasAmbiance ? [...identityUrls, ambianceUrl!] : identityUrls,
@@ -217,9 +223,8 @@ async function generateStills(opts: {
   if (!firstOutputs.length) throw new Error('Nano Banana Pro: no first-frame output')
   const preparedFirst = await prepareKlingImage(firstOutputs[0], `kling-recreate/${row.user_id}/${row.id}/first-frame.jpg`)
 
-  const endImageUrls = [preparedFirst.url, ...identityUrls]
   const endOutputs = await editImageNanoBananaPro({
-    imageUrls: hasAmbiance ? [...endImageUrls, ambianceUrl!] : endImageUrls,
+    imageUrls: [preparedFirst.url, ...identityUrls],
     prompt: lastFramePrompt,
     apiKey: opts.apiKey,
   })
