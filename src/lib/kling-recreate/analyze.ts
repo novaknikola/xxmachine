@@ -275,12 +275,30 @@ async function synthesizeContext(opts: {
   return parseSynthesizedContext(parsed)
 }
 
+const SCRIPT_ONLY_DURATION_CAP = 15
+
+/**
+ * Hard clamp, not just a prompt instruction — drop any shot that starts
+ * at/after the cap, and trim the last remaining one so it never runs past
+ * it. Guarantees the rendered video can never exceed the cap regardless of
+ * what the model actually returns.
+ */
+export function capShotsDuration(shots: KlingShotBeat[], capSec: number): KlingShotBeat[] {
+  return shots
+    .filter(s => s.t_start < capSec)
+    .map(s => s.t_end > capSec ? { ...s, t_end: capSec } : s)
+}
+
 const SCRIPT_ONLY_SYSTEM =
   'You convert a user-written scene script into the exact same structured breakdown a video-analysis ' +
   'pipeline would produce from real footage — there is no source video, no frames, no audio here, the ' +
   'written script IS the source. Return JSON: setting, hook, character_action, camera, speech (or null), ' +
   'capture_style ("produced" or "phone"), master_prompt, shots: array of {t_start, t_end, prompt}, at ' +
   'most 6 entries, covering the FULL invented scene start to end with no gaps.\n\n' +
+  `HARD LIMIT: the total invented scene must not exceed ${SCRIPT_ONLY_DURATION_CAP} seconds — the last ` +
+  `shot's t_end must be <= ${SCRIPT_ONLY_DURATION_CAP}. If the script has more beats/dialogue than fit ` +
+  `naturally in that time, prioritize the hook and the core exchange/payoff and compress or drop the ` +
+  'least essential beats — never let pacing run long and get truncated mid-scene.\n\n' +
   'setting — invent concrete, specific physical detail (location, props, lighting, time of day) worthy of ' +
   'the script\'s own detail level — if the script already specifies detail (e.g. "marble island, white ' +
   'cabinets"), use it verbatim; fill in anything the script leaves vague with equally concrete, specific ' +
@@ -324,7 +342,10 @@ const SCRIPT_ONLY_SYSTEM =
  * (capture_style judgment, lighting/camera vocabulary, quality-tag wording)
  * in a real prior analysis already in kling_recreate_jobs — never invented
  * from a blank slate. duration_sec is computed from the parsed shots
- * (max t_end), not trusted from the model's own arithmetic.
+ * (max t_end), not trusted from the model's own arithmetic — and hard-
+ * capped at SCRIPT_ONLY_DURATION_CAP (2026-09-18, explicit user ask:
+ * text-written videos must never exceed 15s) regardless of what the model
+ * returns, on top of the same instruction in the system prompt.
  */
 export async function analyzeScriptOnly(opts: {
   script: string
@@ -353,9 +374,8 @@ export async function analyzeScriptOnly(opts: {
     }],
   })
   const synthesized = parseSynthesizedContext(parsed)
-  const duration = synthesized.shots.length
-    ? Math.max(...synthesized.shots.map(s => s.t_end))
-    : null
+  const shots = capShotsDuration(synthesized.shots, SCRIPT_ONLY_DURATION_CAP)
+  const duration = shots.length ? Math.max(...shots.map(s => s.t_end)) : null
 
   const context: KlingVideoContext = {
     setting: synthesized.setting,
@@ -365,9 +385,9 @@ export async function analyzeScriptOnly(opts: {
     speech: synthesized.speech,
     duration_sec: duration,
     aspect_ratio: '9:16',
-    shots: synthesized.shots,
+    shots,
     capture_style: synthesized.capture_style,
-    prompt_mode: choosePromptMode(synthesized.shots),
+    prompt_mode: choosePromptMode(shots),
   }
 
   const master_prompt = synthesized.master_prompt

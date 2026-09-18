@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseSynthesizedContext } from './analyze'
+import { capShotsDuration, parseSynthesizedContext } from './analyze'
 
 describe('parseSynthesizedContext', () => {
   it('parses a full response, caps shots at 6, and normalizes capture_style', () => {
@@ -46,5 +46,30 @@ describe('parseSynthesizedContext', () => {
   it('treats a missing/empty speech field as null, not the string "null"', () => {
     const parsed = parseSynthesizedContext({ setting: 'x', shots: [] })
     assert.equal(parsed.speech, null)
+  })
+})
+
+describe('capShotsDuration', () => {
+  const SHOTS = [
+    { t_start: 0, t_end: 5, prompt: 'a' },
+    { t_start: 5, t_end: 12, prompt: 'b' },
+    { t_start: 12, t_end: 20, prompt: 'c — overruns the cap' },
+    { t_start: 20, t_end: 27, prompt: 'd — starts past the cap, dropped entirely' },
+  ]
+
+  it('trims a shot that overruns the cap and drops any that start past it', () => {
+    const capped = capShotsDuration(SHOTS, 15)
+    assert.equal(capped.length, 3)
+    assert.equal(capped[2].t_end, 15)
+    assert.equal(capped[2].prompt, 'c — overruns the cap')
+  })
+
+  it('leaves shots untouched when nothing exceeds the cap', () => {
+    const short = [{ t_start: 0, t_end: 10, prompt: 'a' }]
+    assert.deepEqual(capShotsDuration(short, 15), short)
+  })
+
+  it('returns an empty list unchanged', () => {
+    assert.deepEqual(capShotsDuration([], 15), [])
   })
 })
