@@ -232,12 +232,17 @@ export function identityLines(photos: NamedIdentityPhoto[], imageOffset: number)
   if (photos.length === 1) {
     return `The attached photo is the identity reference for "${photos[0].name}" — wherever the scene describes ${photos[0].name}, give that character this exact face, body and skin tone from the photo. Everyone else in the scene keeps their own separate appearance exactly as described below, unaffected by the reference photo.`
   }
-  return photos
+  const lines = photos
     .map((p, i) => {
       const label = p.name ?? `person ${i + 1}`
       return `Image ${i + imageOffset} is the identity reference for "${label}" — wherever the scene describes ${label}, give that character this exact face, body and skin tone from this image; do not use it for any other character, and do not blend it with the other identity photos.`
     })
     .join(' ')
+  const names = photos.map(p => p.name).filter((n): n is string => !!n)
+  const mustAppear = names.length
+    ? `Every one of these characters must be visibly present in this frame — do not omit any of them: ${names.join(', ')}.`
+    : 'Every one of these characters must be visibly present in this frame — do not omit any of them.'
+  return `${lines} ${mustAppear}`
 }
 
 /**

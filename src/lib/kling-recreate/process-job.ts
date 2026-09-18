@@ -329,7 +329,10 @@ export async function processKlingRecreateJob(opts: {
     await heartbeat(opts.queueJobId, 'analyzing', { progress: 15 })
 
     const styleReference = await loadStyleReferenceContext(opts.userId)
-    const analysis = await analyzeScriptOnly({ script: row.custom_prompt ?? '', styleReference })
+    const analysis = await analyzeScriptOnly({
+      script: row.custom_prompt ?? '', styleReference,
+      characterNames: Object.keys(row.reference_photos ?? {}),
+    })
     masterPrompt = analysis.master_prompt
     context = analysis.context
     sourceDuration = analysis.context.duration_sec
@@ -367,7 +370,7 @@ export async function processKlingRecreateJob(opts: {
       frames: extracted.frames.map(f => ({ t_sec: f.t_sec, description: null })), context: null,
     }).catch(err => { console.error('[kling-recreate] idea bank failed:', err); return 0 })
 
-    const analysis = await analyzeOneFpsVideo(extracted, videoUrl, row.custom_prompt)
+    const analysis = await analyzeOneFpsVideo(extracted, videoUrl, row.custom_prompt, Object.keys(row.reference_photos ?? {}))
     masterPrompt = analysis.master_prompt
     context = analysis.context
     sourceDuration = analysis.context.duration_sec ?? sourceDuration
@@ -639,15 +642,17 @@ async function regeneratePrompt(opts: {
   await heartbeat(opts.queueJobId, 'analyzing', { progress: 40 })
 
   const sourceDuration = row.duration_sec != null ? Number(row.duration_sec) : null
+  const characterNames = Object.keys(row.reference_photos ?? {})
   const analysis = row.is_script_only
     ? await analyzeScriptOnly({
         script: row.custom_prompt ?? '',
         styleReference: await loadStyleReferenceContext(opts.userId),
+        characterNames,
       })
     : await analyzeOneFpsVideoFromFrames({
         frames, duration: sourceDuration,
         aspectRatio: existingContext?.aspect_ratio ?? '9:16', transcript,
-        manualContext: row.custom_prompt,
+        manualContext: row.custom_prompt, characterNames,
       })
 
   await updateRecreate(row.id, { context: analysis.context, master_prompt: analysis.master_prompt })

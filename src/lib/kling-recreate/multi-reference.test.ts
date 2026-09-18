@@ -67,4 +67,10 @@ describe('identityLines', () => {
     assert.match(line, /Image 2 is the identity reference for "Tiana"/)
     assert.match(line, /Image 3 is the identity reference for "Dianna"/)
   })
+
+  it('mandates every named character be visibly present for multiple identities', () => {
+    const line = identityLines([{ name: 'Tiana' }, { name: 'Dianna' }], 2)
+    assert.match(line, /must be visibly present in this frame/)
+    assert.match(line, /do not omit any of them: Tiana, Dianna/)
+  })
 })

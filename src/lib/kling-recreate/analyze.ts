@@ -200,7 +200,12 @@ const SYNTHESIS_SYSTEM =
   'transcript above are ground truth and OVERRIDE it whenever they conflict (same priority rule as speech ' +
   'attribution above: trust what the frames/transcript actually show, not what the note assumed). Never ' +
   'copy Serbian words into your output — translate the gist into English only where it helps interpret ' +
-  'ambiguous framing or dialogue.'
+  'ambiguous framing or dialogue.\n\n' +
+  'NAMED CHARACTERS/ROLES (given below, one per reference photo the user supplied): use that EXACT ' +
+  'wording whenever describing that person in setting/character_action/shots (e.g. if given "the maid", ' +
+  'always call her "the maid", never substitute "a woman in a black-and-white outfit" for that label ' +
+  'instead) — a later step matches these images to your wording textually, and any mismatch means the ' +
+  'wrong photo gets used for the wrong person.'
 
 type SynthesizedContext = Pick<KlingVideoContext,
   'setting' | 'hook' | 'character_action' | 'camera' | 'speech' | 'shots' | 'capture_style'
@@ -248,6 +253,7 @@ async function synthesizeContext(opts: {
   aspectRatio: string
   transcript: string
   manualContext?: string | null
+  characterNames?: string[]
 }): Promise<SynthesizedContext> {
   const timeline = opts.frames
     .map(f => `${f.t_sec.toFixed(1)}s: ${f.description}`)
@@ -264,6 +270,7 @@ async function synthesizeContext(opts: {
       content: [
         `Duration: ${opts.duration != null ? `${opts.duration.toFixed(1)}s` : 'unknown'}. Aspect: ${opts.aspectRatio}.`,
         opts.manualContext?.trim() ? `Manual context (see rules above for priority): ${opts.manualContext.trim()}` : '',
+        opts.characterNames?.length ? `Named characters/roles to use exactly as spelled: ${opts.characterNames.join(', ')}` : '',
         opts.transcript ? `Timestamped transcript:\n${opts.transcript}` : 'No speech transcript.',
         `Per-frame descriptions (~2fps, already tracks what changed each moment):\n${timeline}`,
         'Follow the rules above exactly. Cross-check before returning: does character_action name ' +
@@ -331,6 +338,12 @@ const SCRIPT_ONLY_SYSTEM =
   'this same pipeline — match ONLY its level of technical/cinematic specificity and vocabulary (how ' +
   'concretely it describes lighting, camera, ambient/wardrobe detail) — never reuse its setting, ' +
   'characters, or plot, this new scene is entirely its own.\n\n' +
+  'AUTHORITATIVE CHARACTER NAMES (may be given below, one per real reference photo the user supplied): ' +
+  'use these EXACT names — same spelling, same capitalization — every time you refer to these characters ' +
+  'in setting/character_action/shots. Never respell, abbreviate, or substitute a nickname/pronoun instead ' +
+  'in a context where naming the character matters. Every one of these named characters MUST appear and ' +
+  'be described as physically present somewhere in the scene — never write a version of the script that ' +
+  'drops one of them.\n\n' +
   'LANGUAGE: entire output in English, every field. The script given to you may be in Serbian or mixed; ' +
   'never copy non-English words into your output, translate the gist.'
 
@@ -350,6 +363,7 @@ const SCRIPT_ONLY_SYSTEM =
 export async function analyzeScriptOnly(opts: {
   script: string
   styleReference?: { setting: string; camera: string; capture_style: KlingVideoContext['capture_style'] } | null
+  characterNames?: string[]
 }): Promise<KlingAnalysis> {
   const parsed = await callGrokJson({
     model: GROK_FAST,
@@ -361,6 +375,7 @@ export async function analyzeScriptOnly(opts: {
       role: 'user',
       content: [
         `SCRIPT:\n${opts.script.trim()}`,
+        opts.characterNames?.length ? `Character names to use exactly as spelled: ${opts.characterNames.join(', ')}` : '',
         opts.styleReference ? [
           '',
           'STYLE REFERENCE (voice/specificity only — do not reuse its content):',
@@ -403,6 +418,7 @@ async function buildAnalysisFromFrames(opts: {
   aspectRatio: string
   transcript: string
   manualContext?: string | null
+  characterNames?: string[]
 }): Promise<KlingAnalysis> {
   const synthesized = await synthesizeContext(opts)
 
@@ -437,6 +453,7 @@ export async function analyzeOneFpsVideo(
   extract: OneFpsExtract,
   videoUrl: string,
   manualContext?: string | null,
+  characterNames?: string[],
 ): Promise<KlingAnalysis> {
   const chunks: OneFpsExtract['frames'][] = []
   for (let i = 0; i < extract.frames.length; i += CHUNK) {
@@ -463,7 +480,7 @@ export async function analyzeOneFpsVideo(
   }
 
   return buildAnalysisFromFrames({
-    frames, duration: extract.duration, aspectRatio: extract.aspectRatio, transcript, manualContext,
+    frames, duration: extract.duration, aspectRatio: extract.aspectRatio, transcript, manualContext, characterNames,
   })
 }
 
@@ -479,6 +496,7 @@ export async function analyzeOneFpsVideoFromFrames(opts: {
   aspectRatio: string
   transcript: string
   manualContext?: string | null
+  characterNames?: string[]
 }): Promise<KlingAnalysis> {
   return buildAnalysisFromFrames(opts)
 }
