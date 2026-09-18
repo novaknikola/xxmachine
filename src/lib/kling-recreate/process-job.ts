@@ -202,19 +202,24 @@ async function generateStills(opts: {
     duration_sec: null, aspect_ratio: '9:16', shots: [], prompt_mode: 'prompt' as const,
   }
 
-  const firstFramePrompt = renderFirstFrameEditPrompt(ctx, photos)
-  const lastFramePrompt = renderEndFrameEditPrompt(ctx, photos)
+  const ambianceUrl = row.ambiance_photo_url?.trim() || null
+  const hasAmbiance = !!ambianceUrl
+  const identityUrls = photos.map(p => p.url)
+
+  const firstFramePrompt = renderFirstFrameEditPrompt(ctx, photos, hasAmbiance)
+  const lastFramePrompt = renderEndFrameEditPrompt(ctx, photos, hasAmbiance)
 
   const firstOutputs = await editImageNanoBananaPro({
-    imageUrls: photos.map(p => p.url),
+    imageUrls: hasAmbiance ? [...identityUrls, ambianceUrl!] : identityUrls,
     prompt: firstFramePrompt,
     apiKey: opts.apiKey,
   })
   if (!firstOutputs.length) throw new Error('Nano Banana Pro: no first-frame output')
   const preparedFirst = await prepareKlingImage(firstOutputs[0], `kling-recreate/${row.user_id}/${row.id}/first-frame.jpg`)
 
+  const endImageUrls = [preparedFirst.url, ...identityUrls]
   const endOutputs = await editImageNanoBananaPro({
-    imageUrls: [preparedFirst.url, ...photos.map(p => p.url)],
+    imageUrls: hasAmbiance ? [...endImageUrls, ambianceUrl!] : endImageUrls,
     prompt: lastFramePrompt,
     apiKey: opts.apiKey,
   })

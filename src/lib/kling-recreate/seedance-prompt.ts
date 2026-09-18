@@ -259,12 +259,22 @@ function styleOpener(captureStyle: KlingVideoContext['capture_style']): string {
     : 'A candid high-resolution phone photo — natural mixed lighting with a slight handheld phone-camera quality, photorealistic, natural skin and fabric detail, authentic candid social-media snapshot quality.'
 }
 
-export function renderFirstFrameEditPrompt(context: KlingVideoContext, photos: NamedIdentityPhoto[]): string {
+/**
+ * Appended as the LAST image in both Nano Banana Pro calls when the job has
+ * an ambiance/scene reference photo (2026-09-18) — a style/environment
+ * anchor, never an identity, so it needs its own explicit "do not use this
+ * as anyone's face" carve-out or the model has no way to tell it apart from
+ * the identity photos preceding it.
+ */
+const AMBIANCE_LINE = 'The last image is a visual ambiance/style reference only — match its lighting, environment and overall look as closely as possible for the background of this scene. Do NOT use it as anyone\'s face or body identity.'
+
+export function renderFirstFrameEditPrompt(context: KlingVideoContext, photos: NamedIdentityPhoto[], hasAmbiance = false): string {
   const firstBeat = context.shots?.[0]?.prompt?.trim() || context.character_action
   const bits = [
     styleOpener(context.capture_style),
     photos.length > 1 ? 'The attached photos are identity references, one per named character.' : 'The attached photo is the identity reference.',
     identityLines(photos, 1),
+    hasAmbiance ? AMBIANCE_LINE : '',
     firstBeat && `This still is the opening instant of the shot, frozen exactly here: ${firstBeat}`,
     context.setting && `Scene and environment: ${context.setting}`,
     context.camera && `(For framing/lighting context only — this still is a single frozen instant, not the whole camera move: ${context.camera})`,
@@ -274,7 +284,7 @@ export function renderFirstFrameEditPrompt(context: KlingVideoContext, photos: N
   return bits.join(' ')
 }
 
-export function renderEndFrameEditPrompt(context: KlingVideoContext, photos: NamedIdentityPhoto[]): string {
+export function renderEndFrameEditPrompt(context: KlingVideoContext, photos: NamedIdentityPhoto[], hasAmbiance = false): string {
   const lastBeat = context.shots?.[context.shots.length - 1]?.prompt?.trim() || context.character_action
   const bits = [
     photos.length > 1
@@ -282,6 +292,7 @@ export function renderEndFrameEditPrompt(context: KlingVideoContext, photos: Nam
       : 'Image 1 is the just-generated first frame of this same shot, image 2 is the identity reference photo.',
     'Generate the END frame of the same continuous shot: every person must look IDENTICAL to image 1 — same face, same hair colour and styling, same wardrobe, same skin tone and lighting. Only the pose and framing advance.',
     identityLines(photos, 2),
+    hasAmbiance ? AMBIANCE_LINE : '',
     lastBeat && `This still is the closing instant of the shot, frozen exactly here: ${lastBeat}`,
     context.camera && `(For framing/lighting context only — this still is a single frozen instant, not the whole camera move: ${context.camera})`,
     PRESERVE_MOTION_CUE,

@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { identityLines } from './seedance-prompt'
+import { identityLines, renderEndFrameEditPrompt, renderFirstFrameEditPrompt } from './seedance-prompt'
 import { namedPhotosFromRow } from './process-job'
-import type { KlingRecreateJobRow } from './types'
+import type { KlingRecreateJobRow, KlingVideoContext } from './types'
 
 const BASE_ROW: Pick<KlingRecreateJobRow, 'reference_image_url' | 'reference_photos' | 'is_script_only' | 'lead_character' | 'custom_prompt'> = {
   reference_image_url: null,
@@ -72,5 +72,27 @@ describe('identityLines', () => {
     const line = identityLines([{ name: 'Tiana' }, { name: 'Dianna' }], 2)
     assert.match(line, /must be visibly present in this frame/)
     assert.match(line, /do not omit any of them: Tiana, Dianna/)
+  })
+})
+
+const EMPTY_CONTEXT: KlingVideoContext = {
+  setting: '', hook: '', character_action: '', camera: '', speech: null,
+  duration_sec: null, aspect_ratio: '9:16', shots: [], prompt_mode: 'prompt',
+}
+
+describe('ambiance reference wiring', () => {
+  it('omits the ambiance line by default', () => {
+    const first = renderFirstFrameEditPrompt(EMPTY_CONTEXT, [{ name: 'Tiana' }])
+    const end = renderEndFrameEditPrompt(EMPTY_CONTEXT, [{ name: 'Tiana' }])
+    assert.doesNotMatch(first, /ambiance\/style reference/)
+    assert.doesNotMatch(end, /ambiance\/style reference/)
+  })
+
+  it('adds an explicit non-identity instruction for the ambiance photo when present', () => {
+    const first = renderFirstFrameEditPrompt(EMPTY_CONTEXT, [{ name: 'Tiana' }], true)
+    const end = renderEndFrameEditPrompt(EMPTY_CONTEXT, [{ name: 'Tiana' }, { name: 'Dianna' }], true)
+    assert.match(first, /The last image is a visual ambiance\/style reference only/)
+    assert.match(first, /Do NOT use it as anyone's face or body identity/)
+    assert.match(end, /The last image is a visual ambiance\/style reference only/)
   })
 })

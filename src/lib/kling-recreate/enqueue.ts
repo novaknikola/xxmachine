@@ -20,6 +20,7 @@ export async function enqueueKlingRecreateJobs(opts: {
   referenceImageUrl: string
   customPrompt?: string | null
   referencePhotos?: Record<string, string> | null
+  ambiancePhotoUrl?: string | null
 }): Promise<string[]> {
   const queueIds: string[] = []
 
@@ -27,8 +28,8 @@ export async function enqueueKlingRecreateJobs(opts: {
     const recreate = await one<{ id: string }>(
       `INSERT INTO kling_recreate_jobs
          (user_id, chat_id, source_url, reference_image_url, settings, kling_variant, status,
-          shot_mode, custom_prompt, reference_photos)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'pending', $7, $8, $9::jsonb)
+          shot_mode, custom_prompt, reference_photos, ambiance_photo_url)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'pending', $7, $8, $9::jsonb, $10)
        RETURNING id`,
       [
         opts.userId,
@@ -40,6 +41,7 @@ export async function enqueueKlingRecreateJobs(opts: {
         SHOT_MODE_DEFAULT,
         opts.customPrompt?.trim() || null,
         opts.referencePhotos && Object.keys(opts.referencePhotos).length ? JSON.stringify(opts.referencePhotos) : null,
+        opts.ambiancePhotoUrl?.trim() || null,
       ],
     )
     if (!recreate) throw new Error('Could not create kling_recreate_jobs row')
@@ -84,13 +86,14 @@ export async function enqueueKlingScriptOnlyJob(opts: {
    * to ask. Required only for the single-unnamed-photo fallback case. */
   leadCharacter?: string | null
   referencePhotos?: Record<string, string> | null
+  ambiancePhotoUrl?: string | null
 }): Promise<string> {
   const sourceUrl = `script:${Math.random().toString(36).slice(2, 10)}`
   const recreate = await one<{ id: string }>(
     `INSERT INTO kling_recreate_jobs
        (user_id, chat_id, source_url, reference_image_url, settings, kling_variant, status,
-        shot_mode, custom_prompt, is_script_only, lead_character, reference_photos)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'pending', $7, $8, true, $9, $10::jsonb)
+        shot_mode, custom_prompt, is_script_only, lead_character, reference_photos, ambiance_photo_url)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'pending', $7, $8, true, $9, $10::jsonb, $11)
      RETURNING id`,
     [
       opts.userId,
@@ -103,6 +106,7 @@ export async function enqueueKlingScriptOnlyJob(opts: {
       opts.script.trim(),
       opts.leadCharacter?.trim() || null,
       opts.referencePhotos && Object.keys(opts.referencePhotos).length ? JSON.stringify(opts.referencePhotos) : null,
+      opts.ambiancePhotoUrl?.trim() || null,
     ],
   )
   if (!recreate) throw new Error('Could not create kling_recreate_jobs row')
@@ -187,8 +191,8 @@ export async function enqueueKlingVariationJobs(opts: {
       `INSERT INTO kling_recreate_jobs
          (user_id, chat_id, source_url, video_url, duration_sec, reference_image_url,
           character_image_url, master_prompt, context, settings, kling_variant, status,
-          parent_job_id, variation_note, reference_photos)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, 'pending', $12, $13, $14::jsonb)
+          parent_job_id, variation_note, reference_photos, ambiance_photo_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, 'pending', $12, $13, $14::jsonb, $15)
        RETURNING id`,
       [
         opts.userId,
@@ -205,6 +209,7 @@ export async function enqueueKlingVariationJobs(opts: {
         draft.parentJobId,
         draft.variationNote,
         draft.referencePhotos ? JSON.stringify(draft.referencePhotos) : null,
+        draft.ambiancePhotoUrl,
       ],
     )
     if (!recreate) throw new Error('Could not create variation job')

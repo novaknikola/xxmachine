@@ -5,7 +5,8 @@ import { uploadBuffer } from '@/lib/supabase-storage'
 import { MAX_RECREATE_URLS, type KlingShotMode } from './types'
 import { variationAwaitingValue } from './variation'
 
-const PENDING_COLUMNS = 'chat_id, user_id, photo_url, urls, awaiting, shot_mode, custom_prompt, reference_photos'
+const PENDING_COLUMNS = 'chat_id, user_id, photo_url, urls, awaiting, shot_mode, custom_prompt, ' +
+  'reference_photos, ambiance_photo_url, pending_photo_url'
 
 export interface RecreatePending {
   chat_id: string | number
@@ -16,6 +17,11 @@ export interface RecreatePending {
   shot_mode: KlingShotMode | null
   custom_prompt: string | null
   reference_photos: Record<string, string>
+  ambiance_photo_url: string | null
+  /** A just-uploaded photo already saved to storage, waiting for its role
+   * answer ("which character, or ambiance?") — see holdPendingPhotoRole/
+   * resolvePendingPhotoRole. */
+  pending_photo_url: string | null
 }
 
 export async function getPending(chatId: number): Promise<RecreatePending | null> {
@@ -39,57 +45,78 @@ export async function upsertPending(chatId: number, userId: string): Promise<Rec
   return row!
 }
 
-export async function setPendingPhoto(chatId: number, userId: string, photoUrl: string): Promise<RecreatePending> {
-  const row = await one<RecreatePending>(
-    `INSERT INTO telegram_recreate_pending (chat_id, user_id, photo_url, updated_at)
-     VALUES ($1, $2, $3, now())
-     ON CONFLICT (chat_id) DO UPDATE SET
-       photo_url = EXCLUDED.photo_url,
-       user_id = EXCLUDED.user_id,
-       updated_at = now()
-     RETURNING ${PENDING_COLUMNS}`,
-    [chatId, userId, photoUrl],
-  )
-  return row!
-}
-
-export async function attachPhotoFromTelegram(opts: {
+/**
+ * Every uploaded photo, without exception, goes through this — download +
+ * upload it, park the URL in pending_photo_url, arm 'photo_role' awaiting.
+ * No fast path, no caption shortcut (2026-09-18, explicit user ask, after
+ * 3 straight failed attempts at relying on Telegram photo captions — most
+ * likely cause: an album/multi-select send doesn't attach a caption to
+ * every photo in it, so silently trusting a caption when present just
+ * papered over an unreliable signal instead of removing it). The only
+ * thing this ever produces is a held photo waiting on resolvePendingPhotoRole
+ * — it never writes photo_url/reference_photos/ambiance_photo_url itself.
+ */
+export async function holdPendingPhotoRole(opts: {
   chatId: number
   userId: string
   fileId: string
-}): Promise<RecreatePending> {
+}): Promise<void> {
   const { buffer, contentType, extension } = await downloadTelegramFile(opts.fileId)
   const path = `kling-recreate-refs/${opts.userId}/${Date.now()}.${extension}`
   const photoUrl = await uploadBuffer(buffer, path, contentType)
-  return setPendingPhoto(opts.chatId, opts.userId, photoUrl)
+  await query(
+    `INSERT INTO telegram_recreate_pending (chat_id, user_id, pending_photo_url, awaiting, updated_at)
+     VALUES ($1, $2, $3, 'photo_role', now())
+     ON CONFLICT (chat_id) DO UPDATE SET
+       pending_photo_url = EXCLUDED.pending_photo_url,
+       awaiting = 'photo_role',
+       user_id = EXCLUDED.user_id,
+       updated_at = now()`,
+    [opts.chatId, opts.userId, photoUrl],
+  )
 }
 
 /**
- * Multi-identity path: a photo sent WITH a caption is that character's
- * named reference, merged into reference_photos (a name->url map) instead
- * of overwriting the single photo_url. Upsert so this can be the very first
- * thing sent, same reasoning as setPendingCustomPrompt.
+ * Answer to "what does this photo represent?" — "ambient"/"ambiance"/
+ * "background"/"pozadina"/"ambijent" (case-insensitive) routes it to
+ * ambiance_photo_url (a style/environment reference, never an identity);
+ * anything else is taken as the character's name/role and merged into
+ * reference_photos. Always clears pending_photo_url/awaiting either way.
  */
-export async function attachNamedPhotoFromTelegram(opts: {
-  chatId: number
-  userId: string
-  fileId: string
-  name: string
-}): Promise<RecreatePending> {
-  const { buffer, contentType, extension } = await downloadTelegramFile(opts.fileId)
-  const path = `kling-recreate-refs/${opts.userId}/${Date.now()}.${extension}`
-  const photoUrl = await uploadBuffer(buffer, path, contentType)
-  const row = await one<RecreatePending>(
-    `INSERT INTO telegram_recreate_pending (chat_id, user_id, reference_photos, updated_at)
-     VALUES ($1, $2, jsonb_build_object($3::text, $4::text), now())
-     ON CONFLICT (chat_id) DO UPDATE SET
-       reference_photos = telegram_recreate_pending.reference_photos || jsonb_build_object($3::text, $4::text),
-       user_id = EXCLUDED.user_id,
-       updated_at = now()
-     RETURNING ${PENDING_COLUMNS}`,
-    [opts.chatId, opts.userId, opts.name, photoUrl],
+const AMBIANCE_WORDS = new Set(['ambient', 'ambiance', 'background', 'ambijent', 'pozadina'])
+
+export async function resolvePendingPhotoRole(
+  chatId: number,
+  userId: string,
+  answer: string,
+): Promise<{ kind: 'ambiance' | 'character'; label: string } | null> {
+  const pending = await getPending(chatId)
+  const photoUrl = pending?.pending_photo_url
+  if (!photoUrl) return null
+
+  const trimmed = answer.trim()
+  const isAmbiance = AMBIANCE_WORDS.has(trimmed.toLowerCase())
+
+  if (isAmbiance) {
+    await query(
+      `UPDATE telegram_recreate_pending
+          SET ambiance_photo_url = $2, pending_photo_url = NULL, awaiting = NULL,
+              user_id = $3, updated_at = now()
+        WHERE chat_id = $1`,
+      [chatId, photoUrl, userId],
+    )
+    return { kind: 'ambiance', label: trimmed }
+  }
+
+  await query(
+    `UPDATE telegram_recreate_pending
+        SET reference_photos = reference_photos || jsonb_build_object($2::text, $3::text),
+            pending_photo_url = NULL, awaiting = NULL,
+            user_id = $4, updated_at = now()
+      WHERE chat_id = $1`,
+    [chatId, trimmed, photoUrl, userId],
   )
-  return row!
+  return { kind: 'character', label: trimmed }
 }
 
 export interface AddUrlsResult {
@@ -158,7 +185,7 @@ export async function setPendingShotMode(chatId: number, mode: KlingShotMode): P
  * Optional custom instruction / manual context, collected before Recreate
  * fires. Upsert (not a plain UPDATE) so a voice note or typed note sent
  * BEFORE any photo/URL — nothing to update yet — still lands: it creates the
- * pending row early, the same way setPendingPhoto already can.
+ * pending row early, the same way holdPendingPhotoRole already can.
  */
 export async function setPendingCustomPrompt(chatId: number, userId: string, text: string | null): Promise<void> {
   await query(

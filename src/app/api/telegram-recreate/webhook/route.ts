@@ -6,8 +6,8 @@ import {
 } from '@/lib/telegram-recreate'
 import { transcribeVoiceNote } from '@/lib/grok'
 import {
-  addUrlsToPending, attachNamedPhotoFromTelegram, attachPhotoFromTelegram, claimPending,
-  claimPendingForScript, clearPending, getPending, setAwaiting, setAwaitingVariation,
+  addUrlsToPending, claimPending, claimPendingForScript, clearPending, getPending,
+  holdPendingPhotoRole, resolvePendingPhotoRole, setAwaiting, setAwaitingVariation,
   setPendingCustomPrompt,
 } from '@/lib/kling-recreate/pending'
 import {
@@ -45,7 +45,7 @@ const HELP = [
   'I scrape the reel, describe it at ~2fps, build a character still, confirm the dialogue attribution with you, then animate it with Seedance 2.5.',
   '',
   'No reel? Send a photo + a written or spoken scene script instead (setting, action, dialogue) and I’ll generate the whole video from that alone.',
-  'More than one real person in the scene? Send each one’s photo separately, captioned with how that character is described (e.g. a photo captioned "Tiana", or "the maid").',
+  'Every photo you send, I’ll ask what it represents — a character’s name/role, or "ambiance" if it’s just a style/setting reference, not a person. More than one real person in the scene? Just send each photo separately and answer that question each time.',
   '',
   '/ideas — recent banked niche ideas (not rendered)',
   '/cancel — clear the current batch',
@@ -86,6 +86,7 @@ function batchStatusText(opts: {
   urls: string[]
   customPrompt?: string | null
   namedPhotoNames?: string[]
+  hasAmbiance?: boolean
 }): string {
   const photo = opts.namedPhotoNames?.length
     ? `📸 Characters: ${opts.namedPhotoNames.map(n => escapeHtml(n)).join(', ')}`
@@ -94,6 +95,7 @@ function batchStatusText(opts: {
       : opts.defaultPhoto
         ? '📸 Photo: using account default'
         : '📸 Photo: missing — send one, or set a default in dashboard Settings'
+  const ambiance = opts.hasAmbiance ? '🖼️ Ambiance reference: attached' : null
   const script = opts.customPrompt?.trim()
     ? `📝 Script: ${escapeHtml(opts.customPrompt.trim().slice(0, 60))}${opts.customPrompt.trim().length > 60 ? '…' : ''}`
     : null
@@ -105,6 +107,7 @@ function batchStatusText(opts: {
   return [
     '<b>Recreate batch</b>',
     photo,
+    ambiance,
     script,
     `🔗 Reels: ${opts.urls.length}`,
     reelsLine,
@@ -145,7 +148,10 @@ async function showBatch(chatId: number, userId: string) {
 
   await sendText(
     chatId,
-    batchStatusText({ photoUrl, defaultPhoto: hasDefault, urls, customPrompt: pending?.custom_prompt, namedPhotoNames }),
+    batchStatusText({
+      photoUrl, defaultPhoto: hasDefault, urls, customPrompt: pending?.custom_prompt, namedPhotoNames,
+      hasAmbiance: !!pending?.ambiance_photo_url,
+    }),
     ready ? confirmRecreateKeyboard(urls.length) : (scriptOnlyReady ? scriptOnlyKeyboard() : undefined),
   )
 }
@@ -247,6 +253,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true })
     }
 
+    /**
+     * Every photo, without exception, is held and gets an explicit role
+     * question — no caption shortcut, no "first photo is free" fast path
+     * (2026-09-18, explicit user ask after 3 straight failed attempts at
+     * trusting Telegram photo captions: an album/multi-select send doesn't
+     * reliably attach a caption to every photo in it, so silently trusting
+     * one when present just papered over an unreliable signal). This is
+     * the ONLY place a photo is ever recorded now — nothing downstream is
+     * allowed to assume a photo's role from anything sent earlier.
+     */
     if (message?.photo?.length) {
       const pendingPhoto = await getPending(chatId)
       if (isVariationAwaiting(pendingPhoto?.awaiting)) {
@@ -257,13 +273,12 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true })
       }
       const largest = message.photo[message.photo.length - 1]
-      const photoName = (message.caption as string | undefined)?.trim()
-      if (photoName) {
-        await attachNamedPhotoFromTelegram({ chatId, userId, fileId: largest.file_id, name: photoName })
-      } else {
-        await attachPhotoFromTelegram({ chatId, userId, fileId: largest.file_id })
-      }
-      await showBatch(chatId, userId)
+      await holdPendingPhotoRole({ chatId, userId, fileId: largest.file_id })
+      await sendText(
+        chatId,
+        '🎭 Šta predstavlja ova fotografija? Otkucaj ime lika (npr. "Tiana"), ili napiši "ambijent" ' +
+          'ako je ovo samo referenca za izgled/pozadinu scene.',
+      )
       return NextResponse.json({ ok: true })
     }
 
@@ -279,7 +294,7 @@ export async function POST(req: NextRequest) {
      * tapping "Add prompt" got silently ignored (confirmed live, no pending
      * row existed yet because they sent it before any URL/photo). Works at
      * any point in the batch, including before a photo/URL exists at all —
-     * setPendingCustomPrompt upserts, same as setPendingPhoto.
+     * setPendingCustomPrompt upserts, same as holdPendingPhotoRole.
      */
     if (message?.voice) {
       try {
@@ -302,6 +317,24 @@ export async function POST(req: NextRequest) {
 
     if (message?.text && !message.text.startsWith('/')) {
       const pending = await getPending(chatId)
+
+      if (pending?.awaiting === 'photo_role') {
+        const resolved = await resolvePendingPhotoRole(chatId, userId, message.text)
+        if (!resolved) {
+          await setAwaiting(chatId, null)
+          await sendText(chatId, 'That photo expired — send it again.')
+          return NextResponse.json({ ok: true })
+        }
+        await sendText(
+          chatId,
+          resolved.kind === 'ambiance'
+            ? '✅ Sačuvano kao ambient/scene reference.'
+            : `✅ Sačuvano: ${escapeHtml(resolved.label)}`,
+        )
+        await showBatch(chatId, userId)
+        return NextResponse.json({ ok: true })
+      }
+
       if (isVariationAwaiting(pending?.awaiting)) {
         const parentId = variationAwaitingJobId(pending.awaiting)
         const parsed = parseVariationRequest(message.text)
@@ -365,6 +398,7 @@ export async function POST(req: NextRequest) {
         await enqueueKlingScriptOnlyJob({
           userId, chatId, referenceImageUrl: reference,
           script: claimed.custom_prompt!, leadCharacter, referencePhotos: claimed.reference_photos,
+          ambiancePhotoUrl: claimed.ambiance_photo_url,
         })
         await sendText(
           chatId,
@@ -446,6 +480,7 @@ export async function POST(req: NextRequest) {
           await enqueueKlingScriptOnlyJob({
             userId, chatId, referenceImageUrl: reference,
             script: claimed.custom_prompt!, referencePhotos: claimed.reference_photos,
+            ambiancePhotoUrl: claimed.ambiance_photo_url,
           })
           await sendText(
             chatId,
@@ -564,6 +599,7 @@ export async function POST(req: NextRequest) {
           userId, chatId, urls, referenceImageUrl: reference,
           customPrompt: pending.custom_prompt,
           referencePhotos: pending.reference_photos,
+          ambiancePhotoUrl: pending.ambiance_photo_url,
         })
         await sendText(
           chatId,

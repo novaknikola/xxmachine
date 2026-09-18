@@ -171,6 +171,10 @@ export interface KlingRecreateJobRow {
    * When absent/empty, reference_image_url is the single/default identity —
    * see namedPhotosFromRow in process-job.ts. */
   reference_photos?: Record<string, string> | null
+  /** A style/environment reference photo — never an identity, matched
+   * visually for lighting/setting only. Sent as the LAST image in both
+   * Nano Banana Pro calls when present. */
+  ambiance_photo_url?: string | null
 }
 
 export const MAX_RECREATE_URLS = 30
