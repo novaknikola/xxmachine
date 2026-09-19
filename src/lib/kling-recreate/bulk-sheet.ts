@@ -95,10 +95,15 @@ export interface BulkQueueRow {
 }
 
 /**
- * Unclaimed (no Job ID yet), valid (a reel URL or script, plus at least one
- * character photo) rows, oldest-first, capped at MAX_BULK_ROWS. A row with
- * both a Reel URL and a Script has the Reel URL win — the caller doesn't
- * need to choose.
+ * Unclaimed (no Job ID yet), valid (a reel URL or script) rows, oldest-
+ * first, capped at MAX_BULK_ROWS. A row with both a Reel URL and a Script
+ * has the Reel URL win — the caller doesn't need to choose.
+ *
+ * A row left with zero Character columns is NOT skipped — an empty
+ * `characters` array is a real, expected result meaning "default to the
+ * user's last job's identity", resolved by the caller (enqueueBulkRow in
+ * the webhook route, which has DB access this module doesn't) rather than
+ * here. Same for a blank Ambiance Drive URL.
  */
 export async function readBulkQueueRows(): Promise<BulkQueueRow[]> {
   if (!SHEET_ID) return []
@@ -121,7 +126,6 @@ export async function readBulkQueueRows(): Promise<BulkQueueRow[]> {
       const driveUrl = get(urlIdx)
       if (name && driveUrl) characters.push({ name, driveUrl })
     }
-    if (!characters.length) return
 
     rows.push({
       rowNumber: i + 2,

@@ -86,6 +86,26 @@ async function activeDialogueJob(userId: string, chatId: number): Promise<{ id: 
 }
 
 /**
+ * Fallback identity for a Bulk Queue row that leaves its Character columns
+ * (or Ambiance Drive URL) blank — the most recent job's reference photos/
+ * ambiance for this user, reused as-is (already hosted, no re-upload).
+ * Explicit user ask 2026-09-19: "don't make me paste the same photos into
+ * every row" — one query per row that needs it, cheap at MAX_BULK_ROWS.
+ */
+async function lastJobDefaults(userId: string): Promise<{
+  referencePhotos: Record<string, string> | null
+  ambiancePhotoUrl: string | null
+}> {
+  const row = await one<{ reference_photos: Record<string, string> | null; ambiance_photo_url: string | null }>(
+    `SELECT reference_photos, ambiance_photo_url FROM kling_recreate_jobs
+      WHERE user_id = $1 AND reference_photos IS NOT NULL AND reference_photos <> '{}'::jsonb
+      ORDER BY created_at DESC LIMIT 1`,
+    [userId],
+  )
+  return { referencePhotos: row?.reference_photos ?? null, ambiancePhotoUrl: row?.ambiance_photo_url ?? null }
+}
+
+/**
  * Resolves every Drive photo for one bulk-queue row (catches and reports a
  * failure for THIS row only — one bad/private Drive link must never block
  * the other rows in the same /bulk trigger), then enqueues it through the
@@ -95,16 +115,28 @@ async function activeDialogueJob(userId: string, chatId: number): Promise<{ id: 
  */
 async function enqueueBulkRow(userId: string, chatId: number, row: BulkQueueRow): Promise<void> {
   try {
-    const referencePhotos: Record<string, string> = {}
+    let referencePhotos: Record<string, string> = {}
     for (const char of row.characters) {
       referencePhotos[char.name] = await resolveDrivePhoto(
         char.driveUrl,
         `kling-recreate-refs/${userId}/bulk-${row.rowNumber}-${encodeURIComponent(char.name)}-${Date.now()}.jpg`,
       )
     }
-    const ambiancePhotoUrl = row.ambianceDriveUrl
+    let ambiancePhotoUrl = row.ambianceDriveUrl
       ? await resolveDrivePhoto(row.ambianceDriveUrl, `kling-recreate-refs/${userId}/bulk-${row.rowNumber}-ambiance-${Date.now()}.jpg`)
       : null
+
+    // Blank Character columns -> reuse the last job's identity; a blank
+    // Ambiance Drive URL falls back the same way, independently — a row
+    // can specify its own characters and still want the usual ambiance.
+    if (!Object.keys(referencePhotos).length || !ambiancePhotoUrl) {
+      const defaults = await lastJobDefaults(userId)
+      if (!Object.keys(referencePhotos).length) {
+        if (!defaults.referencePhotos) throw new Error('No characters in this row, and no previous job to default characters from')
+        referencePhotos = defaults.referencePhotos
+      }
+      if (!ambiancePhotoUrl) ambiancePhotoUrl = defaults.ambiancePhotoUrl
+    }
     const primaryUrl = Object.values(referencePhotos)[0]
     const sourceLabel = `Row ${row.rowNumber}`
     const stillModel = parseBulkStillModel(row.stillModel)
