@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { one, query, rows } from '@/lib/db'
 import {
   sendText, answerCallbackQuery, editMessageReplyMarkup,
-  confirmRecreateKeyboard, stillPromptChoiceKeyboard, scriptOnlyKeyboard, downloadTelegramVoice,
+  confirmRecreateKeyboard, stillPromptChoiceKeyboard, scriptOnlyKeyboard, bulkConfirmKeyboard,
+  downloadTelegramVoice,
 } from '@/lib/telegram-recreate'
 import { transcribeVoiceNote } from '@/lib/grok'
 import {
@@ -20,6 +21,9 @@ import {
   planVariationCallback,
   variationAwaitingJobId,
 } from '@/lib/kling-recreate/variation'
+import {
+  readBulkQueueRows, resolveDrivePhoto, writeBulkRowStatus, type BulkQueueRow,
+} from '@/lib/kling-recreate/bulk-sheet'
 import type { KlingRecreateJobRow } from '@/lib/kling-recreate/types'
 
 /**
@@ -47,6 +51,7 @@ const HELP = [
   'No reel? Send a photo + a written or spoken scene script instead (setting, action, dialogue) and I’ll generate the whole video from that alone.',
   'Every photo you send, I’ll ask what it represents — a character’s name/role, or "ambiance" if it’s just a style/setting reference, not a person. More than one real person in the scene? Just send each photo separately and answer that question each time.',
   '',
+  '/bulk — prep rows in the "Kling Bulk Queue" sheet tab (Reel URL or Script, up to 3 character Drive photos + ambiance), then run this to queue up to 5 at once',
   '/ideas — recent banked niche ideas (not rendered)',
   '/cancel — clear the current batch',
 ].join('\n')
@@ -78,6 +83,50 @@ async function activeDialogueJob(userId: string, chatId: number): Promise<{ id: 
       ORDER BY updated_at DESC LIMIT 1`,
     [userId, chatId],
   )
+}
+
+/**
+ * Resolves every Drive photo for one bulk-queue row (catches and reports a
+ * failure for THIS row only — one bad/private Drive link must never block
+ * the other rows in the same /bulk trigger), then enqueues it through the
+ * exact same enqueueKlingRecreateJobs/enqueueKlingScriptOnlyJob path a
+ * normal Telegram batch uses. Writes Job ID back immediately to claim the
+ * row before moving to the next one.
+ */
+async function enqueueBulkRow(userId: string, chatId: number, row: BulkQueueRow): Promise<void> {
+  try {
+    const referencePhotos: Record<string, string> = {}
+    for (const char of row.characters) {
+      referencePhotos[char.name] = await resolveDrivePhoto(
+        char.driveUrl,
+        `kling-recreate-refs/${userId}/bulk-${row.rowNumber}-${encodeURIComponent(char.name)}-${Date.now()}.jpg`,
+      )
+    }
+    const ambiancePhotoUrl = row.ambianceDriveUrl
+      ? await resolveDrivePhoto(row.ambianceDriveUrl, `kling-recreate-refs/${userId}/bulk-${row.rowNumber}-ambiance-${Date.now()}.jpg`)
+      : null
+    const primaryUrl = Object.values(referencePhotos)[0]
+    const sourceLabel = `Row ${row.rowNumber}`
+
+    if (row.reelUrl) {
+      const ids = await enqueueKlingRecreateJobs({
+        userId, chatId, urls: [row.reelUrl], referenceImageUrl: primaryUrl,
+        customPrompt: row.instruction, referencePhotos, ambiancePhotoUrl,
+        sourceLabel, sheetRow: row.rowNumber,
+      })
+      await writeBulkRowStatus(row.rowNumber, { status: 'queued', jobId: ids[0] ?? '' })
+    } else if (row.script) {
+      const jobId = await enqueueKlingScriptOnlyJob({
+        userId, chatId, referenceImageUrl: primaryUrl, script: row.script,
+        referencePhotos, ambiancePhotoUrl, sourceLabel, sheetRow: row.rowNumber,
+      })
+      await writeBulkRowStatus(row.rowNumber, { status: 'queued', jobId })
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(`[kling-recreate] bulk row ${row.rowNumber} failed:`, err)
+    await writeBulkRowStatus(row.rowNumber, { status: 'failed', error: message.slice(0, 300) }).catch(() => {})
+  }
 }
 
 function batchStatusText(opts: {
@@ -222,15 +271,22 @@ export async function POST(req: NextRequest) {
       // URL text as a "dialogue correction" long after /cancel + /start.
       // Retire any such job for this chat too — no paid action fires from
       // this, it only stops it from intercepting anything further.
-      const retired = await query(
+      const retired = await rows<{ sheet_row: number | null }>(
         `UPDATE kling_recreate_jobs SET status = 'failed', error = 'Cancelled by user', updated_at = now()
-          WHERE chat_id = $1 AND status IN ('awaiting_still_approval', 'awaiting_dialogue_approval', 'awaiting_prompt_approval')`,
+          WHERE chat_id = $1 AND status IN ('awaiting_still_approval', 'awaiting_dialogue_approval', 'awaiting_prompt_approval')
+          RETURNING sheet_row`,
         [chatId],
       )
+      if (retired.length) {
+        const { writeBulkRowStatus } = await import('@/lib/kling-recreate/bulk-sheet')
+        for (const r of retired) {
+          if (r.sheet_row) await writeBulkRowStatus(r.sheet_row, { status: 'failed', error: 'Cancelled by user' }).catch(() => {})
+        }
+      }
       await sendText(
         chatId,
-        (retired.rowCount ?? 0) > 0
-          ? `✖️ Batch cleared, and ${retired.rowCount} pending job(s) waiting on your approval were cancelled too.`
+        retired.length > 0
+          ? `✖️ Batch cleared, and ${retired.length} pending job(s) waiting on your approval were cancelled too.`
           : '✖️ Batch cleared.',
       )
       return NextResponse.json({ ok: true })
@@ -250,6 +306,42 @@ export async function POST(req: NextRequest) {
         `${i + 1}. <b>${escapeHtml(idea.niche)}</b>\n${escapeHtml(idea.prompt.slice(0, 400))}`,
       )
       await sendText(chatId, `<b>Recent ideas</b>\n\n${lines.join('\n\n')}`)
+      return NextResponse.json({ ok: true })
+    }
+
+    /**
+     * Bulk trigger — read the "Kling Bulk Queue" sheet tab, show every
+     * unclaimed row (a Reel URL or Script, plus at least one character
+     * Drive photo, no Job ID yet) as a summary, and require one explicit
+     * tap before anything fires (kr:bulkgo below) — the conscious spend
+     * gate the user asked for instead of an automatic poller.
+     */
+    if (message?.text?.startsWith('/bulk')) {
+      let bulkRows: BulkQueueRow[]
+      try {
+        bulkRows = await readBulkQueueRows()
+      } catch (err) {
+        console.error('[kling-recreate] bulk sheet read failed:', err)
+        await sendText(chatId, '⚠️ Could not read the "Kling Bulk Queue" sheet tab — check it\'s shared with the service account and try again.')
+        return NextResponse.json({ ok: true })
+      }
+      if (!bulkRows.length) {
+        await sendText(
+          chatId,
+          'No new rows found in the "Kling Bulk Queue" sheet tab (need a Reel URL or Script, plus at least one character photo, and no Job ID yet).',
+        )
+        return NextResponse.json({ ok: true })
+      }
+      const lines = bulkRows.map(r => {
+        const kind = r.reelUrl ? 'reel' : 'script'
+        const names = r.characters.map(c => c.name).join(', ')
+        return `Row ${r.rowNumber} (${kind}, ${names}${r.ambianceDriveUrl ? ' + ambiance' : ''})`
+      })
+      await sendText(
+        chatId,
+        `📋 Found ${bulkRows.length} row(s) ready:\n${lines.map(l => `• ${escapeHtml(l)}`).join('\n')}\n\nQueue all of them?`,
+        bulkConfirmKeyboard(bulkRows.length),
+      )
       return NextResponse.json({ ok: true })
     }
 
@@ -456,6 +548,32 @@ export async function POST(req: NextRequest) {
         await clearPending(chatId)
         await answerCallbackQuery(cb.id, 'Cancelled')
         if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
+        return NextResponse.json({ ok: true })
+      }
+
+      if (parts[1] === 'bulkgo') {
+        await answerCallbackQuery(cb.id, 'Queuing…')
+        if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
+        let bulkRows: BulkQueueRow[]
+        try {
+          bulkRows = await readBulkQueueRows()
+        } catch (err) {
+          console.error('[kling-recreate] bulk sheet read failed:', err)
+          await sendText(chatId, '⚠️ Could not re-read the sheet — try /bulk again.')
+          return NextResponse.json({ ok: true })
+        }
+        if (!bulkRows.length) {
+          await sendText(chatId, 'Those rows are gone now (already claimed or edited) — run /bulk again.')
+          return NextResponse.json({ ok: true })
+        }
+        for (const row of bulkRows) {
+          await enqueueBulkRow(userId, chatId, row)
+        }
+        await sendText(
+          chatId,
+          `🎬 Queued ${bulkRows.length} row${bulkRows.length === 1 ? '' : 's'} from the sheet. ` +
+            `I’ll notify you here as each one needs still/dialogue/prompt approval — look for the "Row N —" prefix.`,
+        )
         return NextResponse.json({ ok: true })
       }
 

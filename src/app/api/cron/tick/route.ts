@@ -198,8 +198,8 @@ export async function GET(req: NextRequest) {
       )
       if (failed.rowCount) {
         if (job.job_type === 'kling_recreate_v1') {
-          const rec = await one<{ chat_id: string | number | null }>(
-            `SELECT chat_id FROM kling_recreate_jobs WHERE queue_job_id = $1`,
+          const rec = await one<{ chat_id: string | number | null; sheet_row: number | null; source_label: string | null }>(
+            `SELECT chat_id, sheet_row, source_label FROM kling_recreate_jobs WHERE queue_job_id = $1`,
             [job.id],
           )
           await query(
@@ -207,9 +207,14 @@ export async function GET(req: NextRequest) {
               WHERE queue_job_id = $1 AND status <> 'done'`,
             [job.id, STALE_JOB_ERROR],
           ).catch(() => {})
+          if (rec?.sheet_row) {
+            const { writeBulkRowStatus } = await import('@/lib/kling-recreate/bulk-sheet')
+            await writeBulkRowStatus(rec.sheet_row, { status: 'failed', error: STALE_JOB_ERROR }).catch(() => {})
+          }
           if (rec?.chat_id != null) {
             const { sendText } = await import('@/lib/telegram-recreate')
-            await sendText(rec.chat_id, `❌ ${STALE_JOB_ERROR}`).catch(() => {})
+            const label = rec.source_label ? `${rec.source_label} — ` : ''
+            await sendText(rec.chat_id, `${label}❌ ${STALE_JOB_ERROR}`).catch(() => {})
           }
         } else {
           await notifyMonitorUser(job.user_id, `❌ ${STALE_JOB_ERROR}`).catch(() => {})

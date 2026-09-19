@@ -126,6 +126,27 @@ async function notify(chatId: number | string | null | undefined, text: string, 
   )
 }
 
+/** Bulk-sheet jobs only (row.source_label set) — prefixes an approval-gate
+ * message so it's clear which of several simultaneous jobs it belongs to. */
+function labelFor(row: Pick<KlingRecreateJobRow, 'source_label'>): string {
+  return row.source_label ? `${escapeHtml(row.source_label)} — ` : ''
+}
+
+/** Bulk-sheet jobs only (row.sheet_row set) — mirrors the job's status back
+ * onto its source Sheet row so the user can see progress without checking
+ * Telegram. Best-effort: writeBulkRowStatus already swallows its own
+ * errors, this just skips the call entirely for ordinary Telegram jobs. */
+async function syncBulkRowSafe(row: Pick<KlingRecreateJobRow, 'sheet_row'>, fields: {
+  status?: string
+  jobId?: string
+  videoUrl?: string
+  error?: string
+}): Promise<void> {
+  if (!row.sheet_row) return
+  const { writeBulkRowStatus } = await import('./bulk-sheet')
+  await writeBulkRowStatus(row.sheet_row, fields)
+}
+
 async function sendDoneVideo(
   chatId: number | string | null | undefined,
   jobId: string,
@@ -337,6 +358,7 @@ export async function processKlingRecreateJob(opts: {
   if (!masterPrompt && row.is_script_only) {
     await updateRecreate(row.id, { status: 'analyzing' })
     await heartbeat(opts.queueJobId, 'analyzing', { progress: 15 })
+    await syncBulkRowSafe(row, { status: 'analyzing' })
 
     const styleReference = await loadStyleReferenceContext(opts.userId)
     const analysis = await analyzeScriptOnly({
@@ -362,6 +384,7 @@ export async function processKlingRecreateJob(opts: {
     if (!videoUrl) throw new Error('Missing video_url for a non-script-only job')
     await updateRecreate(row.id, { status: 'analyzing' })
     await heartbeat(opts.queueJobId, 'analyzing', { progress: 15 })
+    await syncBulkRowSafe(row, { status: 'analyzing' })
 
     const extracted = await extractOneFpsFrames(videoUrl, `kling-recreate/${opts.userId}/${row.id}/frames`)
     sourceDuration = extracted.duration
@@ -418,6 +441,7 @@ export async function processKlingRecreateJob(opts: {
 
   await updateRecreate(row.id, { status: 'still' })
   await heartbeat(opts.queueJobId, 'still', { progress: 55 })
+  await syncBulkRowSafe(row, { status: 'still' })
   const { firstFrameUrl, endFrameUrl, firstFramePrompt, lastFramePrompt } = await generateStills({ row, context, apiKey })
   await updateRecreate(row.id, {
     character_image_url: firstFrameUrl,
@@ -427,14 +451,15 @@ export async function processKlingRecreateJob(opts: {
     status: 'awaiting_still_approval',
   })
   await heartbeat(opts.queueJobId, 'awaiting_still_approval', { progress: 65 })
+  await syncBulkRowSafe(row, { status: 'awaiting still approval' })
 
   if (chatId != null) {
     try {
-      await sendMediaGroup(chatId, [firstFrameUrl, endFrameUrl], '🖼️ First frame + end frame ready — review before Seedance.')
+      await sendMediaGroup(chatId, [firstFrameUrl, endFrameUrl], `${labelFor(row)}🖼️ First frame + end frame ready — review before Seedance.`)
     } catch {
-      await notify(chatId, '🖼️ First frame + end frame ready — review before Seedance.')
+      await notify(chatId, `${labelFor(row)}🖼️ First frame + end frame ready — review before Seedance.`)
     }
-    await notify(chatId, 'Approve both to check the dialogue attribution, or regenerate.', stillApprovalKeyboard(row.id))
+    await notify(chatId, `${labelFor(row)}Approve both to check the dialogue attribution, or regenerate.`, stillApprovalKeyboard(row.id))
   }
 
   return { ok: true, awaitingApproval: true }
@@ -470,9 +495,10 @@ async function approveStill(opts: {
 
   await updateRecreate(row.id, { status: 'awaiting_dialogue_approval' })
   await heartbeat(opts.queueJobId, 'awaiting_dialogue_approval', { progress: 72 })
+  await syncBulkRowSafe(row, { status: 'awaiting dialogue approval' })
   await notify(
     chatId,
-    `🗣️ <b>Who says what</b> — check this before I build the prompt:\n\n${escapeHtml(summary)}\n\n` +
+    `${labelFor(row)}🗣️ <b>Who says what</b> — check this before I build the prompt:\n\n${escapeHtml(summary)}\n\n` +
       `Looks right? Tap Confirm. Wrong? Just reply with the correction (e.g. "host says line 1, guest says line 2").`,
     dialogueApprovalKeyboard(row.id),
   )
@@ -509,11 +535,11 @@ async function regenerateStill(opts: {
 
   if (chatId != null) {
     try {
-      await sendMediaGroup(chatId, [firstFrameUrl, endFrameUrl], '🖼️ Regenerated — first frame + end frame.')
+      await sendMediaGroup(chatId, [firstFrameUrl, endFrameUrl], `${labelFor(row)}🖼️ Regenerated — first frame + end frame.`)
     } catch {
-      await notify(chatId, '🖼️ Regenerated — first frame + end frame.')
+      await notify(chatId, `${labelFor(row)}🖼️ Regenerated — first frame + end frame.`)
     }
-    await notify(chatId, 'Approve both to check the dialogue attribution, or regenerate again.', stillApprovalKeyboard(row.id))
+    await notify(chatId, `${labelFor(row)}Approve both to check the dialogue attribution, or regenerate again.`, stillApprovalKeyboard(row.id))
   }
   return { ok: true, awaitingApproval: true }
 }
@@ -558,9 +584,10 @@ async function approveDialogue(opts: {
     kling_variant: SEEDANCE_VARIANT,
   })
   await heartbeat(opts.queueJobId, 'awaiting_prompt_approval', { progress: 82 })
+  await syncBulkRowSafe(row, { status: 'awaiting prompt approval' })
   await notify(
     chatId,
-    formatSeedancePromptSummary({
+    labelFor(row) + formatSeedancePromptSummary({
       prompt, durationSec: seedanceInput.duration ?? durationForSeedance(sourceDuration),
       resolution: seedanceInput.resolution ?? SEEDANCE_RESOLUTION_DEFAULT,
     }),
@@ -738,6 +765,7 @@ async function finishSeedanceRender(opts: {
     kling_request: existingRequestId ? { ...payload, _prediction_id: existingRequestId } : payload,
   })
   await heartbeat(opts.queueJobId, 'rendering', { progress: 88 })
+  await syncBulkRowSafe(row, { status: 'rendering' })
 
   const result = await generateSeedanceI2V(seedanceInput, opts.apiKey, {
     existingRequestId,
@@ -763,10 +791,11 @@ async function finishSeedanceRender(opts: {
     jobId: row.id, sourceUrl: row.source_url, durationSec: opts.sourceDuration,
     context: opts.context, masterPrompt: opts.masterPrompt, status: 'done', klingVideoUrl: hosted,
   })
+  await syncBulkRowSafe(row, { status: 'done', videoUrl: hosted })
 
   const note = (row.variation_note ?? '').trim()
   const caption =
-    `✅ Seedance 2.5 · ${durationForSeedance(opts.sourceDuration)}s` +
+    `${labelFor(row)}✅ Seedance 2.5 · ${durationForSeedance(opts.sourceDuration)}s` +
     `${note ? ` · ${escapeHtml(note)}` : ''}`
   await sendDoneVideo(opts.chatId, row.id, hosted, caption)
 

@@ -176,6 +176,18 @@ export function confirmRecreateKeyboard(urlCount: number) {
   }
 }
 
+/** Shown after /bulk finds unclaimed rows in the "Kling Bulk Queue" sheet
+ * tab — the conscious spend gate before any of them actually fire. */
+export function bulkConfirmKeyboard(rowCount: number) {
+  const n = Math.max(1, rowCount)
+  return {
+    inline_keyboard: [[
+      { text: `▶️ Queue ${n} row${n === 1 ? '' : 's'}`, callback_data: 'kr:bulkgo' },
+      { text: '✖️ Cancel', callback_data: 'kr:cancel' },
+    ]],
+  }
+}
+
 /** Offered when a photo + a manual script exist but no reel URL has been
  * pasted — generate the whole video from the script alone, no source reel. */
 export function scriptOnlyKeyboard() {
