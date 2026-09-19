@@ -27,7 +27,7 @@ export const SEEDANCE_DURATION_MIN = 4
 export const SEEDANCE_DURATION_MAX = 30
 export const SEEDANCE_SPICY_DURATION_MAX = 15
 export const SEEDANCE_DURATION_DEFAULT = 5
-export const SEEDANCE_RESOLUTION_DEFAULT: SeedanceResolution = '720p'
+export const SEEDANCE_RESOLUTION_DEFAULT: SeedanceResolution = '480p'
 export const SEEDANCE_GENERATE_AUDIO_DEFAULT = true
 
 export interface SeedanceI2VInput {

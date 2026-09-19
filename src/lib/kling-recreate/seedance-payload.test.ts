@@ -38,7 +38,7 @@ describe('buildSeedanceI2VPayload', () => {
     }, META_OK)
     assert.equal(payload.image, IMAGE)
     assert.equal(payload.duration, 5)
-    assert.equal(payload.resolution, '720p')
+    assert.equal(payload.resolution, '480p')
     assert.equal(payload.generate_audio, true)
     // Kling-only fields must never appear on a Seedance payload.
     assert.equal('cfg_scale' in payload, false)
