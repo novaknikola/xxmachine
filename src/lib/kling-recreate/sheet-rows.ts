@@ -20,6 +20,8 @@ export const KLING_ANALYSIS_HEADERS = [
   'Master prompt',
   'Prompt mode',
   'Shots',
+  'First Frame',
+  'End Frame',
   'Status',
   'Kling video URL',
 ] as const
@@ -102,6 +104,17 @@ export interface AnalysisSheetInput {
   masterPrompt: string | null
   status: string
   klingVideoUrl: string | null
+  firstFrameUrl?: string | null
+  endFrameUrl?: string | null
+}
+
+/** A real rendered thumbnail in the cell, not just a link — requires the
+ * write call to use valueInputOption=USER_ENTERED or Sheets stores this as
+ * literal text instead of evaluating it. Escapes the one character (") that
+ * would otherwise break out of the formula's string literal. */
+export function imageFormula(url: string | null | undefined): string {
+  if (!url?.trim()) return ''
+  return `=IMAGE("${url.trim().replace(/"/g, '""')}")`
 }
 
 export function buildAnalysisSheetRow(input: AnalysisSheetInput): string[] {
@@ -122,6 +135,8 @@ export function buildAnalysisSheetRow(input: AnalysisSheetInput): string[] {
     input.masterPrompt ?? '',
     ctx.prompt_mode ?? '',
     formatShots(ctx.shots),
+    imageFormula(input.firstFrameUrl),
+    imageFormula(input.endFrameUrl),
     input.status,
     input.klingVideoUrl ?? '',
   ]

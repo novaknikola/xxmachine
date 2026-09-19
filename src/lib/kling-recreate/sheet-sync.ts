@@ -169,6 +169,8 @@ export async function upsertKlingAnalysisSheet(opts: {
   status: string
   klingVideoUrl: string | null
   addedAt?: string
+  firstFrameUrl?: string | null
+  endFrameUrl?: string | null
 }): Promise<void> {
   if (!SHEET_ID) return
   await ensureTab(KLING_ANALYSIS_TAB, KLING_ANALYSIS_HEADERS)
@@ -190,11 +192,17 @@ export async function upsertKlingAnalysisSheet(opts: {
     masterPrompt: opts.masterPrompt,
     status: opts.status,
     klingVideoUrl: opts.klingVideoUrl,
+    firstFrameUrl: opts.firstFrameUrl,
+    endFrameUrl: opts.endFrameUrl,
   })]
 
+  // USER_ENTERED (not RAW) so the =IMAGE(...) formula in the First/End Frame
+  // columns actually renders a thumbnail instead of being stored as literal
+  // text — plain data in the other columns is unaffected, USER_ENTERED just
+  // means "parse the way a human typing would".
   if (rowNumber) {
     const res = await sheetsRequest(
-      `${SHEET_ID}/values/${encodeURIComponent(`${KLING_ANALYSIS_TAB}!A${rowNumber}:P${rowNumber}`)}?valueInputOption=RAW`,
+      `${SHEET_ID}/values/${encodeURIComponent(`${KLING_ANALYSIS_TAB}!A${rowNumber}:R${rowNumber}`)}?valueInputOption=USER_ENTERED`,
       { method: 'PUT', body: JSON.stringify({ values }) },
     )
     if (!res.ok) throw new Error(`Failed to update analysis row: ${res.status} ${await res.text()}`)
@@ -202,7 +210,7 @@ export async function upsertKlingAnalysisSheet(opts: {
   }
 
   const res = await sheetsRequest(
-    `${SHEET_ID}/values/${encodeURIComponent(`${KLING_ANALYSIS_TAB}!A:P`)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+    `${SHEET_ID}/values/${encodeURIComponent(`${KLING_ANALYSIS_TAB}!A:R`)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
     { method: 'POST', body: JSON.stringify({ values }) },
   )
   if (!res.ok) throw new Error(`Failed to append analysis row: ${res.status} ${await res.text()}`)

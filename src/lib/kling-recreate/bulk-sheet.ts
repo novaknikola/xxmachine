@@ -15,6 +15,7 @@ import { getGoogleAccessToken } from '@/lib/google-auth'
 import { downloadDriveFile } from '@/lib/google-drive'
 import { uploadBuffer } from '@/lib/supabase-storage'
 import { RECREATE_SHEET_ID as SHEET_ID } from './sheet-config'
+import type { KlingStillModel } from './types'
 
 const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets'
 export const BULK_QUEUE_TAB = 'Bulk Queue'
@@ -24,6 +25,7 @@ const BULK_QUEUE_HEADERS = [
   'Character 2 Name', 'Character 2 Drive URL',
   'Character 3 Name', 'Character 3 Drive URL',
   'Ambiance Drive URL',
+  'Model',
   'Job ID', 'Video URL', 'Error',
 ]
 /** Explicit user ask: a hard cap per /bulk trigger so one careless tap can't
@@ -87,6 +89,9 @@ export interface BulkQueueRow {
   instruction: string | null
   characters: BulkQueueCharacter[]
   ambianceDriveUrl: string | null
+  /** "SFW"/"NSFW" as typed in the sheet (case-insensitive); resolved to
+   * KlingStillModel by the caller. Blank/unrecognized -> SFW. */
+  stillModel: string | null
 }
 
 /**
@@ -98,12 +103,12 @@ export interface BulkQueueRow {
 export async function readBulkQueueRows(): Promise<BulkQueueRow[]> {
   if (!SHEET_ID) return []
   await ensureBulkQueueTab()
-  const raw = await readRange(`${BULK_QUEUE_TAB}!A2:N1000`)
+  const raw = await readRange(`${BULK_QUEUE_TAB}!A2:O1000`)
 
   const rows: BulkQueueRow[] = []
   raw.forEach((cells, i) => {
     const get = (idx: number) => (cells[idx] ?? '').trim()
-    const jobId = get(11)
+    const jobId = get(12)
     if (jobId) return // already claimed by an earlier /bulk
 
     const reelUrl = get(1) || null
@@ -126,6 +131,7 @@ export async function readBulkQueueRows(): Promise<BulkQueueRow[]> {
       instruction: get(3) || null,
       characters,
       ambianceDriveUrl: get(10) || null,
+      stillModel: get(11) || null,
     })
   })
 
@@ -143,9 +149,9 @@ export async function writeBulkRowStatus(rowNumber: number, fields: {
   try {
     const data: { range: string; values: string[][] }[] = []
     if (fields.status !== undefined) data.push({ range: `${BULK_QUEUE_TAB}!A${rowNumber}`, values: [[fields.status]] })
-    if (fields.jobId !== undefined) data.push({ range: `${BULK_QUEUE_TAB}!L${rowNumber}`, values: [[fields.jobId]] })
-    if (fields.videoUrl !== undefined) data.push({ range: `${BULK_QUEUE_TAB}!M${rowNumber}`, values: [[fields.videoUrl]] })
-    if (fields.error !== undefined) data.push({ range: `${BULK_QUEUE_TAB}!N${rowNumber}`, values: [[fields.error]] })
+    if (fields.jobId !== undefined) data.push({ range: `${BULK_QUEUE_TAB}!M${rowNumber}`, values: [[fields.jobId]] })
+    if (fields.videoUrl !== undefined) data.push({ range: `${BULK_QUEUE_TAB}!N${rowNumber}`, values: [[fields.videoUrl]] })
+    if (fields.error !== undefined) data.push({ range: `${BULK_QUEUE_TAB}!O${rowNumber}`, values: [[fields.error]] })
     if (!data.length) return
 
     const res = await sheetsRequest(`${SHEET_ID}/values:batchUpdate`, {
@@ -156,6 +162,12 @@ export async function writeBulkRowStatus(rowNumber: number, fields: {
   } catch (err) {
     console.error('[kling-recreate] bulk sheet status write failed:', err)
   }
+}
+
+/** "SFW"/"NSFW" (case-insensitive) as typed in the "Model" column -> the
+ * still_model DB value. Blank or anything unrecognized defaults to SFW. */
+export function parseBulkStillModel(raw: string | null): KlingStillModel {
+  return (raw ?? '').trim().toLowerCase() === 'nsfw' ? 'seedream_nsfw' : 'nano_banana'
 }
 
 /**

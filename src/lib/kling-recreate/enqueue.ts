@@ -2,7 +2,7 @@ import { one } from '@/lib/db'
 import { internalBaseUrl } from '@/lib/internal-url'
 import { buildVariationJobDrafts } from './variation'
 import type {
-  KlingRecreateAction, KlingRecreateJobRow, KlingRecreateQueueInput,
+  KlingRecreateAction, KlingRecreateJobRow, KlingRecreateQueueInput, KlingStillModel,
 } from './types'
 
 const CRON_SECRET = process.env.CRON_SECRET
@@ -24,6 +24,8 @@ export async function enqueueKlingRecreateJobs(opts: {
   /** Bulk-sheet path only — see bulk-sheet.ts. */
   sourceLabel?: string | null
   sheetRow?: number | null
+  /** Defaults to 'nano_banana' (SFW) — see generateStills. */
+  stillModel?: KlingStillModel | null
 }): Promise<string[]> {
   const queueIds: string[] = []
 
@@ -31,8 +33,9 @@ export async function enqueueKlingRecreateJobs(opts: {
     const recreate = await one<{ id: string }>(
       `INSERT INTO kling_recreate_jobs
          (user_id, chat_id, source_url, reference_image_url, settings, kling_variant, status,
-          shot_mode, custom_prompt, reference_photos, ambiance_photo_url, source_label, sheet_row)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'pending', $7, $8, $9::jsonb, $10, $11, $12)
+          shot_mode, custom_prompt, reference_photos, ambiance_photo_url, source_label, sheet_row,
+          still_model)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'pending', $7, $8, $9::jsonb, $10, $11, $12, $13)
        RETURNING id`,
       [
         opts.userId,
@@ -47,6 +50,7 @@ export async function enqueueKlingRecreateJobs(opts: {
         opts.ambiancePhotoUrl?.trim() || null,
         opts.sourceLabel?.trim() || null,
         opts.sheetRow ?? null,
+        opts.stillModel ?? 'nano_banana',
       ],
     )
     if (!recreate) throw new Error('Could not create kling_recreate_jobs row')
@@ -95,14 +99,16 @@ export async function enqueueKlingScriptOnlyJob(opts: {
   /** Bulk-sheet path only — see bulk-sheet.ts. */
   sourceLabel?: string | null
   sheetRow?: number | null
+  /** Defaults to 'nano_banana' (SFW) — see generateStills. */
+  stillModel?: KlingStillModel | null
 }): Promise<string> {
   const sourceUrl = `script:${Math.random().toString(36).slice(2, 10)}`
   const recreate = await one<{ id: string }>(
     `INSERT INTO kling_recreate_jobs
        (user_id, chat_id, source_url, reference_image_url, settings, kling_variant, status,
         shot_mode, custom_prompt, is_script_only, lead_character, reference_photos, ambiance_photo_url,
-        source_label, sheet_row)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'pending', $7, $8, true, $9, $10::jsonb, $11, $12, $13)
+        source_label, sheet_row, still_model)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'pending', $7, $8, true, $9, $10::jsonb, $11, $12, $13, $14)
      RETURNING id`,
     [
       opts.userId,
@@ -118,6 +124,7 @@ export async function enqueueKlingScriptOnlyJob(opts: {
       opts.ambiancePhotoUrl?.trim() || null,
       opts.sourceLabel?.trim() || null,
       opts.sheetRow ?? null,
+      opts.stillModel ?? 'nano_banana',
     ],
   )
   if (!recreate) throw new Error('Could not create kling_recreate_jobs row')
@@ -202,8 +209,8 @@ export async function enqueueKlingVariationJobs(opts: {
       `INSERT INTO kling_recreate_jobs
          (user_id, chat_id, source_url, video_url, duration_sec, reference_image_url,
           character_image_url, master_prompt, context, settings, kling_variant, status,
-          parent_job_id, variation_note, reference_photos, ambiance_photo_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, 'pending', $12, $13, $14::jsonb, $15)
+          parent_job_id, variation_note, reference_photos, ambiance_photo_url, still_model)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, 'pending', $12, $13, $14::jsonb, $15, $16)
        RETURNING id`,
       [
         opts.userId,
@@ -221,6 +228,7 @@ export async function enqueueKlingVariationJobs(opts: {
         draft.variationNote,
         draft.referencePhotos ? JSON.stringify(draft.referencePhotos) : null,
         draft.ambiancePhotoUrl,
+        draft.stillModel ?? 'nano_banana',
       ],
     )
     if (!recreate) throw new Error('Could not create variation job')

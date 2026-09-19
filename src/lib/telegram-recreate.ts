@@ -209,6 +209,18 @@ export function stillPromptChoiceKeyboard() {
   }
 }
 
+/** Asked once per batch, right after the instruction question is answered/
+ * skipped and before Confirm/Generate — which WaveSpeed model builds the
+ * first/end frame stills for this batch. */
+export function stillModelKeyboard() {
+  return {
+    inline_keyboard: [[
+      { text: '🟢 SFW (Nano Banana)', callback_data: 'kr:stillmodel:sfw' },
+      { text: '🔴 NSFW (Seedream + Z-Image)', callback_data: 'kr:stillmodel:nsfw' },
+    ]],
+  }
+}
+
 /** Gate 1: character still generated, before dialogue attribution is checked. */
 export function stillApprovalKeyboard(jobId: string) {
   return {

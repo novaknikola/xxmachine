@@ -1,5 +1,5 @@
 import type { SeedanceI2VInput } from './seedance-client'
-import type { KlingRecreateJobRow, KlingVideoContext } from './types'
+import type { KlingRecreateJobRow, KlingStillModel, KlingVideoContext } from './types'
 
 export const VARIATION_COUNT_MIN = 1
 export const VARIATION_COUNT_MAX = 6
@@ -129,6 +129,7 @@ export interface VariationJobDraft {
   referenceImageUrl: string | null
   referencePhotos: Record<string, string> | null
   ambiancePhotoUrl: string | null
+  stillModel: KlingStillModel | null
   characterImageUrl: string
   masterPrompt: string
   context: KlingVideoContext | Record<string, unknown> | null
@@ -145,7 +146,7 @@ export function buildVariationJobDrafts(
   parent: Pick<
     KlingRecreateJobRow,
     'id' | 'source_url' | 'video_url' | 'duration_sec' | 'reference_image_url' | 'reference_photos'
-    | 'ambiance_photo_url' | 'character_image_url' | 'master_prompt' | 'context' | 'settings'
+    | 'ambiance_photo_url' | 'still_model' | 'character_image_url' | 'master_prompt' | 'context' | 'settings'
   >,
   change: string,
   count: number,
@@ -163,6 +164,7 @@ export function buildVariationJobDrafts(
     referenceImageUrl: parent.reference_image_url,
     referencePhotos: parent.reference_photos ?? null,
     ambiancePhotoUrl: parent.ambiance_photo_url ?? null,
+    stillModel: parent.still_model ?? null,
     characterImageUrl: parent.character_image_url!,
     masterPrompt: master,
     context: parent.context,

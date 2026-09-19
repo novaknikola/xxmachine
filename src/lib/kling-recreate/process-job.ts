@@ -18,6 +18,7 @@ import {
   type SeedanceVariant,
 } from './seedance-client'
 import { editImageNanoBananaPro } from './nano-banana-client'
+import { editImage as editImageSeedream, finalizeWithSkinEnhance } from '@/lib/wavespeed'
 import {
   applyDialogueCorrection, buildSeedancePrompt, extractDialogueSummary,
   formatSeedancePromptSummary, renderEndFrameEditPrompt, renderFirstFrameEditPrompt,
@@ -226,6 +227,8 @@ async function generateStills(opts: {
   const ambianceUrl = row.ambiance_photo_url?.trim() || null
   const hasAmbiance = !!ambianceUrl
   const identityUrls = photos.map(p => p.url)
+  const isNsfw = row.still_model === 'seedream_nsfw'
+  const modelLabel = isNsfw ? 'Seedream' : 'Nano Banana Pro'
 
   // Ambiance is deliberately first-frame only (2026-09-18, explicit user
   // ask): the end frame's own prompt already requires the background/
@@ -236,21 +239,35 @@ async function generateStills(opts: {
   const firstFramePrompt = renderFirstFrameEditPrompt(ctx, photos, hasAmbiance)
   const lastFramePrompt = renderEndFrameEditPrompt(ctx, photos)
 
-  const firstOutputs = await editImageNanoBananaPro({
-    imageUrls: hasAmbiance ? [...identityUrls, ambianceUrl!] : identityUrls,
-    prompt: firstFramePrompt,
-    apiKey: opts.apiKey,
-  })
-  if (!firstOutputs.length) throw new Error('Nano Banana Pro: no first-frame output')
-  const preparedFirst = await prepareKlingImage(firstOutputs[0], `kling-recreate/${row.user_id}/${row.id}/first-frame.jpg`)
+  // 2026-09-19: NSFW alternative — Seedream v5 Pro Edit + Z-Image Turbo
+  // skin-enhance, the exact same workflow the main xxmachine bulk-generation
+  // flow already uses (src/lib/wavespeed.ts). Same imageUrls/prompt shape
+  // either model gets; chosen per job via row.still_model.
+  const editStill = (imageUrls: string[], prompt: string) => isNsfw
+    ? editImageSeedream({ imageUrls, prompt, size: ctx.aspect_ratio, apiKey: opts.apiKey })
+    : editImageNanoBananaPro({ imageUrls, prompt, apiKey: opts.apiKey })
 
-  const endOutputs = await editImageNanoBananaPro({
-    imageUrls: [preparedFirst.url, ...identityUrls],
-    prompt: lastFramePrompt,
-    apiKey: opts.apiKey,
-  })
-  if (!endOutputs.length) throw new Error('Nano Banana Pro: no end-frame output')
-  const preparedEnd = await prepareKlingImage(endOutputs[0], `kling-recreate/${row.user_id}/${row.id}/end-frame.jpg`)
+  const firstOutputs = await editStill(hasAmbiance ? [...identityUrls, ambianceUrl!] : identityUrls, firstFramePrompt)
+  if (!firstOutputs.length) throw new Error(`${modelLabel}: no first-frame output`)
+  // The RAW first-frame result (not yet skin-enhanced) is what feeds the
+  // end-frame call — finalizeWithSkinEnhance is documented as a one-time
+  // pass on a FINAL delivered image, never on something fed back into
+  // another edit step.
+  const firstRawUrl = firstOutputs[0]
+
+  const endOutputs = await editStill([firstRawUrl, ...identityUrls], lastFramePrompt)
+  if (!endOutputs.length) throw new Error(`${modelLabel}: no end-frame output`)
+  const endRawUrl = endOutputs[0]
+
+  const [finalFirstUrl, finalEndUrl] = isNsfw
+    ? await Promise.all([
+        finalizeWithSkinEnhance(firstRawUrl, ctx.aspect_ratio, opts.apiKey),
+        finalizeWithSkinEnhance(endRawUrl, ctx.aspect_ratio, opts.apiKey),
+      ])
+    : [firstRawUrl, endRawUrl]
+
+  const preparedFirst = await prepareKlingImage(finalFirstUrl, `kling-recreate/${row.user_id}/${row.id}/first-frame.jpg`)
+  const preparedEnd = await prepareKlingImage(finalEndUrl, `kling-recreate/${row.user_id}/${row.id}/end-frame.jpg`)
 
   return {
     firstFrameUrl: preparedFirst.url,
@@ -304,6 +321,7 @@ export async function processKlingRecreateJob(opts: {
       jobId: row.id, sourceUrl: row.source_url, durationSec: row.duration_sec,
       context: (row.context ?? null) as KlingVideoContext | null, masterPrompt: row.master_prompt,
       status: 'done', klingVideoUrl: row.kling_video_url,
+      firstFrameUrl: row.character_image_url, endFrameUrl: row.end_frame_image_url,
     })
     return { ok: true, videoUrl: row.kling_video_url, cached: true }
   }
@@ -336,6 +354,7 @@ export async function processKlingRecreateJob(opts: {
     await syncKlingAnalysisSheetSafe({
       jobId: row.id, sourceUrl: row.source_url, durationSec: sourceDuration, context, masterPrompt,
       status: `variation: ${note}`, klingVideoUrl: null,
+      firstFrameUrl: row.character_image_url, endFrameUrl: row.end_frame_image_url,
     })
     return finishSeedanceRender({
       row, queueJobId: opts.queueJobId, userId: opts.userId, chatId,
@@ -374,6 +393,7 @@ export async function processKlingRecreateJob(opts: {
     await syncKlingAnalysisSheetSafe({
       jobId: row.id, sourceUrl: row.source_url, durationSec: sourceDuration, context, masterPrompt,
       status: 'analyzing', klingVideoUrl: row.kling_video_url,
+      firstFrameUrl: null, endFrameUrl: null,
     })
     await notify(
       chatId,
@@ -420,6 +440,7 @@ export async function processKlingRecreateJob(opts: {
     await syncKlingAnalysisSheetSafe({
       jobId: row.id, sourceUrl: row.source_url, durationSec: sourceDuration, context, masterPrompt,
       status: 'analyzing', klingVideoUrl: row.kling_video_url,
+      firstFrameUrl: null, endFrameUrl: null,
     })
     await notify(
       chatId,
@@ -431,6 +452,7 @@ export async function processKlingRecreateJob(opts: {
     await syncKlingAnalysisSheetSafe({
       jobId: row.id, sourceUrl: row.source_url, durationSec: sourceDuration, context, masterPrompt,
       status: row.status, klingVideoUrl: row.kling_video_url,
+      firstFrameUrl: row.character_image_url, endFrameUrl: row.end_frame_image_url,
     })
     const already = await one<{ n: number }>(`SELECT count(*)::int AS n FROM kling_idea_bank WHERE job_id = $1`, [row.id])
     if (!already?.n) {
@@ -452,6 +474,11 @@ export async function processKlingRecreateJob(opts: {
   })
   await heartbeat(opts.queueJobId, 'awaiting_still_approval', { progress: 65 })
   await syncBulkRowSafe(row, { status: 'awaiting still approval' })
+  await syncKlingAnalysisSheetSafe({
+    jobId: row.id, sourceUrl: row.source_url, durationSec: sourceDuration, context, masterPrompt,
+    status: 'awaiting still approval', klingVideoUrl: row.kling_video_url,
+    firstFrameUrl, endFrameUrl,
+  })
 
   if (chatId != null) {
     try {
@@ -532,6 +559,11 @@ async function regenerateStill(opts: {
     status: 'awaiting_still_approval',
   })
   await heartbeat(opts.queueJobId, 'awaiting_still_approval', { progress: 65 })
+  await syncKlingAnalysisSheetSafe({
+    jobId: row.id, sourceUrl: row.source_url, durationSec: row.duration_sec, context, masterPrompt: row.master_prompt,
+    status: 'awaiting still approval', klingVideoUrl: row.kling_video_url,
+    firstFrameUrl, endFrameUrl,
+  })
 
   if (chatId != null) {
     try {
@@ -704,6 +736,12 @@ async function regeneratePrompt(opts: {
     status: 'awaiting_still_approval',
   })
   await heartbeat(opts.queueJobId, 'awaiting_still_approval', { progress: 65 })
+  await syncKlingAnalysisSheetSafe({
+    jobId: row.id, sourceUrl: row.source_url, durationSec: analysis.context.duration_sec ?? sourceDuration,
+    context: analysis.context, masterPrompt: analysis.master_prompt,
+    status: 'awaiting still approval', klingVideoUrl: row.kling_video_url,
+    firstFrameUrl, endFrameUrl,
+  })
 
   if (chatId != null) {
     try {
@@ -779,6 +817,21 @@ async function finishSeedanceRender(opts: {
     `kling-recreate/${opts.userId}/${row.id}/out.mp4`,
   ).catch(() => result.videoUrl)
 
+  // Best-effort — mirrors every other feature's usage of this queue, e.g.
+  // infinite_talk's video output archive. Self-gates on the user's own
+  // Drive-connect + drive_auto_archive settings, never throws.
+  const { enqueueDriveArchive } = await import('@/lib/drive-archive/enqueue')
+  await enqueueDriveArchive({
+    userId: opts.userId,
+    sourceType: 'queue_job',
+    sourceId: row.id,
+    urls: [hosted],
+    characterKey: namedPhotosFromRow(row)[0]?.name ?? row.source_label ?? undefined,
+    kind: 'reels',
+    stage: 'ready',
+    modelKey: 'seedance_2_5',
+  }).catch(err => console.error('[kling-recreate] drive archive failed:', err))
+
   await updateRecreate(row.id, {
     status: 'done',
     kling_video_url: hosted,
@@ -790,6 +843,7 @@ async function finishSeedanceRender(opts: {
   await syncKlingAnalysisSheetSafe({
     jobId: row.id, sourceUrl: row.source_url, durationSec: opts.sourceDuration,
     context: opts.context, masterPrompt: opts.masterPrompt, status: 'done', klingVideoUrl: hosted,
+    firstFrameUrl: row.character_image_url, endFrameUrl: row.end_frame_image_url,
   })
   await syncBulkRowSafe(row, { status: 'done', videoUrl: hosted })
 

@@ -2,14 +2,14 @@ import { NextRequest, NextResponse } from 'next/server'
 import { one, query, rows } from '@/lib/db'
 import {
   sendText, answerCallbackQuery, editMessageReplyMarkup,
-  confirmRecreateKeyboard, stillPromptChoiceKeyboard, scriptOnlyKeyboard, bulkConfirmKeyboard,
+  confirmRecreateKeyboard, stillPromptChoiceKeyboard, stillModelKeyboard, scriptOnlyKeyboard, bulkConfirmKeyboard,
   downloadTelegramVoice,
 } from '@/lib/telegram-recreate'
 import { transcribeVoiceNote } from '@/lib/grok'
 import {
   addUrlsToPending, claimPending, claimPendingForScript, clearPending, getPending,
   holdPendingPhotoRole, resolvePendingPhotoRole, setAwaiting, setAwaitingVariation,
-  setPendingCustomPrompt,
+  setPendingCustomPrompt, setPendingStillModel,
 } from '@/lib/kling-recreate/pending'
 import {
   enqueueKlingAction, enqueueKlingRecreateJobs, enqueueKlingScriptOnlyJob, enqueueKlingVariationJobs,
@@ -22,7 +22,7 @@ import {
   variationAwaitingJobId,
 } from '@/lib/kling-recreate/variation'
 import {
-  readBulkQueueRows, resolveDrivePhoto, writeBulkRowStatus, type BulkQueueRow,
+  parseBulkStillModel, readBulkQueueRows, resolveDrivePhoto, writeBulkRowStatus, type BulkQueueRow,
 } from '@/lib/kling-recreate/bulk-sheet'
 import type { KlingRecreateJobRow } from '@/lib/kling-recreate/types'
 
@@ -107,18 +107,19 @@ async function enqueueBulkRow(userId: string, chatId: number, row: BulkQueueRow)
       : null
     const primaryUrl = Object.values(referencePhotos)[0]
     const sourceLabel = `Row ${row.rowNumber}`
+    const stillModel = parseBulkStillModel(row.stillModel)
 
     if (row.reelUrl) {
       const ids = await enqueueKlingRecreateJobs({
         userId, chatId, urls: [row.reelUrl], referenceImageUrl: primaryUrl,
         customPrompt: row.instruction, referencePhotos, ambiancePhotoUrl,
-        sourceLabel, sheetRow: row.rowNumber,
+        sourceLabel, sheetRow: row.rowNumber, stillModel,
       })
       await writeBulkRowStatus(row.rowNumber, { status: 'queued', jobId: ids[0] ?? '' })
     } else if (row.script) {
       const jobId = await enqueueKlingScriptOnlyJob({
         userId, chatId, referenceImageUrl: primaryUrl, script: row.script,
-        referencePhotos, ambiancePhotoUrl, sourceLabel, sheetRow: row.rowNumber,
+        referencePhotos, ambiancePhotoUrl, sourceLabel, sheetRow: row.rowNumber, stillModel,
       })
       await writeBulkRowStatus(row.rowNumber, { status: 'queued', jobId })
     }
@@ -191,6 +192,17 @@ async function showBatch(chatId: number, userId: string) {
         '(wardrobe, pose tweak — and if more than one person is in the scene, say which role ' +
         'your photo plays, e.g. "the maid" or "the blonde woman on the left") — or skip.',
       stillPromptChoiceKeyboard(),
+    )
+    return
+  }
+
+  // Asked once per batch, right after the instruction question — which
+  // WaveSpeed model builds the first/end frame stills.
+  if ((ready || scriptOnlyReady) && pending?.custom_prompt != null && pending?.still_model == null) {
+    await sendText(
+      chatId,
+      '🎨 Which still model for this batch?',
+      stillModelKeyboard(),
     )
     return
   }
@@ -491,6 +503,7 @@ export async function POST(req: NextRequest) {
           userId, chatId, referenceImageUrl: reference,
           script: claimed.custom_prompt!, leadCharacter, referencePhotos: claimed.reference_photos,
           ambiancePhotoUrl: claimed.ambiance_photo_url,
+          stillModel: claimed.still_model,
         })
         await sendText(
           chatId,
@@ -599,6 +612,7 @@ export async function POST(req: NextRequest) {
             userId, chatId, referenceImageUrl: reference,
             script: claimed.custom_prompt!, referencePhotos: claimed.reference_photos,
             ambiancePhotoUrl: claimed.ambiance_photo_url,
+            stillModel: claimed.still_model,
           })
           await sendText(
             chatId,
@@ -626,6 +640,15 @@ export async function POST(req: NextRequest) {
         // skip: '' (not null) marks the question as asked so showBatch never re-asks it.
         await setPendingCustomPrompt(chatId, userId, '')
         await answerCallbackQuery(cb.id, 'Skipped')
+        if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
+        await showBatch(chatId, userId)
+        return NextResponse.json({ ok: true })
+      }
+
+      if (parts[1] === 'stillmodel') {
+        const model = parts[2] === 'nsfw' ? 'seedream_nsfw' as const : 'nano_banana' as const
+        await setPendingStillModel(chatId, model)
+        await answerCallbackQuery(cb.id, model === 'seedream_nsfw' ? 'NSFW' : 'SFW')
         if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
         await showBatch(chatId, userId)
         return NextResponse.json({ ok: true })
@@ -718,6 +741,7 @@ export async function POST(req: NextRequest) {
           customPrompt: pending.custom_prompt,
           referencePhotos: pending.reference_photos,
           ambiancePhotoUrl: pending.ambiance_photo_url,
+          stillModel: pending.still_model,
         })
         await sendText(
           chatId,

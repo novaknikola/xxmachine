@@ -183,7 +183,14 @@ export interface KlingRecreateJobRow {
    * Status/Video URL/Error back to as the job progresses — null for
    * ordinary Telegram-created jobs. */
   sheet_row?: number | null
+  /** Which model generates the first/end frame stills — 'nano_banana' (SFW,
+   * default) or 'seedream_nsfw' (Seedream v5 Pro Edit + Z-Image Turbo
+   * skin-enhance, same workflow the main xxmachine bulk-generation flow
+   * already uses). Chosen per job/batch, see generateStills. */
+  still_model?: KlingStillModel
 }
+
+export type KlingStillModel = 'nano_banana' | 'seedream_nsfw'
 
 export const MAX_RECREATE_URLS = 30
 export const MAX_FPS_FRAMES = 60

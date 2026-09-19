@@ -76,8 +76,8 @@ describe('instagram shortcode matching', () => {
 })
 
 describe('Kling Analysis row mapping', () => {
-  it('writes 16 columns in header order and keeps blanks blank', () => {
-    assert.equal(KLING_ANALYSIS_HEADERS.length, 16)
+  it('writes 18 columns in header order and keeps blanks blank', () => {
+    assert.equal(KLING_ANALYSIS_HEADERS.length, 18)
     const row = buildAnalysisSheetRow({
       jobId: 'job-1',
       addedAt: '2026-09-12T07:00:00.000Z',
@@ -99,7 +99,7 @@ describe('Kling Analysis row mapping', () => {
       status: 'analyzing',
       klingVideoUrl: null,
     })
-    assert.equal(row.length, 16)
+    assert.equal(row.length, 18)
     assert.deepEqual(row, [
       'job-1',
       '2026-09-12T07:00:00.000Z',
@@ -115,9 +115,29 @@ describe('Kling Analysis row mapping', () => {
       'A woman pours coffee then sips.',
       'multi_prompt',
       '0-4s: pour | 4-8s: sip',
+      '',
+      '',
       'analyzing',
       '',
     ])
+  })
+
+  it('renders still URLs as =IMAGE() formulas, escaping embedded quotes', () => {
+    const row = buildAnalysisSheetRow({
+      jobId: 'job-2',
+      addedAt: 't',
+      sourceUrl: 'https://www.instagram.com/reel/AbC123xyz/',
+      viral: { profile: '', views: '', viral: '' },
+      durationSec: null,
+      context: null,
+      masterPrompt: null,
+      status: 'still',
+      klingVideoUrl: null,
+      firstFrameUrl: 'https://example.com/first.jpg',
+      endFrameUrl: null,
+    })
+    assert.equal(row[14], '=IMAGE("https://example.com/first.jpg")')
+    assert.equal(row[15], '')
   })
 
   it('finds an existing Job ID row without treating the header as data', () => {

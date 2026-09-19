@@ -2,11 +2,11 @@ import { one, query } from '@/lib/db'
 import { parseReelUrlList } from '@/lib/monitor/parse-reel-url'
 import { downloadTelegramFile } from '@/lib/telegram-recreate'
 import { uploadBuffer } from '@/lib/supabase-storage'
-import { MAX_RECREATE_URLS, type KlingShotMode } from './types'
+import { MAX_RECREATE_URLS, type KlingShotMode, type KlingStillModel } from './types'
 import { variationAwaitingValue } from './variation'
 
 const PENDING_COLUMNS = 'chat_id, user_id, photo_url, urls, awaiting, shot_mode, custom_prompt, ' +
-  'reference_photos, ambiance_photo_url, pending_photo_url'
+  'reference_photos, ambiance_photo_url, pending_photo_url, still_model'
 
 export interface RecreatePending {
   chat_id: string | number
@@ -22,6 +22,9 @@ export interface RecreatePending {
    * answer ("which character, or ambiance?") — see holdPendingPhotoRole/
    * resolvePendingPhotoRole. */
   pending_photo_url: string | null
+  /** Answer to the SFW/NSFW still-model question, asked once per batch
+   * before Confirm — null until answered. */
+  still_model: KlingStillModel | null
 }
 
 export async function getPending(chatId: number): Promise<RecreatePending | null> {
@@ -178,6 +181,14 @@ export async function setPendingShotMode(chatId: number, mode: KlingShotMode): P
   await query(
     `UPDATE telegram_recreate_pending SET shot_mode = $2, updated_at = now() WHERE chat_id = $1`,
     [chatId, mode],
+  )
+}
+
+/** Answer to the SFW/NSFW still-model question, asked once per batch right before Confirm. */
+export async function setPendingStillModel(chatId: number, model: KlingStillModel): Promise<void> {
+  await query(
+    `UPDATE telegram_recreate_pending SET still_model = $2, updated_at = now() WHERE chat_id = $1`,
+    [chatId, model],
   )
 }
 
