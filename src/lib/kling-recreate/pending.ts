@@ -135,7 +135,11 @@ export async function addUrlsToPending(opts: {
   userId: string
   text: string
 }): Promise<AddUrlsResult | null> {
-  const { parsed, invalid } = parseReelUrlList(opts.text, MAX_RECREATE_URLS)
+  // Bare-shortcode detection off (see parseReelUrlList doc comment) — this
+  // bot's free text is a script/instruction far more often than a pasted
+  // shortcode, and a lone word from a multi-message script (e.g. "SETTING")
+  // was silently misread as a reel URL in production 2026-09-19.
+  const { parsed, invalid } = parseReelUrlList(opts.text, MAX_RECREATE_URLS, { allowBareShortcodes: false })
   if (!parsed.length) return null
 
   let pending = await upsertPending(opts.chatId, opts.userId)

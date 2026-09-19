@@ -79,17 +79,26 @@ export function parseReelUrl(raw: string, opts: { allowBareShortcode?: boolean }
  * confirmed in production 2026-08-13, an 11-word sentence became 11 fake
  * "reel" links alongside the one real one someone actually pasted. Full URLs
  * are unaffected at any position — they never needed the bare-shortcode path.
+ *
+ * `allowBareShortcodes: false` (default true) turns the lone-word heuristic
+ * off entirely, for a caller whose free text is more likely to be prose/
+ * script than a pasted shortcode (confirmed in production 2026-09-19: a
+ * recreate-bot script sent line-by-line put "SETTING" alone on one line,
+ * which got read as a bare IG shortcode and silently became the job's
+ * source_url instead of staying a script-only job). Full URLs still parse
+ * normally either way.
  */
-export function parseReelUrlList(text: string, max = 50): {
+export function parseReelUrlList(text: string, max = 50, opts: { allowBareShortcodes?: boolean } = {}): {
   parsed: ParsedReelUrl[]
   invalid: string[]
 } {
+  const { allowBareShortcodes = true } = opts
   const rawLines = text.split(/[\n\r]+/).map(l => l.trim()).filter(Boolean)
   const tokens: { token: string; allowBareShortcode: boolean }[] = []
   for (const rawLine of rawLines) {
     const parts = rawLine.split(/\s+/).filter(Boolean)
     for (const part of parts) {
-      tokens.push({ token: part, allowBareShortcode: parts.length === 1 })
+      tokens.push({ token: part, allowBareShortcode: allowBareShortcodes && parts.length === 1 })
     }
   }
 
