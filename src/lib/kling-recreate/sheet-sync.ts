@@ -1,14 +1,16 @@
 /**
  * Best-effort mirror of Kling recreate analysis + banked ideas into the
- * existing viral-monitor spreadsheet (VIRAL_MONITOR_SHEET_ID).
+ * user's "Scripts" sheet (RECREATE_SHEET_ID — moved here 2026-09-19 from the
+ * pre-existing viral-monitor spreadsheet it was silently inherited into;
+ * that was never a sheet this user actually chose for this feature).
  *
- * Creates `Kling Analysis` and `Kling Ideas` tabs if missing. Never clears
- * or writes the Videos tab or Sheet1 — writeVideosReport stays the only
- * Videos writer.
+ * Creates `Analysis` and `Ideas` tabs if missing. Never touches any other
+ * tab in this spreadsheet (in particular the Python reels-analiza
+ * pipeline's own tab there).
  */
 import { getGoogleAccessToken } from '@/lib/google-auth'
 import { one, rows } from '@/lib/db'
-import { SHEET_ID } from '@/lib/viral-monitor/config'
+import { RECREATE_SHEET_ID as SHEET_ID } from './sheet-config'
 import type { HashedIdea } from './ideas'
 import type { KlingVideoContext } from './types'
 import {

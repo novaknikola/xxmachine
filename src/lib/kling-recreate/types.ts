@@ -179,7 +179,7 @@ export interface KlingRecreateJobRow {
    * onto every Telegram notification for this job — null for ordinary
    * Telegram-created jobs. */
   source_label?: string | null
-  /** Bulk-sheet path only: which row in the "Kling Bulk Queue" tab to write
+  /** Bulk-sheet path only: which row in the "Bulk Queue" tab to write
    * Status/Video URL/Error back to as the job progresses — null for
    * ordinary Telegram-created jobs. */
   sheet_row?: number | null

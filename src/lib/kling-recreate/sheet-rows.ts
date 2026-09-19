@@ -2,8 +2,8 @@ import { parseReelUrl } from '@/lib/monitor/parse-reel-url'
 import type { KlingShotBeat, KlingVideoContext } from './types'
 import type { HashedIdea } from './ideas'
 
-export const KLING_ANALYSIS_TAB = 'Kling Analysis'
-export const KLING_IDEAS_TAB = 'Kling Ideas'
+export const KLING_ANALYSIS_TAB = 'Analysis'
+export const KLING_IDEAS_TAB = 'Ideas'
 
 export const KLING_ANALYSIS_HEADERS = [
   'Job ID',

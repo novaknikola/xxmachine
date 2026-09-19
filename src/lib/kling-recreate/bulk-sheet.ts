@@ -1,22 +1,23 @@
 /**
  * Bulk Google Sheets trigger — lets the user prep several recreate jobs at
- * once in a "Kling Bulk Queue" sheet tab (reel URL or script, reference
- * photos as Drive links, one per character + optional ambiance) and fire
- * them all with one Telegram command (/bulk), instead of building each
- * batch by hand in the chat. See the plan doc for context.
+ * once in a "Bulk Queue" sheet tab (reel URL or script, reference photos as
+ * Drive links, one per character + optional ambiance) and fire them all
+ * with one Telegram command (/bulk), instead of building each batch by hand
+ * in the chat. See the plan doc for context.
  *
  * Deliberately mirrors sheet-sync.ts's service-account Sheets pattern (not
  * google-sheets.ts's per-user-OAuth variant) — same service account already
- * has access to this user's sheets (idea-bank pipeline, Kling
- * Analysis/Ideas tabs), no new auth setup needed.
+ * has access to the user's "Scripts" sheet (RECREATE_SHEET_ID — the idea-
+ * bank pipeline and the Analysis/Ideas tabs already write there), no new
+ * auth setup needed.
  */
 import { getGoogleAccessToken } from '@/lib/google-auth'
 import { downloadDriveFile } from '@/lib/google-drive'
 import { uploadBuffer } from '@/lib/supabase-storage'
-import { SHEET_ID } from '@/lib/viral-monitor/config'
+import { RECREATE_SHEET_ID as SHEET_ID } from './sheet-config'
 
 const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets'
-export const BULK_QUEUE_TAB = 'Kling Bulk Queue'
+export const BULK_QUEUE_TAB = 'Bulk Queue'
 const BULK_QUEUE_HEADERS = [
   'Status', 'Reel URL', 'Script', 'Instruction/Context',
   'Character 1 Name', 'Character 1 Drive URL',
