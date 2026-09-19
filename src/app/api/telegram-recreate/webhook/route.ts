@@ -533,7 +533,17 @@ export async function POST(req: NextRequest) {
         // rather than rejecting it, so it works whether typed or spoken,
         // at any point, without requiring "Add prompt" to be tapped first.
         await setPendingCustomPrompt(chatId, userId, message.text)
-        await sendText(chatId, `📝 Saved as manual context for the next recreate: <i>${escapeHtml(message.text)}</i>`)
+        // Echo is a short preview, not the full text — Telegram rejects any
+        // message over 4096 chars, and a real script easily exceeds that;
+        // confirmed in production 2026-09-19: a 4051-char script pushed the
+        // full-echo confirmation over the limit, the send threw, and — since
+        // nothing here caught it — the whole handler aborted before
+        // showBatch() ran, silently dropping the still-model question even
+        // though the script itself was already saved correctly. Also wrapped
+        // in try/catch so a send failure here can never again skip showBatch.
+        const preview = message.text.length > 300 ? `${message.text.slice(0, 300)}…` : message.text
+        await sendText(chatId, `📝 Saved as manual context for the next recreate: <i>${escapeHtml(preview)}</i>`)
+          .catch(err => console.error('[kling-recreate] manual-context confirmation send failed:', err))
         await showBatch(chatId, userId)
         return NextResponse.json({ ok: true })
       }
