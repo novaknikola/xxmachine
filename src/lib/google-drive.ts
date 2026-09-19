@@ -327,7 +327,7 @@ async function uploadResumableToDriveFolder(
   return { id: data.id, link: data.webViewLink ?? `https://drive.google.com/file/d/${data.id}/view` }
 }
 
-const DRIVE_UPLOAD_RETRYABLE = /invalid authentication|invalid_grant|unauthorized|login cookie|401|ECONNRESET|ETIMEDOUT|fetch failed|503|429|socket hang up/i
+export const DRIVE_UPLOAD_RETRYABLE = /invalid authentication|invalid_grant|unauthorized|login cookie|401|ECONNRESET|ETIMEDOUT|fetch failed|503|429|socket hang up/i
 
 /**
  * Upload as the user with fresh OAuth each attempt.
