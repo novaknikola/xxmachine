@@ -79,8 +79,19 @@ export async function enqueueDiscoveryReels(
     )
 
     if (existing) {
+      // 'awaiting_keyframe_approval' is deliberately NOT in this list. Unlike the
+      // others, it isn't an in-flight call that a concurrent write could race —
+      // it's a stable "parked for a human" state that can sit for hours or days.
+      // Treating it as busy blocked exactly the case referencePhotoChanged below
+      // exists for: user abandons a keyframe without approving/rejecting it and
+      // resubmits the same reel with a different photo. Confirmed live
+      // 2026-09-20 — three resubmits in a row each finished in ~1.6s (no real
+      // Seedream call) and kept returning the stale keyframe from the first
+      // photo, because this busy-skip short-circuited before reaching the
+      // referencePhotoChanged clear below, silently dropping every new photo/
+      // prompt on the floor.
       const busy = [
-        'analyzing', 'image_generating', 'image_done', 'awaiting_keyframe_approval', 'video_generating',
+        'analyzing', 'image_generating', 'image_done', 'video_generating',
       ].includes(existing.replicate_status)
       if (busy) {
         skippedBusy++
