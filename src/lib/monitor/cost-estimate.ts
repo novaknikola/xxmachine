@@ -51,6 +51,25 @@ export function estimateCopyPasteCost(
   }
 }
 
+/**
+ * alibaba/wan-3.0/reference-to-video pricing (probed 2026-09-20):
+ * $0.10/s at 720p (the wan-jobs.ts default resolution). One call does the
+ * whole identity swap — no separate keyframe cost like the Seedream/Seedance
+ * pipeline above.
+ */
+const WAN_PER_SEC_720P_USD = 0.10
+
+export function estimateWanCost(durationSec?: number | null): { totalUsd: number; note: string } {
+  const billedSec = durationSec == null || !Number.isFinite(durationSec) || durationSec <= 0
+    ? 5
+    : Math.min(15, Math.max(2, Math.round(durationSec)))
+  const totalUsd = roundUsd(WAN_PER_SEC_720P_USD * billedSec)
+  return {
+    totalUsd,
+    note: `WaveSpeed Wan 3.0 reference-to-video (720p): ≈$${WAN_PER_SEC_720P_USD.toFixed(2)}/s × ${billedSec}s.`,
+  }
+}
+
 function roundUsd(n: number): number {
   return Math.round(n * 1000) / 1000
 }

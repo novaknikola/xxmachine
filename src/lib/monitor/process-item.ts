@@ -34,7 +34,8 @@ const PROBE_FRAME_COUNT = 8
  * belongs on the queue, not inside an already-long replicate call. Failure here
  * must never fail the replicate that produced the video, so callers catch.
  */
-async function enqueueRepurpose(opts: {
+/** Exported for reuse by wan-jobs.ts — this helper isn't discovery_items-specific, it just needs a videoUrl and a label. */
+export async function enqueueRepurpose(opts: {
   userId: string
   videoUrl: string
   count: number

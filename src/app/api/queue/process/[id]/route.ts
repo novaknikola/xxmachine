@@ -30,7 +30,7 @@ import type {
   BulkImageJobItem, VideoRepurposeJobInput, ImageRepurposeJobInput, VideoCaptionJobInput, VideoCaptionItem,
   VideoTranscribeJobInput, VideoOcrJobInput, CaptionShuffleJobInput, CaptionGenerateJobInput, ComfyUIPodBulkJobInput,
   BulkCarouselJobInput, MyPodI2vJobInput, MyPodAnimateJobInput, MyPodTalkJobInput, CopyPasteJobInput,
-  CopyPasteFinishJobInput,
+  CopyPasteFinishJobInput, CopyPasteWanJobInput,
   CopyPromptsJobInput, SeedanceI2VJobInput, InfiniteTalkJobInput,
 } from '../../submit/route'
 import { getPodSessionSecrets } from '@/lib/my-pod/session'
@@ -41,6 +41,7 @@ import {
 import { runI2vItem, runAnimateItem, runTalkItem } from '@/lib/my-pod/runners'
 import { fishTts } from '@/lib/my-pod/fish-tts'
 import { generateCopyPasteKeyframes, finishCopyPasteVideo, regenerateCopyPasteKeyframes } from '@/lib/monitor/process-item'
+import { runWanGeneration } from '@/lib/monitor/wan-jobs'
 import { runKlingRecreateAction } from '@/lib/kling-recreate/process-job'
 import type { KlingRecreateQueueInput } from '@/lib/kling-recreate/types'
 
@@ -1624,6 +1625,56 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         copyPasteRows.push(...results)
         doneCount = batchEnd
         const progress = Math.round((doneCount / itemIds.length) * 100)
+        await query(
+          `UPDATE generation_queue
+              SET done_items=$1, progress=$2,
+                  output=jsonb_build_object('copyPasteRows', $3::jsonb, 'progressAt', $5::text)
+            WHERE id=$4`,
+          [doneCount, progress, JSON.stringify(copyPasteRows), id, new Date().toISOString()],
+        )
+      }
+
+      await query(
+        `UPDATE generation_queue SET status='done', finished_at=now(), progress=100 WHERE id=$1`,
+        [id],
+      )
+
+      return NextResponse.json({ ok: true, done: doneCount })
+    }
+
+    // ── copy_paste_wan — Wan 3.0 reference-to-video, one phase: the confirm
+    // gate already happened (Telegram cpgo) before this was ever queued, so
+    // every job here goes straight to the paid call ──────────────────────────
+    if (job.job_type === 'copy_paste_wan') {
+      const { jobIds, repurposeCount, outputDriveFolderId } = job.input as unknown as CopyPasteWanJobInput
+      if (!jobIds?.length) throw new Error('No items in job input')
+
+      const copyPasteRows: CopyPasteRow[] = job.output?.copyPasteRows ? [...job.output.copyPasteRows] : []
+      let doneCount = job.done_items
+
+      for (let batchStart = doneCount; batchStart < jobIds.length; batchStart += COPY_PASTE_BATCH_SIZE) {
+        if (!(await jobStillRunning(id))) {
+          console.log(`[queue/process] copy_paste_wan ${id} cancelled at ${doneCount}/${jobIds.length}`)
+          return NextResponse.json({ ok: true, cancelled: true, done: doneCount })
+        }
+
+        const batchEnd = Math.min(batchStart + COPY_PASTE_BATCH_SIZE, jobIds.length)
+        const batchIds = jobIds.slice(batchStart, batchEnd)
+
+        const results = await Promise.all(batchIds.map(async (itemId): Promise<CopyPasteRow> => {
+          try {
+            const result = await runWanGeneration(itemId, job.user_id, { repurposeCount, outputDriveFolderId })
+            return { itemId, status: 'done', videoUrl: result.videoUrl }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : 'failed'
+            console.error(`[queue/process] copy_paste_wan ${id} item ${itemId} failed:`, msg)
+            return { itemId, status: 'error', error: msg }
+          }
+        }))
+
+        copyPasteRows.push(...results)
+        doneCount = batchEnd
+        const progress = Math.round((doneCount / jobIds.length) * 100)
         await query(
           `UPDATE generation_queue
               SET done_items=$1, progress=$2,

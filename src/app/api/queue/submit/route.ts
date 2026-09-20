@@ -105,6 +105,18 @@ export interface CopyPasteFinishJobInput {
   outputDriveFolderId?: string | null
 }
 
+/**
+ * Copy-Paste via Wan 3.0 reference-to-video (see wan-jobs.ts) — one phase
+ * only, no separate keyframe-approval queue job: the confirm gate happens
+ * before this is ever queued (Telegram cpgo), since there's no cheap
+ * preview step to show first.
+ */
+export interface CopyPasteWanJobInput {
+  jobIds: string[]
+  repurposeCount?: number
+  outputDriveFolderId?: string | null
+}
+
 export interface CopyPromptsJobItem {
   /**
    * Provenance — links a result back to its source card. A scraped_prompts.id

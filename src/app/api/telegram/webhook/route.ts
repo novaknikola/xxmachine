@@ -10,18 +10,16 @@ import {
   editMessageReplyMarkup,
   editMessageText,
   mainMenuKeyboard,
-  promptChoiceKeyboard,
   sendText,
 } from '@/lib/telegram'
-import { enqueueReelUrlsForUser, EnqueueUrlsError } from '@/lib/monitor/enqueue-from-urls'
+import { EnqueueUrlsError } from '@/lib/monitor/enqueue-from-urls'
+import { createWanJobsFromUrls } from '@/lib/monitor/wan-jobs'
 import {
   addUrlsToBatch,
   claimClassifiedItemIds,
-  finalizeBatchClassification,
   findUserByChat,
   getBatch,
   markBatch,
-  markPromptAsked,
   openBatch,
   setAwaitingPrompt,
   setClassifiedItemIds,
@@ -31,7 +29,7 @@ import {
   startBatchWithPhoto,
   type TelegramBatch,
 } from '@/lib/monitor/telegram-batch'
-import { estimateCopyPasteCost, formatUsd } from '@/lib/monitor/cost-estimate'
+import { estimateWanCost, formatUsd } from '@/lib/monitor/cost-estimate'
 import {
   endFrameKeyboard,
   endFrameSummary,
@@ -62,19 +60,20 @@ function escapeHtml(s: string): string {
  * The summary the Replicate button sits on.
  *
  * The estimate is deliberately on the button's own message: Telegram makes it
- * far too easy to start an expensive job with a thumb, and a keyframe plus a
- * Seedance render per reel is real money. Duration is unknown until the reel is
- * probed, so this quotes the default-length case and says so. Repurpose/output/
- * prompt come from the account's saved /settings and the batch's own /prompt,
- * shown here so a tap on Replicate never surprises with settings picked up
- * silently in the background.
+ * far too easy to start an expensive job with a thumb, and a Wan 3.0 call per
+ * reel is real money. Duration is unknown until the reel is probed, so this
+ * quotes the default-length case and says so. Repurpose/output come from the
+ * account's saved /settings, shown here so a tap on Replicate never surprises
+ * with settings picked up silently in the background. No custom-prompt line —
+ * Wan 3.0 uses a fixed default prompt (see wan-reference.ts), it reads no
+ * per-batch text.
  */
 function batchSummary(
   urls: string[],
   hasReference: boolean,
-  settings: { repurposeCount: number; outputDriveFolderId: string | null; customPrompt: string | null },
+  settings: { repurposeCount: number; outputDriveFolderId: string | null },
 ): string {
-  const per = estimateCopyPasteCost(null)
+  const per = estimateWanCost(null)
   const total = per.totalUsd * urls.length
   return [
     `🎬 <b>Copy-Paste batch</b>`,
@@ -84,7 +83,6 @@ function batchSummary(
       ? `Repurpose: <b>${settings.repurposeCount}</b> variant${settings.repurposeCount === 1 ? '' : 's'} per video`
       : 'Repurpose: off (/settings to turn on)',
     settings.outputDriveFolderId ? `Output folder: <code>${escapeHtml(settings.outputDriveFolderId)}</code>` : '',
-    settings.customPrompt ? `Extra prompt: “${escapeHtml(settings.customPrompt)}”` : '',
     '',
     `Estimated: <b>${formatUsd(total)}</b> (${formatUsd(per.totalUsd)} × ${urls.length}, at default clip length)`,
   ].filter(Boolean).join('\n')
@@ -92,23 +90,12 @@ function batchSummary(
 
 /**
  * Called the moment a batch first has both a photo and links, from whichever
- * message completed it. First time: offer the prompt choice instead of going
- * straight to Replicate — asked once (prompt_asked), not on every later link
- * added to the same batch. After that (or once the prompt is skipped/set),
- * shows the normal Replicate/Add prompt/Cancel keyboard.
+ * message completed it. Goes straight to the Replicate/Cancel keyboard — no
+ * "add anything to the prompt?" gate, since Wan 3.0 reference-to-video (see
+ * wan-jobs.ts) uses a fixed default prompt and reads no per-batch custom
+ * text; the old gate's answer would have gone nowhere.
  */
 async function presentBatchReady(chatId: number, batch: TelegramBatch): Promise<void> {
-  if (!batch.prompt_asked) {
-    await markPromptAsked(batch.id)
-    const sent = await sendText(
-      chatId,
-      '📝 Want to add anything to the prompt for this batch? (style, lighting, anything extra)',
-    ) as { message_id?: number }
-    if (sent?.message_id) {
-      await editMessageReplyMarkup(chatId, sent.message_id, promptChoiceKeyboard(batch.id))
-    }
-    return
-  }
   const sent = await sendText(chatId, 'Ready when you are:') as { message_id?: number }
   if (sent?.message_id) {
     await editMessageReplyMarkup(chatId, sent.message_id, batchKeyboard(batch.id))
@@ -401,7 +388,6 @@ export async function POST(req: NextRequest) {
             `${notes}\n\n${batchSummary(batch.urls, !!batch.reference_image_url, {
               repurposeCount: repurposeSettings.variantCount,
               outputDriveFolderId: repurposeSettings.outputDriveFolderId,
-              customPrompt: batch.custom_prompt,
             })}`,
           ) as { message_id?: number }
 
@@ -615,44 +601,50 @@ export async function POST(req: NextRequest) {
       }
 
       try {
-        const result = await enqueueReelUrlsForUser({
+        // Wan 3.0 reference-to-video (see wan-jobs.ts) needs no scene-analysis
+        // step — unlike the old Seedream/Seedance pipeline, there's nothing to
+        // wait for in the background. Resolve the reels and go straight to
+        // "ready to confirm", reusing classified_item_ids/item_ids/cpgo exactly
+        // as the old flow did (this batch's ids are now copy_paste_wan_jobs
+        // rows, not discovery_items rows).
+        if (!batch.reference_image_url) throw new Error('No reference photo on this batch')
+        const result = await createWanJobsFromUrls({
           userId: batch.user_id,
+          chatId: batch.chat_id,
           rawText: batch.urls.join('\n'),
           referenceImageUrl: batch.reference_image_url,
-          // Analysis runs in the background; replication itself is queued
-          // synchronously once the Confirm button below is tapped — see
-          // scheduleAutoClassify for why it is not queued from here directly.
-          //
-          // finalizeBatchClassification re-reads item status from the DB
-          // rather than trusting classifiedIds/failed from this callback
-          // directly, because this callback is itself the thing that has
-          // twice now silently failed to fire on a real batch even after
-          // every item finished classifying with no error — cron's "Stalled
-          // batch confirmations" sweep calls the exact same function as a
-          // safety net, and both need to agree from the same source of truth.
-          onClassified: async () => {
-            const fresh = await getBatch(batch.id)
-            if (fresh) await finalizeBatchClassification(fresh)
-          },
         })
-        // Set synchronously, in this request — independent of whether the
-        // background classify continuation above ever reports back.
-        await setItemIds(batch.id, result.ids)
+        await setItemIds(batch.id, result.jobIds)
+        if (!result.jobIds.length) {
+          await markBatch(batch.id, 'collecting')
+          if (chatId && cbMessage?.message_id) {
+            await editMessageText(chatId, cbMessage.message_id, '❌ None of those reels could be resolved. Try again.')
+            await editMessageReplyMarkup(chatId, cbMessage.message_id, batchKeyboard(batch.id))
+          }
+          return NextResponse.json({ ok: true })
+        }
+        await setClassifiedItemIds(batch.id, result.jobIds)
         if (chatId && cbMessage?.message_id) {
           const failed = result.resolveErrors.length
           await editMessageText(
             chatId,
             cbMessage.message_id,
             [
-              `✅ <b>Queued ${result.enqueued} reel${result.enqueued === 1 ? '' : 's'}</b> for analysis`,
+              `✅ <b>${result.jobIds.length} reel${result.jobIds.length === 1 ? '' : 's'}</b> ready.`,
               failed ? `${failed} could not be resolved and were skipped.` : '',
               '',
-              `I'll ask you to confirm here once they're analyzed.`,
+              `Confirm to start generating? Each one is a paid Wan 3.0 call.`,
             ].filter(Boolean).join('\n'),
           )
+          await editMessageReplyMarkup(chatId, cbMessage.message_id, {
+            inline_keyboard: [[
+              { text: '▶️ Confirm Replicate', callback_data: `cpgo:${batch.id}` },
+              { text: '✖️ Cancel', callback_data: `cpcancel:${batch.id}` },
+            ]],
+          })
         }
       } catch (err) {
-        const msg = err instanceof EnqueueUrlsError ? err.message : 'Enqueue failed'
+        const msg = err instanceof EnqueueUrlsError ? err.message : (err instanceof Error ? err.message : 'Enqueue failed')
         console.error('[telegram/webhook] cpstart failed:', err)
         // Back to collecting so the same batch can be retried rather than
         // rebuilt from scratch.
@@ -700,16 +692,14 @@ export async function POST(req: NextRequest) {
         const settings = await getRepurposeSettings(batch.user_id)
         const row = await one<{ id: string }>(
           `INSERT INTO generation_queue (user_id, job_type, input, total_items)
-           VALUES ($1, 'copy_paste_v2', $2, $3)
+           VALUES ($1, 'copy_paste_wan', $2, $3)
            RETURNING id`,
           [
             batch.user_id,
             JSON.stringify({
-              itemIds,
-              endFrame: settings.endFrameMode,
+              jobIds: itemIds,
               repurposeCount: settings.variantCount,
               outputDriveFolderId: settings.outputDriveFolderId,
-              customPrompt: batch.custom_prompt,
             }),
             itemIds.length,
           ],
@@ -729,14 +719,14 @@ export async function POST(req: NextRequest) {
             fetch(`${internalBaseUrl()}/api/queue/process/${row.id}`, {
               method: 'POST',
               headers: { 'x-cron-secret': secret },
-            }).catch(err => console.error('[telegram/webhook] fire copy_paste_v2 worker:', err))
+            }).catch(err => console.error('[telegram/webhook] fire copy_paste_wan worker:', err))
           }
         }
 
         if (chatId) {
           await sendText(
             chatId,
-            `🎬 Replicating ${itemIds.length} reel${itemIds.length === 1 ? '' : 's'}. You will get the Drive folder here when it finishes.`,
+            `🎬 Generating ${itemIds.length} reel${itemIds.length === 1 ? '' : 's'} with Wan 3.0. You will get the video here when it finishes.`,
           )
         }
       } catch (err) {

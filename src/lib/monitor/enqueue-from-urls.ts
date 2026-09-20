@@ -48,32 +48,32 @@ export class EnqueueUrlsError extends Error {
   }
 }
 
-export interface EnqueueUrlsResult {
-  ids: string[]
-  enqueued: number
-  resolved: number
+export interface ResolveReelUrlsResult {
+  reels: EnqueueReelInput[]
   resolveErrors: ResolveError[]
   invalid: string[]
+  username: string
   sourceUsername: string | null
-  characterProfile: string
   truncated: boolean
 }
 
-export async function enqueueReelUrlsForUser(opts: {
+/**
+ * The actual link → playable video URL resolution (cached lookup, then Apify,
+ * then per-reel RapidAPI download, then profile-listing fallback, then one
+ * delayed Apify retry) — everything enqueueReelUrlsForUser needs BEFORE it
+ * decides what to do with the resolved reels. Split out 2026-09-20 so the
+ * new Wan 3.0 Copy-Paste pipeline (wan-jobs.ts) can reuse this exact
+ * resolution chain without going through discovery_items at all — that
+ * table's UNIQUE(user_id, content_id) is wrong for "the same reel, a
+ * different character" (see migration 097's comment).
+ */
+export async function resolveReelUrls(opts: {
   userId: string
   /** Newline/whitespace separated reel links. */
   rawText: string
   username?: string | null
   sourceUsername?: string | null
-  referenceImageUrl?: string | null
-  /**
-   * Called once background classification finishes, with the ids that
-   * succeeded. Replication itself is queued separately, synchronously,
-   * wherever the caller decides to act on this (e.g. a confirm button) —
-   * see scheduleAutoClassify for why it does not happen automatically here.
-   */
-  onClassified?: (r: { classifiedIds: string[]; failed: number }) => Promise<void>
-}): Promise<EnqueueUrlsResult> {
+}): Promise<ResolveReelUrlsResult> {
   const { userId, rawText } = opts
 
   const { parsed, invalid } = parseReelUrlList(rawText, MAX_URLS)
@@ -93,7 +93,6 @@ export async function enqueueReelUrlsForUser(opts: {
   // Instagram, so the fallback label must not leak into a scrape call.
   const sourceUsername =
     String(opts.sourceUsername ?? '').trim().replace(/^@/, '') || fromUrls || null
-  const referenceImageUrl = String(opts.referenceImageUrl ?? '').trim() || null
 
   const resolved = new Map<string, EnqueueReelInput>()
   const resolveErrors: ResolveError[] = []
@@ -324,6 +323,48 @@ export async function enqueueReelUrlsForUser(opts: {
     }
   }
 
+  return {
+    reels,
+    resolveErrors,
+    invalid,
+    username,
+    sourceUsername,
+    truncated: parseReelUrlList(rawText, MAX_URLS + 1).parsed.length > MAX_URLS,
+  }
+}
+
+export interface EnqueueUrlsResult {
+  ids: string[]
+  enqueued: number
+  resolved: number
+  resolveErrors: ResolveError[]
+  invalid: string[]
+  sourceUsername: string | null
+  characterProfile: string
+  truncated: boolean
+}
+
+export async function enqueueReelUrlsForUser(opts: {
+  userId: string
+  /** Newline/whitespace separated reel links. */
+  rawText: string
+  username?: string | null
+  sourceUsername?: string | null
+  referenceImageUrl?: string | null
+  /**
+   * Called once background classification finishes, with the ids that
+   * succeeded. Replication itself is queued separately, synchronously,
+   * wherever the caller decides to act on this (e.g. a confirm button) —
+   * see scheduleAutoClassify for why it does not happen automatically here.
+   */
+  onClassified?: (r: { classifiedIds: string[]; failed: number }) => Promise<void>
+}): Promise<EnqueueUrlsResult> {
+  const { userId, rawText } = opts
+  const referenceImageUrl = String(opts.referenceImageUrl ?? '').trim() || null
+
+  const { reels, resolveErrors, invalid, username, sourceUsername, truncated } =
+    await resolveReelUrls(opts)
+
   const result = await enqueueDiscoveryReels(userId, username, reels, { referenceImageUrl })
   scheduleAutoClassify(userId, result.ids, { onClassified: opts.onClassified })
 
@@ -335,6 +376,6 @@ export async function enqueueReelUrlsForUser(opts: {
     invalid,
     sourceUsername,
     characterProfile: username,
-    truncated: parseReelUrlList(rawText, MAX_URLS + 1).parsed.length > MAX_URLS,
+    truncated,
   }
 }

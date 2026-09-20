@@ -3,7 +3,7 @@ import { editImage } from '@/lib/wavespeed'
 import { uploadImageFromUrl } from '@/lib/supabase-storage'
 import type { SourceAspectRatio } from './analyze'
 
-const API_V3 = 'https://api.wavespeed.ai/api/v3'
+export const API_V3 = 'https://api.wavespeed.ai/api/v3'
 const SEEDREAM_KEYFRAME_MODEL = 'seedream-v5.0-pro-edit'
 
 const POLL_INTERVAL_MS = 5_000
@@ -27,7 +27,8 @@ const SEEDANCE_POLL_ATTEMPTS = 540            // 540 × 5s = 45 min
 const SEEDANCE_ABORT_MS = 2_700_000           // 45 min
 const SEEDREAM_ABORT_MS = 400_000
 
-async function pollV3(
+/** Exported for reuse by other WaveSpeed v3 model clients (e.g. wan-reference.ts) — same predictions/{id}/result polling shape across models. */
+export async function pollV3(
   requestId: string,
   apiKey: string,
   signal: AbortSignal,
