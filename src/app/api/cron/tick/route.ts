@@ -184,7 +184,17 @@ export async function GET(req: NextRequest) {
   // job it fired for; the status='processing' guard on the UPDATE still
   // makes this race-safe against a concurrent tick the same way the old
   // single statement was.
-  const STALE_JOB_ERROR = 'Job stalled — no progress for 60 minutes. Check WaveSpeed usage before resubmitting; the original call may have already billed.'
+  //
+  // copy_paste_wan gets its own, much shorter threshold: unlike Seedance
+  // video-edit (legitimately up to 45min) a single Wan 3.0 reference-to-video
+  // call is fast, so a dead worker (deploy restart mid-call — confirmed live
+  // 2026-09-20, twice in one hour) has no business sitting undetected for an
+  // hour. 15 minutes gives real generations plenty of room without leaving a
+  // person watching a dead job for nearly an hour before this sweep says so.
+  const staleThreshold = (jobType: string) =>
+    jobType === 'copy_paste_wan' ? '15 minutes' : '60 minutes'
+  const staleErrorFor = (jobType: string) =>
+    `Job stalled — no progress for ${staleThreshold(jobType)}. Check WaveSpeed usage before resubmitting; the original call may have already billed.`
   try {
     const staleJobs = await rows<{ id: string; user_id: string; job_type: string }>(
       `SELECT id, user_id, job_type FROM generation_queue
@@ -194,9 +204,10 @@ export async function GET(req: NextRequest) {
           AND COALESCE(
                 NULLIF(output->>'progressAt', '')::timestamptz,
                 started_at
-              ) < now() - interval '60 minutes'`,
+              ) < now() - (CASE WHEN job_type = 'copy_paste_wan' THEN interval '15 minutes' ELSE interval '60 minutes' END)`,
     )
     for (const job of staleJobs) {
+      const STALE_JOB_ERROR = staleErrorFor(job.job_type)
       const failed = await query(
         `UPDATE generation_queue SET status = 'failed', error = COALESCE(error, $1), finished_at = now()
           WHERE id = $2 AND status = 'processing'`,

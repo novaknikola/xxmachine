@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { one, query } from '@/lib/db'
+import { one, query, rows } from '@/lib/db'
 import { encryptOrNull } from '@/lib/crypto'
 import { internalBaseUrl } from '@/lib/internal-url'
 import {
@@ -218,6 +218,33 @@ export async function POST(req: NextRequest) {
           if (sent?.message_id) {
             await editMessageReplyMarkup(chatId, sent.message_id, mainMenuKeyboard())
           }
+          return NextResponse.json({ ok: true })
+        }
+
+        // ── /status — Copy-Paste queue visibility without asking anyone
+        // to go dig through the database. Scoped to the last 24h so a stale
+        // batch from days ago doesn't clutter today's picture.
+        if (rawText.startsWith('/status')) {
+          const counts = await rows<{ status: string; n: number }>(
+            `SELECT status, count(*)::int AS n FROM copy_paste_wan_jobs
+              WHERE user_id = $1 AND created_at > now() - interval '24 hours'
+              GROUP BY status`,
+            [userId],
+          )
+          const byStatus = Object.fromEntries(counts.map(c => [c.status, c.n]))
+          const total = counts.reduce((sum, c) => sum + c.n, 0)
+          if (total === 0) {
+            await sendText(chatId, '📊 <b>Copy-Paste status</b>\n\nNothing in the last 24h.')
+            return NextResponse.json({ ok: true })
+          }
+          const lines = [
+            `📊 <b>Copy-Paste status</b> (last 24h)`,
+            `⏳ Awaiting confirm: <b>${byStatus.awaiting_confirm ?? 0}</b>`,
+            `🔄 Generating: <b>${byStatus.generating ?? 0}</b>`,
+            `✅ Done: <b>${byStatus.done ?? 0}</b>`,
+            `❌ Failed: <b>${byStatus.failed ?? 0}</b>`,
+          ]
+          await sendText(chatId, lines.join('\n'))
           return NextResponse.json({ ok: true })
         }
 
