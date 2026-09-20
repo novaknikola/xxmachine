@@ -146,7 +146,13 @@ export async function GET(req: NextRequest) {
   // Reset stuck shared-pool jobs that have been processing for > 30 minutes.
   // copy_paste_v2 is excluded: one item is a Seedream keyframe plus a Seedance
   // render, so a legitimate bulk run easily exceeds 30 minutes of wall clock.
-  // It is requeued on heartbeat staleness instead (see below).
+  // It is requeued on heartbeat staleness instead (see below). copy_paste_wan
+  // (Wan 3.0 reference-to-video, wan-jobs.ts) has the same profile — several
+  // sequential per-item calls, batched 2 at a time — and was missing from
+  // this exclusion list, confirmed live 2026-09-20: this generic 30-minute
+  // reset requeued a still-running batch while the original invocation was
+  // still alive, so both processed the same items concurrently and generated
+  // some of them twice.
   await query(
     `UPDATE generation_queue
         SET status = 'pending'
@@ -154,7 +160,7 @@ export async function GET(req: NextRequest) {
         AND started_at < now() - interval '30 minutes'
         AND attempts < max_attempts
         AND job_type NOT IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk',
-                             'copy_paste_v2', 'copy_paste_finish', 'copy_prompts_generate', 'seedance_i2v', 'infinite_talk',
+                             'copy_paste_v2', 'copy_paste_finish', 'copy_paste_wan', 'copy_prompts_generate', 'seedance_i2v', 'infinite_talk',
                              'kling_recreate_v1')`,
   ).catch(err => console.error('[cron/tick] reset stuck queue jobs:', err))
 
@@ -183,7 +189,7 @@ export async function GET(req: NextRequest) {
     const staleJobs = await rows<{ id: string; user_id: string; job_type: string }>(
       `SELECT id, user_id, job_type FROM generation_queue
         WHERE status = 'processing'
-          AND job_type IN ('copy_paste_v2', 'copy_paste_finish', 'copy_prompts_generate', 'seedance_i2v', 'infinite_talk',
+          AND job_type IN ('copy_paste_v2', 'copy_paste_finish', 'copy_paste_wan', 'copy_prompts_generate', 'seedance_i2v', 'infinite_talk',
                            'kling_recreate_v1')
           AND COALESCE(
                 NULLIF(output->>'progressAt', '')::timestamptz,

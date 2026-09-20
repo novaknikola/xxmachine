@@ -97,6 +97,23 @@ export async function runWanGeneration(
   }
   if (!job.video_url) throw new Error('Job has no source video')
 
+  // Atomic claim: only the caller that actually flips awaiting_confirm ->
+  // generating gets to fire the paid call. A second concurrent invocation
+  // for the same job (e.g. a queue-job retry landing while the first attempt
+  // is still genuinely running — see the cron/tick.ts exclusion this pipeline
+  // needs) finds nothing to claim and fails loudly instead of billing Wan 3.0
+  // twice. Confirmed live 2026-09-20: this is exactly how a job got generated
+  // twice before that cron exclusion existed.
+  const claimed = await one<{ id: string }>(
+    `UPDATE copy_paste_wan_jobs SET status = 'generating'
+      WHERE id = $1 AND status = 'awaiting_confirm'
+      RETURNING id`,
+    [jobId],
+  )
+  if (!claimed) {
+    throw new Error(`Job already ${job.status} — not starting a second Wan 3.0 call for it`)
+  }
+
   const apiKey = await getUserApiKey(userId, 'wavespeed_api_key')
 
   try {
@@ -120,7 +137,6 @@ export async function runWanGeneration(
     // clip. Can be relaxed once real output is seen.
     const wanDuration = Math.min(Math.max(Math.round(duration ?? 5), 2), 15)
 
-    await query(`UPDATE copy_paste_wan_jobs SET status = 'generating' WHERE id = $1`, [jobId])
     const result = await generateWanReferenceVideo({
       referenceImageUrl: job.reference_image_url,
       referenceVideoUrl: job.video_url,
