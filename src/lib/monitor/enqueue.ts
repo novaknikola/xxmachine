@@ -117,6 +117,14 @@ export async function enqueueDiscoveryReels(
              WHEN replicate_status = 'skipped' THEN 'pending_classify'
              WHEN replicate_status = 'needs_review' THEN 'pending_classify'
              WHEN replicate_status = 'none' THEN 'pending_classify'
+             -- Only reset a parked awaiting_keyframe_approval row when the
+             -- reference photo actually changed (same condition that clears
+             -- generated_image_url etc. below) — otherwise this cleared the
+             -- image but left replicate_status stuck at awaiting_keyframe_approval,
+             -- so nothing ever picked the row back up to regenerate it.
+             -- Confirmed live 2026-09-20, right after the busy-skip fix (0a10de7)
+             -- that made this UPDATE reachable in the first place.
+             WHEN replicate_status = 'awaiting_keyframe_approval' AND $12::bool THEN 'pending_classify'
              ELSE replicate_status
            END,
            profile = $3,
