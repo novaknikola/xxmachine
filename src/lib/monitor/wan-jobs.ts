@@ -14,6 +14,7 @@ import { probeSourceVideo } from './analyze'
 import { notifyReplicationDone, notifyReplicationFailed } from './notify'
 import { enqueueRepurpose } from './process-item'
 import { enqueueDriveArchive } from '@/lib/drive-archive/enqueue'
+import { uploadImageFromUrl } from '@/lib/supabase-storage'
 
 export interface WanJobRow {
   id: string
@@ -144,18 +145,30 @@ export async function runWanGeneration(
       duration: wanDuration,
     }, apiKey)
 
+    // Re-hosted rather than used as-is: WaveSpeed's own CloudFront result
+    // link isn't reliably fetchable by Telegram's own URL-fetch for sendVideo
+    // (confirmed live 2026-09-20 — "Bad Request: failed to get HTTP URL
+    // content" on a perfectly valid, finished video) and there's no
+    // guarantee how long that link stays valid. Falls back to the original
+    // WaveSpeed URL if the re-host itself fails, same as the recreate bot's
+    // finishSeedanceRender does.
+    const hostedVideoUrl = await uploadImageFromUrl(
+      result.videoUrl,
+      `monitor/${jobId}/wan-result.mp4`,
+    ).catch(() => result.videoUrl)
+
     await query(
       `UPDATE copy_paste_wan_jobs
           SET status = 'done', video_result_url = $2, video_model = $3, error = NULL
         WHERE id = $1`,
-      [jobId, result.videoUrl, result.model],
+      [jobId, hostedVideoUrl, result.model],
     )
 
     await enqueueDriveArchive({
       userId,
       sourceType: 'queue_job',
       sourceId: jobId,
-      urls: [result.videoUrl],
+      urls: [hostedVideoUrl],
       characterKey: job.profile ?? undefined,
       kind: 'reels',
       stage: 'ready',
@@ -164,7 +177,7 @@ export async function runWanGeneration(
 
     await enqueueRepurpose({
       userId,
-      videoUrl: result.videoUrl,
+      videoUrl: hostedVideoUrl,
       count: opts?.repurposeCount ?? 0,
       characterKey: job.profile,
       itemId: jobId,
@@ -176,13 +189,13 @@ export async function runWanGeneration(
       profile: job.profile ?? 'copy-paste',
       contentUrl: job.content_url,
       contentType: null,
-      videoUrl: result.videoUrl,
+      videoUrl: hostedVideoUrl,
       // Repurpose is already auto-applied above per the account's own
       // setting — offering the manual follow-up button too would double it.
       itemId: null,
-    }).catch(() => {})
+    }).catch(err => console.error('[wan-jobs] notify failed:', err))
 
-    return { videoUrl: result.videoUrl }
+    return { videoUrl: hostedVideoUrl }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     await query(`UPDATE copy_paste_wan_jobs SET status = 'failed', error = $2 WHERE id = $1`, [jobId, msg])

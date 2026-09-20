@@ -32,7 +32,18 @@ export async function notifyMonitorUser(
 
   try {
     if (opts?.videoUrl) {
-      await sendVideo(chatId, opts.videoUrl, text)
+      try {
+        await sendVideo(chatId, opts.videoUrl, text)
+      } catch (videoErr) {
+        // Telegram fetches the file itself when given a URL, and that fetch
+        // can fail even though the video is genuinely done and playable —
+        // confirmed live 2026-09-20: "Bad Request: failed to get HTTP URL
+        // content" against a WaveSpeed CloudFront result link, with no
+        // fallback here, so the finished video silently never reached the
+        // user at all. A link they can open themselves beats silence.
+        console.error('[monitor/notify] sendVideo failed, falling back to link:', videoErr)
+        await sendText(chatId, `${text}\n${escapeHtml(opts.videoUrl)}`)
+      }
     } else if (opts?.imageUrl) {
       await sendPhoto(chatId, opts.imageUrl, text)
     } else {
