@@ -434,6 +434,16 @@ export async function GET(req: NextRequest) {
              WHERE di.id = ANY(tb.item_ids)
                AND di.replicate_status IN ('none', 'pending_classify', 'analyzing')
           )
+          -- Wan 3.0 batches (see wan-jobs.ts) never go through classify at
+          -- all — cpstart sets classified_item_ids synchronously, then
+          -- claimClassifiedItemIds legitimately clears it back to empty the
+          -- moment Confirm is tapped. That's success, not a stall; this old
+          -- discovery_items-only sweep has no business touching them.
+          -- Confirmed live 2026-09-20: it was sending a false "nothing could
+          -- be replicated" ~90s after a Wan generation had already started.
+          AND NOT EXISTS (
+            SELECT 1 FROM copy_paste_wan_jobs wj WHERE wj.id = ANY(tb.item_ids)
+          )
         ORDER BY tb.updated_at
         LIMIT 5`,
     )
