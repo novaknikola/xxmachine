@@ -122,6 +122,30 @@ export async function resolvePendingPhotoRole(
   return { kind: 'character', label: trimmed }
 }
 
+/**
+ * Loads a saved bundle's characters + ambiance into the current batch,
+ * replacing whatever reference_photos/ambiance_photo_url were already
+ * there — "use this bundle" means starting fresh with its set, not merging
+ * with partial uploads from earlier in the batch.
+ */
+export async function loadBundleIntoPending(opts: {
+  chatId: number
+  userId: string
+  referencePhotos: Record<string, string>
+  ambiancePhotoUrl: string | null
+}): Promise<void> {
+  await query(
+    `INSERT INTO telegram_recreate_pending (chat_id, user_id, reference_photos, ambiance_photo_url, updated_at)
+     VALUES ($1, $2, $3::jsonb, $4, now())
+     ON CONFLICT (chat_id) DO UPDATE SET
+       reference_photos = EXCLUDED.reference_photos,
+       ambiance_photo_url = EXCLUDED.ambiance_photo_url,
+       user_id = EXCLUDED.user_id,
+       updated_at = now()`,
+    [opts.chatId, opts.userId, JSON.stringify(opts.referencePhotos), opts.ambiancePhotoUrl],
+  )
+}
+
 export interface AddUrlsResult {
   pending: RecreatePending
   added: number

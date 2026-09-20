@@ -3,12 +3,12 @@ import { one, query, rows } from '@/lib/db'
 import {
   sendText, answerCallbackQuery, editMessageReplyMarkup,
   confirmRecreateKeyboard, stillPromptChoiceKeyboard, stillModelKeyboard, scriptOnlyKeyboard, bulkConfirmKeyboard,
-  downloadTelegramVoice,
+  bundlesKeyboard, downloadTelegramVoice,
 } from '@/lib/telegram-recreate'
 import { transcribeVoiceNote } from '@/lib/grok'
 import {
   addUrlsToPending, claimPending, claimPendingForScript, clearPending, getPending,
-  holdPendingPhotoRole, resolvePendingPhotoRole, setAwaiting, setAwaitingVariation,
+  holdPendingPhotoRole, loadBundleIntoPending, resolvePendingPhotoRole, setAwaiting, setAwaitingVariation,
   setPendingCustomPrompt, setPendingStillModel,
 } from '@/lib/kling-recreate/pending'
 import {
@@ -24,6 +24,7 @@ import {
 import {
   parseBulkStillModel, readBulkQueueRows, resolveDrivePhoto, writeBulkRowStatus, type BulkQueueRow,
 } from '@/lib/kling-recreate/bulk-sheet'
+import { getBundle, listBundles, saveBundle } from '@/lib/kling-recreate/bundles'
 import type { KlingRecreateJobRow } from '@/lib/kling-recreate/types'
 
 /**
@@ -52,6 +53,8 @@ const HELP = [
   'Every photo you send, I’ll ask what it represents — a character’s name/role, or "ambiance" if it’s just a style/setting reference, not a person. More than one real person in the scene? Just send each photo separately and answer that question each time.',
   '',
   '/bulk — prep rows in the "Kling Bulk Queue" sheet tab (Reel URL or Script, up to 3 character Drive photos + ambiance), then run this to queue up to 5 at once',
+  '/savebundle &lt;name&gt; — save the current batch\'s characters + ambiance as a reusable named bundle',
+  '/bundles — pick a saved bundle to load into the current batch instead of re-uploading photos',
   '/ideas — recent banked niche ideas (not rendered)',
   '/cancel — clear the current batch',
 ].join('\n')
@@ -390,6 +393,42 @@ export async function POST(req: NextRequest) {
     }
 
     /**
+     * Snapshots the current batch's reference_photos + ambiance_photo_url
+     * under a user-chosen name — explicit user ask 2026-09-20: reusable
+     * "Tiana & Grandpa & Living Room" style bundles instead of re-uploading
+     * the same photos for every new recreate.
+     */
+    if (message?.text?.startsWith('/savebundle')) {
+      const name = message.text.slice('/savebundle'.length).trim()
+      if (!name) {
+        await sendText(chatId, 'Usage: <code>/savebundle Tiana &amp; Grandpa &amp; Living Room</code> — name it however you like.')
+        return NextResponse.json({ ok: true })
+      }
+      const pending = await getPending(chatId)
+      const referencePhotos = pending?.reference_photos ?? {}
+      if (!Object.keys(referencePhotos).length) {
+        await sendText(chatId, 'Nothing to save yet — send at least one named photo first.')
+        return NextResponse.json({ ok: true })
+      }
+      await saveBundle({
+        userId, name,
+        referencePhotos, ambiancePhotoUrl: pending?.ambiance_photo_url ?? null,
+      })
+      await sendText(chatId, `💾 Saved bundle "${escapeHtml(name)}" — ${Object.keys(referencePhotos).length} character(s)${pending?.ambiance_photo_url ? ' + ambiance' : ''}.`)
+      return NextResponse.json({ ok: true })
+    }
+
+    if (message?.text?.startsWith('/bundles')) {
+      const bundles = await listBundles(userId)
+      if (!bundles.length) {
+        await sendText(chatId, 'No saved bundles yet — build a batch with named photos, then /savebundle &lt;name&gt;.')
+        return NextResponse.json({ ok: true })
+      }
+      await sendText(chatId, '📚 Pick a bundle to load into the current batch:', bundlesKeyboard(bundles))
+      return NextResponse.json({ ok: true })
+    }
+
+    /**
      * Every photo, without exception, is held and gets an explicit role
      * question — no caption shortcut, no "first photo is free" fast path
      * (2026-09-18, explicit user ask after 3 straight failed attempts at
@@ -692,6 +731,28 @@ export async function POST(req: NextRequest) {
         await setPendingStillModel(chatId, model)
         await answerCallbackQuery(cb.id, model === 'seedream_nsfw' ? 'NSFW' : 'SFW')
         if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
+        await showBatch(chatId, userId)
+        return NextResponse.json({ ok: true })
+      }
+
+      if (parts[1] === 'bundle') {
+        if (messageId) await editMessageReplyMarkup(chatId, messageId, {})
+        if (parts[2] === 'dismiss') {
+          await answerCallbackQuery(cb.id, 'Dismissed')
+          return NextResponse.json({ ok: true })
+        }
+        const bundle = await getBundle(userId, parts[2])
+        if (!bundle) {
+          await answerCallbackQuery(cb.id, 'Bundle not found')
+          return NextResponse.json({ ok: true })
+        }
+        await loadBundleIntoPending({
+          chatId, userId,
+          referencePhotos: bundle.reference_photos,
+          ambiancePhotoUrl: bundle.ambiance_photo_url,
+        })
+        await answerCallbackQuery(cb.id, `Loaded "${bundle.name}"`)
+        await sendText(chatId, `📚 Loaded "${escapeHtml(bundle.name)}" — ${Object.keys(bundle.reference_photos).length} character(s)${bundle.ambiance_photo_url ? ' + ambiance' : ''}. Paste a reel URL or send a script.`)
         await showBatch(chatId, userId)
         return NextResponse.json({ ok: true })
       }

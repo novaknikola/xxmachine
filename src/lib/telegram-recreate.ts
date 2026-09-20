@@ -221,6 +221,18 @@ export function stillModelKeyboard() {
   }
 }
 
+/** /bundles — one button per saved bundle, tap to load its photos/ambiance into the current batch.
+ * Dismiss uses its own callback_data (not kr:cancel) — kr:cancel clears the whole pending batch,
+ * which would wipe out anything already added before the picker was opened. */
+export function bundlesKeyboard(bundles: { id: string; name: string }[]) {
+  return {
+    inline_keyboard: [
+      ...bundles.map(b => [{ text: b.name, callback_data: `kr:bundle:${b.id}` }]),
+      [{ text: '✖️ Dismiss', callback_data: 'kr:bundle:dismiss' }],
+    ],
+  }
+}
+
 /** Gate 1: character still generated, before dialogue attribution is checked. */
 export function stillApprovalKeyboard(jobId: string) {
   return {
