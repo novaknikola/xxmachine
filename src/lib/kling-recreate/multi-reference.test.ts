@@ -80,6 +80,37 @@ const EMPTY_CONTEXT: KlingVideoContext = {
   duration_sec: null, aspect_ratio: '9:16', shots: [], prompt_mode: 'prompt',
 }
 
+describe('end-frame wardrobe-change heuristic', () => {
+  it('keeps the "same wardrobe" lock when the closing beat has no clothing-change language', () => {
+    const context: KlingVideoContext = {
+      ...EMPTY_CONTEXT,
+      shots: [{ t_start: 0, t_end: 5, prompt: 'She smiles and adjusts her hair while looking at the camera.' }],
+    }
+    const end = renderEndFrameEditPrompt(context, [{ name: 'Tiana' }])
+    assert.match(end, /same wardrobe/)
+    assert.doesNotMatch(end, /EXCEPT wardrobe/)
+  })
+
+  it('lets wardrobe differ when the closing beat describes adjusting a garment', () => {
+    const context: KlingVideoContext = {
+      ...EMPTY_CONTEXT,
+      shots: [{ t_start: 0, t_end: 5, prompt: 'She steps into the doorway, adjusting the front of her white shirt.' }],
+    }
+    const end = renderEndFrameEditPrompt(context, [{ name: 'Tiana' }])
+    assert.match(end, /EXCEPT wardrobe/)
+    assert.doesNotMatch(end, /same wardrobe/)
+  })
+
+  it('does not trigger on an unrelated verb+noun pair', () => {
+    const context: KlingVideoContext = {
+      ...EMPTY_CONTEXT,
+      shots: [{ t_start: 0, t_end: 5, prompt: 'He removes his sunglasses and laughs.' }],
+    }
+    const end = renderEndFrameEditPrompt(context, [{ name: 'Tiana' }])
+    assert.match(end, /same wardrobe/)
+  })
+})
+
 describe('ambiance reference wiring', () => {
   it('omits the ambiance line by default', () => {
     const first = renderFirstFrameEditPrompt(EMPTY_CONTEXT, [{ name: 'Tiana' }])

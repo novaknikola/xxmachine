@@ -284,13 +284,33 @@ export function renderFirstFrameEditPrompt(context: KlingVideoContext, photos: N
   return bits.join(' ')
 }
 
+/**
+ * True when the closing beat's own text describes a wardrobe change in
+ * progress (adjusting/removing/putting on a garment) — confirmed in
+ * production 2026-09-19: forcing "same wardrobe as image 1" while the beat
+ * text says someone is "adjusting her white shirt" put the model in direct
+ * conflict with itself, and it followed the beat text, producing an end
+ * frame whose wardrobe silently drifted from the first frame instead of
+ * changing in a controlled, described way. Narrow by design (a verb AND a
+ * garment noun both present) to avoid false-triggering on something like
+ * "adjusts her hair".
+ */
+const WARDROBE_CHANGE_VERB = /\b(adjust(s|ing)?|pulls?(?:\s+(?:down|up))?|puts?\s+on|takes?\s+off|removes?|buttons?|unbuttons?|zips?|unzips?|ties?|unties?|fixes?|straightens?|changes?\s+into)\b/i
+const WARDROBE_GARMENT_NOUN = /\b(shirt|blouse|dress|skirt|top|jacket|sweater|cardigan|robe|towel|pants|jeans|bra|shorts|coat|hoodie|scarf)\b/i
+function describesWardrobeChange(beat: string | null | undefined): boolean {
+  if (!beat) return false
+  return WARDROBE_CHANGE_VERB.test(beat) && WARDROBE_GARMENT_NOUN.test(beat)
+}
+
 export function renderEndFrameEditPrompt(context: KlingVideoContext, photos: NamedIdentityPhoto[], hasAmbiance = false): string {
   const lastBeat = context.shots?.[context.shots.length - 1]?.prompt?.trim() || context.character_action
   const bits = [
     photos.length > 1
       ? 'Image 1 is the just-generated first frame of this same shot, the remaining images are identity reference photos, one per named character.'
       : 'Image 1 is the just-generated first frame of this same shot, image 2 is the identity reference photo.',
-    'Generate the END frame of the same continuous shot: every person must look IDENTICAL to image 1 — same face, same hair colour and styling, same wardrobe, same skin tone and lighting. Only the pose and framing advance.',
+    describesWardrobeChange(lastBeat)
+      ? 'Generate the END frame of the same continuous shot: every person must look IDENTICAL to image 1 in face, hair colour and styling, skin tone and lighting — EXCEPT wardrobe, which the closing instant below describes as being adjusted or changed; render that wardrobe change as described instead of copying image 1\'s wardrobe exactly. Only the pose, framing, and that described wardrobe change advance.'
+      : 'Generate the END frame of the same continuous shot: every person must look IDENTICAL to image 1 — same face, same hair colour and styling, same wardrobe, same skin tone and lighting. Only the pose and framing advance.',
     identityLines(photos, 2),
     hasAmbiance ? AMBIANCE_LINE : '',
     lastBeat && `This still is the closing instant of the shot, frozen exactly here: ${lastBeat}`,
