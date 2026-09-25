@@ -759,6 +759,7 @@ export async function POST(req: NextRequest) {
 
       // ── Approval gates — still, then dialogue attribution, then prompt ──
       if (parts[1] === 'stillok' || parts[1] === 'stillrg' || parts[1] === 'dialogueok'
+        || parts[1] === 'stillnoend' || parts[1] === 'stillface'
         || parts[1] === 'promptok' || parts[1] === 'promptrg') {
         const jobId = parts[2]
         const job = await one<KlingRecreateJobRow>(
@@ -771,6 +772,8 @@ export async function POST(req: NextRequest) {
         }
         const action =
           parts[1] === 'stillok' ? 'approve_still' as const :
+          parts[1] === 'stillnoend' ? 'approve_still_no_end' as const :
+          parts[1] === 'stillface' ? 'face_end_frame' as const :
           parts[1] === 'stillrg' ? 'regenerate_still' as const :
           parts[1] === 'dialogueok' ? 'approve_dialogue' as const :
           parts[1] === 'promptok' ? 'approve_prompt' as const :

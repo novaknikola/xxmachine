@@ -10,7 +10,7 @@
  */
 import { callGrok, GROK_FAST } from '@/lib/grok'
 import { PRESERVE_MOTION_CUE, REMOVE_ONSCREEN_TEXT } from '@/lib/monitor/copy-paste-spec'
-import type { KlingVideoContext } from './types'
+import type { EndFrameMode, KlingVideoContext } from './types'
 
 const SYSTEM = `You convert a shot/beat breakdown of a short-form video into a Seedance
 2.5 Image-to-Video "prompt" field, following these WaveSpeed rules exactly:
@@ -56,17 +56,44 @@ function beatsToText(context: KlingVideoContext): string {
     .join('\n')
 }
 
+/** Seconds the closing face close-up lasts in 'face' end-frame mode. */
+export const FACE_END_SECONDS = 0.5
+
+/**
+ * The extra timeline rule for the end-frame mode chosen in the Telegram still
+ * gate. Only 'face' changes the prompt: the last supplied image is a close-up
+ * of the lead's face, so the final half-second has to arrive at it as a quick
+ * push-in. Empty for 'scene' and 'none' (prompt identical to before).
+ */
+export function endFrameInstruction(mode: EndFrameMode | null | undefined, durationSec: number | null): string {
+  if (mode !== 'face') return ''
+  const total = durationSec && durationSec > 0 ? durationSec : null
+  const from = total != null ? Math.max(0, +(total - FACE_END_SECONDS).toFixed(1)) : null
+  const tail = from != null
+    ? `split the timeline so its LAST segment is "${from}-${total}s: quick push-in to a close-up on her face, face centered, looking toward camera"`
+    : `make the LAST ${FACE_END_SECONDS} seconds of the timeline a quick push-in to a close-up on her face, face centered, looking toward camera`
+  return `END IMAGE (authoritative): the last image supplied is a close-up of the lead character's face. Keep every earlier segment exactly as described, but ${tail}. That final half-second must not introduce any new action or dialogue, and the timeline must still cover the full duration with no gaps.`
+}
+
 export async function buildSeedancePrompt(
   context: KlingVideoContext,
   dialogueOverride?: string | null,
+  endFrameMode?: EndFrameMode | null,
 ): Promise<string> {
   const beatsText = beatsToText(context)
+  const endRule = endFrameInstruction(endFrameMode, context.duration_sec ?? null)
   if (!beatsText) {
     // No timed beats — fall back to the master prompt/hook/character_action
     // as one continuous segment rather than failing the render outright.
+    const total = context.duration_sec ?? 5
+    const cutAt = +(total - FACE_END_SECONDS).toFixed(1)
+    const closing = endFrameMode === 'face' && cutAt > 0
+    const body = [context.character_action, context.camera].filter(Boolean).join(' ')
     return [
       'Begin from the start image.',
-      `0-${context.duration_sec ?? 5}s: ${[context.character_action, context.camera].filter(Boolean).join(' ')}`,
+      closing
+        ? `0-${cutAt}s: ${body}\n${cutAt}-${total}s: Quick push-in to a close-up on her face, face centered, looking toward camera.`
+        : `0-${total}s: ${body}`,
       context.speech ? `Audio: ${context.speech}` : 'No BGM — ambient and action sounds only.',
       'No subtitles. No BGM.',
     ].join('\n')
@@ -79,6 +106,7 @@ export async function buildSeedancePrompt(
     beatsText,
     '',
     context.speech ? `TRANSCRIPT (for exact dialogue wording): ${context.speech}` : '',
+    endRule ? `\n${endRule}` : '',
     dialogueOverride ? `\nUSER-CONFIRMED SPEAKER CORRECTION (authoritative — use this attribution over anything in the beats above wherever they conflict): ${dialogueOverride}` : '',
     '',
     'Write the Seedance 2.5 I2V prompt now, following the system rules exactly.',
@@ -321,6 +349,31 @@ export function renderEndFrameEditPrompt(context: KlingVideoContext, photos: Nam
       ? 'Photorealistic, hyper-realistic detail, natural skin texture, no beauty filter, no AI skin smoothing.'
       : 'Photorealistic, natural skin and fabric detail, authentic candid social-media snapshot quality, no beauty filter, no AI skin smoothing.',
     'Do not add extra people beyond what the scene describes. Do not change the background/setting from image 1.',
+  ].filter(Boolean)
+  return bits.join(' ')
+}
+
+/**
+ * The 'face' end frame: a tight close-up of the lead character's face in the
+ * SAME scene, built from the already-approved first frame + the identity
+ * photo(s). Nearly a crop-in of the first frame, so it stays a continuation of
+ * the shot rather than a new scene (the documented last_image rule).
+ */
+export function renderFaceEndFramePrompt(context: KlingVideoContext, photos: NamedIdentityPhoto[]): string {
+  const lead = photos[0]?.name?.trim()
+  const who = lead ? `"${lead}"` : 'the main character'
+  const bits = [
+    photos.length > 1
+      ? 'Image 1 is the just-generated first frame of this same shot, the remaining images are identity reference photos, one per named character.'
+      : 'Image 1 is the just-generated first frame of this same shot, image 2 is the identity reference photo.',
+    `Generate a tight CLOSE-UP of ${who}: face and upper shoulders filling the frame, eyes toward the camera, natural relaxed expression. It is the same shot pushed in: same person, same hair colour and styling, same wardrobe, same skin tone, same lighting, and the same background/setting as image 1 (only visible behind the face).`,
+    'The face must match the identity reference photo exactly, every feature, proportion and skin detail, because this image exists to lock that face in.',
+    photos.length > 1 ? 'Show only this one character in the frame.' : '',
+    REMOVE_ONSCREEN_TEXT,
+    context.capture_style === 'produced'
+      ? 'Photorealistic, hyper-realistic detail, natural skin texture, no beauty filter, no AI skin smoothing.'
+      : 'Photorealistic, natural skin and fabric detail, authentic candid social-media snapshot quality, no beauty filter, no AI skin smoothing.',
+    'Same vertical framing/aspect ratio as image 1. Do not add extra people.',
   ].filter(Boolean)
   return bits.join(' ')
 }

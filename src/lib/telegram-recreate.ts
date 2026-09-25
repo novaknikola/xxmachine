@@ -236,10 +236,16 @@ export function bundlesKeyboard(bundles: { id: string; name: string }[]) {
 /** Gate 1: character still generated, before dialogue attribution is checked. */
 export function stillApprovalKeyboard(jobId: string) {
   return {
-    inline_keyboard: [[
-      { text: '✅ Approve still', callback_data: `kr:stillok:${jobId}` },
-      { text: '🔁 Regenerate', callback_data: `kr:stillrg:${jobId}` },
-    ]],
+    inline_keyboard: [
+      [
+        { text: '✅ Approve both', callback_data: `kr:stillok:${jobId}` },
+        { text: '✅ No end frame', callback_data: `kr:stillnoend:${jobId}` },
+      ],
+      [
+        { text: '👤 Face close-up end', callback_data: `kr:stillface:${jobId}` },
+        { text: '🔁 Regenerate', callback_data: `kr:stillrg:${jobId}` },
+      ],
+    ],
   }
 }
 

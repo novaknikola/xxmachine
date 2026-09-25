@@ -21,7 +21,7 @@ import { editImageNanoBananaPro } from './nano-banana-client'
 import { editImage as editImageSeedream, finalizeWithSkinEnhance } from '@/lib/wavespeed'
 import {
   applyDialogueCorrection, buildSeedancePrompt, extractDialogueSummary,
-  formatSeedancePromptSummary, renderEndFrameEditPrompt, renderFirstFrameEditPrompt,
+  formatSeedancePromptSummary, renderEndFrameEditPrompt, renderFaceEndFramePrompt, renderFirstFrameEditPrompt,
 } from './seedance-prompt'
 import { prepareKlingImage } from './kling-image'
 import { resolveRecreateVideoUrl } from './scrape'
@@ -65,6 +65,7 @@ async function updateRecreate(
     master_prompt: string
     character_image_url: string | null
     end_frame_image_url: string | null
+    end_frame_mode: string
     first_frame_prompt: string | null
     last_frame_prompt: string | null
     shot_stills: unknown
@@ -94,6 +95,13 @@ async function updateRecreate(
 
 function durationForSeedance(sourceSec: number | null): number {
   return clampSeedanceDuration(sourceSec, SEEDANCE_VARIANT)
+}
+
+/** The end frame Seedance actually receives: none when the user chose
+ * "No end frame" in the still gate, otherwise whatever is stored (the
+ * scene-continuation frame, or the face close-up in 'face' mode). */
+function lastImageFor(row: KlingRecreateJobRow): string | null {
+  return row.end_frame_mode === 'none' ? null : row.end_frame_image_url ?? null
 }
 
 /**
@@ -344,7 +352,7 @@ export async function processKlingRecreateJob(opts: {
     const seedanceInput = applyVariationToSeedanceInput(
       buildSeedanceInput({
         image: row.character_image_url, prompt: basePrompt, sourceDuration,
-        lastImage: row.end_frame_image_url,
+        lastImage: lastImageFor(row),
       }),
       note,
     )
@@ -548,7 +556,7 @@ async function regenerateStill(opts: {
   const context = (row.context ?? null) as KlingVideoContext | null
 
   await updateRecreate(row.id, {
-    character_image_url: null, end_frame_image_url: null,
+    character_image_url: null, end_frame_image_url: null, end_frame_mode: 'scene',
     first_frame_prompt: null, last_frame_prompt: null, status: 'still',
   })
   await heartbeat(opts.queueJobId, 'still', { progress: 55 })
@@ -572,6 +580,82 @@ async function regenerateStill(opts: {
       await notify(chatId, `${labelFor(row)}🖼️ Regenerated — first frame + end frame.`)
     }
     await notify(chatId, `${labelFor(row)}Approve both to check the dialogue attribution, or regenerate again.`, stillApprovalKeyboard(row.id))
+  }
+  return { ok: true, awaitingApproval: true }
+}
+
+/**
+ * "No end frame" tapped in the still gate: remember the choice (Seedance then
+ * gets no last_image, see lastImageFor) and continue exactly like a plain
+ * approve — the dialogue check comes next.
+ */
+async function approveStillNoEnd(opts: {
+  queueJobId: string
+  userId: string
+  input: KlingRecreateQueueInput
+}): Promise<{ ok: true; awaitingApproval: true }> {
+  await query(
+    `UPDATE kling_recreate_jobs SET end_frame_mode = 'none', updated_at = now()
+      WHERE id = $1 AND user_id = $2 AND status = 'awaiting_still_approval'`,
+    [opts.input.recreateJobId, opts.userId],
+  )
+  return approveStill(opts)
+}
+
+/**
+ * "Face close-up end" tapped in the still gate: replace the end frame with a
+ * close-up of the lead's face (same scene, built from the approved first frame
+ * + identity photo) and show both stills again for approval. One extra image
+ * call, only on this explicit tap. The Seedance prompt then makes the last
+ * ~0.5s a push-in to that close-up (see endFrameInstruction).
+ */
+async function faceEndFrame(opts: {
+  queueJobId: string
+  userId: string
+  input: KlingRecreateQueueInput
+}): Promise<{ ok: true; awaitingApproval: true }> {
+  const row = await one<KlingRecreateJobRow>(
+    `SELECT * FROM kling_recreate_jobs WHERE id = $1 AND user_id = $2`,
+    [opts.input.recreateJobId, opts.userId],
+  )
+  if (!row) throw new Error('kling_recreate_jobs row not found')
+  if (row.status !== 'awaiting_still_approval' || !row.character_image_url) {
+    return { ok: true, awaitingApproval: true }
+  }
+  const chatId = opts.input.chatId ?? row.chat_id
+  const apiKey = await getUserApiKey(opts.userId, 'wavespeed_api_key')
+  const context = (row.context ?? null) as KlingVideoContext | null
+  const photos = namedPhotosFromRow(row)
+  if (!photos.length) throw new Error('No reference photo(s) on this job')
+
+  const ctx = context ?? {
+    setting: '', hook: '', character_action: '', camera: '', speech: null,
+    duration_sec: null, aspect_ratio: '9:16', shots: [], prompt_mode: 'prompt' as const,
+  }
+  const isNsfw = row.still_model === 'seedream_nsfw'
+  const prompt = renderFaceEndFramePrompt(ctx, photos)
+  const imageUrls = [row.character_image_url, ...photos.map(p => p.url)]
+
+  await heartbeat(opts.queueJobId, 'still', { progress: 60 })
+  const outputs = isNsfw
+    ? await editImageSeedream({ imageUrls, prompt, size: ctx.aspect_ratio, apiKey })
+    : await editImageNanoBananaPro({ imageUrls, prompt, apiKey })
+  if (!outputs.length) throw new Error('Face close-up end frame: no output')
+  const finalUrl = isNsfw ? await finalizeWithSkinEnhance(outputs[0], ctx.aspect_ratio, apiKey) : outputs[0]
+  const prepared = await prepareKlingImage(finalUrl, `kling-recreate/${row.user_id}/${row.id}/end-frame-face-${Date.now()}.jpg`)
+
+  await updateRecreate(row.id, {
+    end_frame_image_url: prepared.url, last_frame_prompt: prompt, end_frame_mode: 'face',
+  })
+  await heartbeat(opts.queueJobId, 'awaiting_still_approval', { progress: 65 })
+
+  if (chatId != null) {
+    try {
+      await sendMediaGroup(chatId, [row.character_image_url, prepared.url], `${labelFor(row)}👤 First frame + face close-up end frame (last ~0.5s).`)
+    } catch {
+      await notify(chatId, `${labelFor(row)}👤 Face close-up end frame ready.`)
+    }
+    await notify(chatId, `${labelFor(row)}Approve both, drop the end frame, or regenerate.`, stillApprovalKeyboard(row.id))
   }
   return { ok: true, awaitingApproval: true }
 }
@@ -601,12 +685,12 @@ async function approveDialogue(opts: {
   const prompt = await buildSeedancePrompt(context ?? {
     setting: '', hook: '', character_action: '', camera: '', speech: null,
     duration_sec: null, aspect_ratio: '9:16', shots: [], prompt_mode: 'prompt',
-  }, row.confirmed_dialogue)
+  }, row.confirmed_dialogue, row.end_frame_mode)
   if (!prompt.trim()) throw new Error('Seedance prompt synthesis returned nothing')
 
   const seedanceInput = buildSeedanceInput({
     image: row.character_image_url, prompt, sourceDuration,
-    lastImage: row.end_frame_image_url,
+    lastImage: lastImageFor(row),
   })
 
   await updateRecreate(row.id, {
@@ -702,7 +786,7 @@ async function regeneratePrompt(opts: {
   await query(
     `UPDATE kling_recreate_jobs
         SET master_prompt = NULL, character_image_url = NULL, end_frame_image_url = NULL,
-            first_frame_prompt = NULL, last_frame_prompt = NULL, shot_stills = NULL,
+            end_frame_mode = 'scene', first_frame_prompt = NULL, last_frame_prompt = NULL, shot_stills = NULL,
             seedance_prompt = NULL, confirmed_dialogue = NULL,
             status = 'analyzing', updated_at = now()
       WHERE id = $1`,
@@ -864,6 +948,8 @@ export async function runKlingRecreateAction(opts: {
 }): Promise<{ ok: true; videoUrl?: string; cached?: boolean; awaitingApproval?: boolean }> {
   switch (opts.input.action) {
     case 'approve_still': return approveStill(opts)
+    case 'approve_still_no_end': return approveStillNoEnd(opts)
+    case 'face_end_frame': return faceEndFrame(opts)
     case 'regenerate_still': return regenerateStill(opts)
     case 'approve_dialogue': return approveDialogue(opts)
     case 'correct_dialogue':

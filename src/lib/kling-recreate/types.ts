@@ -18,11 +18,17 @@ export type { SeedanceVariant }
 export type KlingRecreateAction =
   | 'analyze'
   | 'approve_still'
+  | 'approve_still_no_end'
+  | 'face_end_frame'
   | 'regenerate_still'
   | 'approve_dialogue'
   | 'correct_dialogue'
   | 'approve_prompt'
   | 'regenerate_prompt'
+
+/** How the end frame reaches Seedance: continues the scene, is dropped, or is a
+ * close-up of the lead character's face (chosen per job in the still gate). */
+export type EndFrameMode = 'scene' | 'none' | 'face'
 
 export interface KlingRecreateQueueInput {
   recreateJobId: string
@@ -130,6 +136,8 @@ export interface KlingRecreateJobRow {
    * the first frame, for wardrobe/scene continuity) — used as Seedance's
    * last_image. */
   end_frame_image_url?: string | null
+  /** Default 'scene' — see migration 099. */
+  end_frame_mode?: EndFrameMode | null
   first_frame_prompt?: string | null
   last_frame_prompt?: string | null
   /** Column name kept as-is (kling_*) to avoid a needless rename migration —
