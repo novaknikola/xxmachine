@@ -354,21 +354,22 @@ export function renderEndFrameEditPrompt(context: KlingVideoContext, photos: Nam
 }
 
 /**
- * The 'face' end frame: a tight close-up of the lead character's face in the
- * SAME scene, built from the already-approved first frame + the identity
- * photo(s). Nearly a crop-in of the first frame, so it stays a continuation of
- * the shot rather than a new scene (the documented last_image rule).
+ * The 'face' end frame: a punch-in on the approved first frame until the lead
+ * character's face fills it, so it stays a continuation of the SAME shot (the
+ * documented last_image rule). The identity photo is a face-accuracy reference
+ * only — first version (2026-09-25) asked for "eyes toward the camera" and the
+ * model copied the reference selfie's pose, light and background instead,
+ * producing a close-up that looked like a different scene (confirmed live).
  */
 export function renderFaceEndFramePrompt(context: KlingVideoContext, photos: NamedIdentityPhoto[]): string {
   const lead = photos[0]?.name?.trim()
   const who = lead ? `"${lead}"` : 'the main character'
   const bits = [
     photos.length > 1
-      ? 'Image 1 is the just-generated first frame of this same shot, the remaining images are identity reference photos, one per named character.'
-      : 'Image 1 is the just-generated first frame of this same shot, image 2 is the identity reference photo.',
-    `Generate a tight CLOSE-UP of ${who}: face and upper shoulders filling the frame, eyes toward the camera, natural relaxed expression. It is the same shot pushed in: same person, same hair colour and styling, same wardrobe, same skin tone, same lighting, and the same background/setting as image 1 (only visible behind the face).`,
-    'The face must match the identity reference photo exactly, every feature, proportion and skin detail, because this image exists to lock that face in.',
-    photos.length > 1 ? 'Show only this one character in the frame.' : '',
+      ? 'Image 1 is the just-generated first frame of this same shot: it defines the camera angle, framing, lighting and scene to keep. The remaining images are identity reference photos, one per named character.'
+      : 'Image 1 is the just-generated first frame of this same shot: it defines the camera angle, framing, lighting and scene to keep. Image 2 is the identity reference photo.',
+    `Generate the same shot with the camera pushed straight in on ${who} until the face and upper shoulders fill the frame. This is a punch-in on image 1, not a new photo: keep EXACTLY image 1's camera angle and viewpoint, the character's head turn and gaze direction, their expression, the direction and colour of the light, and the background and setting. Anything else from image 1 that would still be visible at this zoom (another person at the edge of the frame, the car or room interior) stays as it is. Same hair, same wardrobe, same skin tone.`,
+    'Use the identity reference photo ONLY to make the face accurate: every feature, proportion and skin detail must match it. Do NOT copy its pose, camera angle, expression, lighting or background.',
     REMOVE_ONSCREEN_TEXT,
     context.capture_style === 'produced'
       ? 'Photorealistic, hyper-realistic detail, natural skin texture, no beauty filter, no AI skin smoothing.'

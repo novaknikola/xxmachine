@@ -38,13 +38,16 @@ test('no-beats prompt: face mode splits off the closing 0.5s, other modes are un
   assert.match(face, /7\.5-8s: Quick push-in to a close-up on her face/)
 })
 
-test('face end-frame edit prompt: names the lead, locks the face, keeps the scene', () => {
+test('face end-frame edit prompt: a punch-in on the first frame, identity photo is face-accuracy only', () => {
   const single = renderFaceEndFramePrompt(baseCtx, [{ name: null }])
-  assert.match(single, /CLOSE-UP of the main character/)
-  assert.match(single, /image 2 is the identity reference photo/)
+  assert.match(single, /pushed straight in on the main character/)
+  assert.match(single, /Image 2 is the identity reference photo/)
+  assert.match(single, /punch-in on image 1, not a new photo/)
+  assert.match(single, /Do NOT copy its pose, camera angle, expression, lighting or background/)
+  // the first version forced a frontal selfie pose and produced an unrelated-looking frame
+  assert.doesNotMatch(single, /eyes toward the camera/i)
   const multi = renderFaceEndFramePrompt(baseCtx, [{ name: 'Tiana' }, { name: 'Marcus' }])
-  assert.match(multi, /CLOSE-UP of "Tiana"/)
-  assert.match(multi, /Show only this one character/)
+  assert.match(multi, /pushed straight in on "Tiana"/)
 })
 
 test('still gate offers all four choices with distinct callbacks', () => {
