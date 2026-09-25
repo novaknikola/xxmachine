@@ -1,4 +1,5 @@
 import { parseReelUrl } from '@/lib/monitor/parse-reel-url'
+import { ensureVideoHasAudio, videoHasAudio } from '@/lib/monitor/video-audio'
 
 const APIFY_TOKEN = process.env.APIFY_API_KEY!
 const ACTOR_ID = 'apify~instagram-scraper'
@@ -33,6 +34,8 @@ export interface ApifyReel {
   displayUrl?: string
   images?: string[]
   videoUrl?: string
+  /** Instagram's separate audio track — `videoUrl` alone is the silent DASH video. */
+  audioUrl?: string
   videoViewCount?: number
   videoPlayCount?: number
   playCount?: number
@@ -148,7 +151,22 @@ export async function resolveVideoUrlsViaApify(
       ?? (item.inputUrl ? parseReelUrl(item.inputUrl)?.shortCode : undefined)
     if (code) out.set(code.toLowerCase(), item)
   }
+
+  // videoUrl is the video-only track; re-join the audio so every caller gets sound.
+  await Promise.all([...out.values()].map(item => ensureReelAudio(item)))
   return out
+}
+
+/**
+ * Replaces a reel's silent `videoUrl` with a copy that has its audio track
+ * joined in. Mutates and returns the same object; a no-op when the video
+ * already has sound, has no video, or no audio track was offered.
+ */
+export async function ensureReelAudio(reel: ApifyReel): Promise<ApifyReel> {
+  if (reel.videoUrl && reel.audioUrl) {
+    reel.videoUrl = await ensureVideoHasAudio(reel.videoUrl, reel.audioUrl)
+  }
+  return reel
 }
 
 // ─── RapidAPI — lists reels for a username (Apify fallback) ─────────
@@ -330,14 +348,26 @@ async function resolveViaPrimaryDownloader(permalink: string, apiKey: string) {
   }
   const data = json?.data
   if (!data) throw new Error('Empty response')
-  const video = data.medias?.find(m => m.type === 'video' && m.url)
+  const videos = (data.medias ?? []).filter(m => m.type === 'video' && m.url)
+  const video = videos[0]
   if (!video?.url) throw new Error('No video media in the response (probably not a reel)')
   // Reject Instagram HTML page links masquerading as media (breaks ffmpeg probe).
   if (/instagram\.com\/(p|reel|reels|tv)\//i.test(video.url)) {
     throw new Error('Downloader returned a page URL instead of a video file')
   }
+  let videoUrl = video.url
+  // Only when there is a real choice or a separate audio track to use — the
+  // common single-variant answer costs no extra probe (scans call this per reel).
+  const audioMedia = data.medias?.find(m => m.type === 'audio' && m.url)
+  if (videos.length > 1 || audioMedia) {
+    let withSound: string | null = null
+    for (const v of videos.slice(0, 3)) {
+      if (await videoHasAudio(v.url!) === true) { withSound = v.url!; break }
+    }
+    videoUrl = withSound ?? await ensureVideoHasAudio(video.url, audioMedia?.url)
+  }
   return {
-    videoUrl: video.url,
+    videoUrl,
     thumbnail: data.thumbnail ?? null,
     likes: data.like_count ?? null,
     views: data.view_count ?? null,

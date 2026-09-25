@@ -11,6 +11,7 @@ import { getUserApiKey } from '@/lib/user-config'
 import { resolveReelUrls, type ResolveError } from './enqueue-from-urls'
 import { generateWanReferenceVideo } from './wan-reference'
 import { probeSourceVideo } from './analyze'
+import { videoHasAudio } from './video-audio'
 import { notifyReplicationDone, notifyReplicationFailed } from './notify'
 import { enqueueRepurpose } from './process-item'
 import { enqueueDriveArchive } from '@/lib/drive-archive/enqueue'
@@ -37,6 +38,9 @@ export interface CreateWanJobsResult {
   jobIds: string[]
   resolveErrors: ResolveError[]
   invalid: string[]
+  /** Jobs whose source video has no audio track even after trying to re-join
+   * one — Wan then invents its own speech, so the confirm step warns. */
+  noAudioCount: number
 }
 
 /**
@@ -61,8 +65,10 @@ export async function createWanJobsFromUrls(opts: {
   })
 
   const jobIds: string[] = []
+  let noAudioCount = 0
   for (const reel of reels) {
     if (!reel.videoUrl) continue
+    if ((await videoHasAudio(reel.videoUrl)) === false) noAudioCount++
     const row = await one<{ id: string }>(
       `INSERT INTO copy_paste_wan_jobs
          (user_id, chat_id, profile, content_url, content_id, video_url, reference_image_url, status)
@@ -76,7 +82,7 @@ export async function createWanJobsFromUrls(opts: {
     if (row) jobIds.push(row.id)
   }
 
-  return { jobIds, resolveErrors, invalid }
+  return { jobIds, resolveErrors, invalid, noAudioCount }
 }
 
 /**

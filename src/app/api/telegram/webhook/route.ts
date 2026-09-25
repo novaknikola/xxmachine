@@ -659,6 +659,9 @@ export async function POST(req: NextRequest) {
             [
               `✅ <b>${result.jobIds.length} reel${result.jobIds.length === 1 ? '' : 's'}</b> ready.`,
               failed ? `${failed} could not be resolved and were skipped.` : '',
+              result.noAudioCount
+                ? `⚠️ ${result.noAudioCount} of ${result.jobIds.length} source reel${result.jobIds.length === 1 ? ' has' : 's have'} no audio track — Wan will invent its own speech, which can sound garbled.`
+                : '',
               '',
               `Confirm to start generating? Each one is a paid Wan 3.0 call.`,
             ].filter(Boolean).join('\n'),

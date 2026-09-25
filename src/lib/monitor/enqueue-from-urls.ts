@@ -8,6 +8,7 @@
 import { one, query } from '@/lib/db'
 import { resolveKey } from '@/lib/user-keys'
 import {
+  ensureReelAudio,
   listProfileReels,
   resolveVideoUrlViaRapidApi,
   resolveVideoUrlsViaApify,
@@ -16,6 +17,7 @@ import { enqueueDiscoveryReels, type EnqueueReelInput } from './enqueue'
 import { parseReelUrlList } from './parse-reel-url'
 import { scheduleAutoClassify } from './auto-classify'
 import { isPlayableVideoUrl } from './video-url'
+import { videoHasAudio } from './video-audio'
 
 export const MAX_URLS = 30
 const LIST_LIMIT = 50
@@ -115,7 +117,10 @@ export async function resolveReelUrls(opts: {
         LIMIT 1`,
       [userId, p.shortCode],
     )
-    if (cached?.video_url && isPlayableVideoUrl(cached.video_url)) {
+    // A cached link with no sound (an earlier video-only download) is not reused —
+    // falling through re-resolves it with its audio track. Unprobeable stays as before.
+    if (cached?.video_url && isPlayableVideoUrl(cached.video_url)
+      && (await videoHasAudio(cached.video_url)) !== false) {
       resolved.set(p.shortCode.toLowerCase(), {
         id: cached.content_id,
         permalink: cached.content_url || p.permalink,
@@ -142,7 +147,8 @@ export async function resolveReelUrls(opts: {
         LIMIT 1`,
       [userId, p.shortCode],
     )
-    if (dl?.video_url && isPlayableVideoUrl(dl.video_url)) {
+    if (dl?.video_url && isPlayableVideoUrl(dl.video_url)
+      && (await videoHasAudio(dl.video_url)) !== false) {
       resolved.set(p.shortCode.toLowerCase(), {
         id: dl.shortcode,
         permalink: dl.permalink || p.permalink,
@@ -219,6 +225,7 @@ export async function resolveReelUrls(opts: {
       for (const p of missing) {
         const match = listedByCode.get(p.shortCode.toLowerCase())
         if (!match?.videoUrl || !isPlayableVideoUrl(match.videoUrl)) continue
+        await ensureReelAudio(match)
         resolved.set(p.shortCode.toLowerCase(), {
           id: match.shortCode ?? p.shortCode,
           permalink: match.url ?? p.permalink,
