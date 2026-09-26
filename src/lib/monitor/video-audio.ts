@@ -10,7 +10,7 @@ import { promisify } from 'util'
 import { writeFile, readFile, unlink } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { uploadBuffer } from '@/lib/supabase-storage'
 
 const execFileAsync = promisify(execFile)
@@ -75,6 +75,22 @@ async function downloadTrack(url: string, path: string): Promise<void> {
   await writeFile(path, buf)
 }
 
+/**
+ * Storage path of a re-joined reel. Derived from the video track's URL PATH (its
+ * asset id is stable; the signed query string changes on every scrape), so
+ * resolving the same reel again overwrites one file instead of adding another —
+ * the bucket has already hit its storage quota once (2026-09-04).
+ */
+export function muxStoragePath(videoUrl: string): string {
+  let key: string
+  try {
+    key = new URL(videoUrl).pathname
+  } catch {
+    key = videoUrl
+  }
+  return `monitor/audio-mux/${createHash('sha1').update(key).digest('hex').slice(0, 24)}.mp4`
+}
+
 /** Downloads both tracks, joins them, and returns a public URL of the result. */
 export async function muxAudioIntoVideo(videoUrl: string, audioUrl: string): Promise<string> {
   const id = randomUUID()
@@ -85,7 +101,7 @@ export async function muxAudioIntoVideo(videoUrl: string, audioUrl: string): Pro
   try {
     await Promise.all([downloadTrack(videoUrl, v), downloadTrack(audioUrl, a)])
     await muxTracks(v, a, out)
-    return await uploadBuffer(await readFile(out), `monitor/audio-mux/${id}.mp4`, 'video/mp4')
+    return await uploadBuffer(await readFile(out), muxStoragePath(videoUrl), 'video/mp4')
   } finally {
     await Promise.all([v, a, out].map(p => unlink(p).catch(() => {})))
   }

@@ -61,6 +61,48 @@ export class SeedancePayloadError extends Error {
   }
 }
 
+export type SeedanceSubmitFailureKind = 'credits' | 'auth' | 'invalid' | 'transient'
+
+/**
+ * The submit call to WaveSpeed failed, so NO prediction exists and nothing was
+ * billed — unlike a poll failure, where the render may have started (and been
+ * charged) already. That distinction is what makes it safe to put the job back
+ * in front of the user instead of failing it, and safe to retry when transient.
+ */
+export class SeedanceSubmitError extends Error {
+  constructor(
+    message: string,
+    readonly status: number | null,
+    readonly kind: SeedanceSubmitFailureKind,
+  ) {
+    super(message)
+    this.name = 'SeedanceSubmitError'
+  }
+
+  /** Worth another automatic attempt? Only network errors, 408/425/429 and 5xx are. */
+  get retryable(): boolean {
+    return this.kind === 'transient'
+  }
+}
+
+/**
+ * Maps a failed submit onto a kind. Credit/auth/validation errors are decided
+ * by the account or the request, so retrying them only burns attempts and
+ * delays the user hearing about it (confirmed live 2026-09-25: an
+ * "Insufficient credits" 400 was retried, the retry silently no-op'd, and the
+ * job sat in 'rendering' with no message to the user).
+ */
+export function classifySeedanceSubmitFailure(
+  status: number | null,
+  message: string,
+): SeedanceSubmitFailureKind {
+  if (/insufficient credits|top up your account|out of credits/i.test(message)) return 'credits'
+  if (status === 402) return 'credits'
+  if (status === 401 || status === 403) return 'auth'
+  if (status == null || status === 408 || status === 425 || status === 429 || status >= 500) return 'transient'
+  return 'invalid'
+}
+
 export function seedanceI2VEndpoint(variant: SeedanceVariant): string {
   const model = SEEDANCE_I2V_MODELS[variant]
   if (!model) throw new SeedancePayloadError(`Unknown Seedance variant: ${String(variant)}`)
@@ -133,10 +175,11 @@ async function pollSeedanceResult(
   requestId: string,
   apiKey: string,
   signal: AbortSignal,
+  pollIntervalMs: number,
 ): Promise<string> {
   for (let i = 0; i < SEEDANCE_POLL_ATTEMPTS; i++) {
     if (signal.aborted) throw new Error('Seedance poll aborted')
-    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS))
+    await new Promise(r => setTimeout(r, pollIntervalMs))
 
     let data: any
     try {
@@ -177,6 +220,8 @@ export async function generateSeedanceI2V(
     imageMeta?: SeedanceImageMeta
     existingRequestId?: string | null
     onSubmitted?: (requestId: string, payload: Record<string, unknown>) => Promise<void>
+    /** Test hook; production keeps the 5s default. */
+    pollIntervalMs?: number
   },
 ): Promise<SeedanceI2VResult> {
   if (!apiKey) throw new Error('WaveSpeed API key is required')
@@ -186,27 +231,54 @@ export async function generateSeedanceI2V(
 
   let requestId = opts?.existingRequestId ?? null
   if (!requestId) {
-    const initRes = await fetch(seedanceI2VEndpoint(input.variant), {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-      signal,
-    })
+    let initRes: Response
+    try {
+      initRes = await fetch(seedanceI2VEndpoint(input.variant), {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+        signal,
+      })
+    } catch (err) {
+      // The request never got an answer, so no prediction id exists to lose.
+      throw new SeedanceSubmitError(
+        `Seedance 2.5 submit failed (network): ${err instanceof Error ? err.message : String(err)}`,
+        null,
+        'transient',
+      )
+    }
     const initData = await initRes.json().catch(() => null)
     if (!initRes.ok) {
-      throw new Error(`Seedance 2.5 submit failed (${initRes.status}): ${initData?.message ?? JSON.stringify(initData)}`)
+      const detail = initData?.message ?? JSON.stringify(initData)
+      throw new SeedanceSubmitError(
+        `Seedance 2.5 submit failed (${initRes.status}): ${detail}`,
+        initRes.status,
+        classifySeedanceSubmitFailure(initRes.status, String(detail)),
+      )
     }
     if (initData?.code && initData.code !== 200) {
-      throw new Error(`Seedance 2.5 failed: ${initData.message ?? JSON.stringify(initData)}`)
+      const detail = initData.message ?? JSON.stringify(initData)
+      throw new SeedanceSubmitError(
+        `Seedance 2.5 failed: ${detail}`,
+        Number(initData.code) || null,
+        classifySeedanceSubmitFailure(Number(initData.code) || null, String(detail)),
+      )
     }
     requestId = initData?.data?.id ?? initData?.id
-    if (!requestId) throw new Error(`No request ID from ${model}`)
-    await opts?.onSubmitted?.(requestId, payload)
+    if (!requestId) throw new SeedanceSubmitError(`No request ID from ${model}`, null, 'transient')
+    // Recording the id is best-effort here: the prediction already exists (and is
+    // billed), so a failed DB write must not abort this run and orphan it — the
+    // poll below still completes with the id held in memory.
+    try {
+      await opts?.onSubmitted?.(requestId, payload)
+    } catch (err) {
+      console.error('[kling-recreate] could not persist Seedance prediction id', requestId, err)
+    }
   }
 
-  const videoUrl = await pollSeedanceResult(requestId, apiKey, signal)
+  const videoUrl = await pollSeedanceResult(requestId, apiKey, signal, opts?.pollIntervalMs ?? POLL_INTERVAL_MS)
   return { videoUrl, model, requestId, payload }
 }

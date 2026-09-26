@@ -13,24 +13,52 @@
 const NANO_BANANA_EDIT_URL = 'https://api.wavespeed.ai/api/v3/google/nano-banana-pro/edit'
 const RESULT_BASE = 'https://api.wavespeed.ai/api/v3/predictions'
 
-async function pollNanoBananaResult(requestId: string, apiKey: string, signal?: AbortSignal): Promise<string[]> {
-  const maxAttempts = 120 // 120 x 3s = 6 min — image edit, not a video render
-  for (let i = 0; i < maxAttempts; i++) {
+const POLL_INTERVAL_MS = 3000
+/** 200 x 3s = 10 min. Was 6 min, which gave up on two stills on 2026-09-25 —
+ * and giving up abandons a prediction that may still finish (and bill) while
+ * the queue retry submits a second one. */
+const POLL_MAX_ATTEMPTS = 200
+/** One hung connection must not stall the whole step. */
+const REQUEST_TIMEOUT_MS = 30_000
+
+function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
+  const timeout = AbortSignal.timeout(ms)
+  return signal ? AbortSignal.any([signal, timeout]) : timeout
+}
+
+async function pollNanoBananaResult(
+  requestId: string,
+  apiKey: string,
+  signal: AbortSignal | undefined,
+  pollIntervalMs: number,
+): Promise<string[]> {
+  for (let i = 0; i < POLL_MAX_ATTEMPTS; i++) {
     if (signal?.aborted) throw new Error('Request aborted')
-    await new Promise(r => setTimeout(r, 3000))
-    const res = await fetch(`${RESULT_BASE}/${requestId}/result`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal,
-    })
-    const data = await res.json()
+    await new Promise(r => setTimeout(r, pollIntervalMs))
+
+    let data: { data?: { status?: string; outputs?: string[]; error?: unknown }; status?: string; outputs?: string[]; error?: unknown } | null
+    try {
+      const res = await fetch(`${RESULT_BASE}/${requestId}/result`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: withTimeout(signal, REQUEST_TIMEOUT_MS),
+      })
+      data = await res.json()
+    } catch (err) {
+      // A dropped connection, a timeout or a non-JSON gateway page says nothing
+      // about the prediction itself — keep polling rather than throw away a
+      // paid render and resubmit. Only the caller's own abort ends it early.
+      if (signal?.aborted) throw err
+      console.warn('[nano-banana] poll request failed, retrying:', err instanceof Error ? err.message : err)
+      continue
+    }
     const status = data?.data?.status ?? data?.status
     if (status === 'completed') {
       const outputs = data?.data?.outputs ?? data?.outputs
       if (!outputs?.length) throw new Error('No outputs returned')
       return outputs as string[]
     }
-    if (status === 'failed') {
-      throw new Error('Nano Banana Pro edit failed: ' + JSON.stringify(data?.data?.error ?? data?.error))
+    if (status === 'failed' || status === 'cancelled' || status === 'timeout' || status === 'deleted') {
+      throw new Error(`Nano Banana Pro edit ${status}: ` + JSON.stringify(data?.data?.error ?? data?.error))
     }
   }
   throw new Error('Timeout while polling Nano Banana Pro edit result')
@@ -45,6 +73,8 @@ export interface NanoBananaEditInput {
   resolution?: '1k' | '2k' | '4k'
   apiKey: string
   signal?: AbortSignal
+  /** Test hook; production keeps the 3s default. */
+  pollIntervalMs?: number
 }
 
 export async function editImageNanoBananaPro(input: NanoBananaEditInput): Promise<string[]> {
@@ -65,14 +95,16 @@ export async function editImageNanoBananaPro(input: NanoBananaEditInput): Promis
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    signal,
+    signal: withTimeout(signal, REQUEST_TIMEOUT_MS * 2),
   })
-  const initData = await initRes.json()
-  if (initData.code && initData.code !== 200) {
-    throw new Error(initData.message ?? JSON.stringify(initData))
+  const initData = await initRes.json().catch(() => null)
+  if (!initRes.ok || (initData?.code && initData.code !== 200)) {
+    throw new Error(
+      `Nano Banana Pro submit failed (${initRes.status}): ${initData?.message ?? (initData ? JSON.stringify(initData) : 'non-JSON response')}`,
+    )
   }
   const requestId = initData?.data?.id ?? initData?.id
   if (!requestId) throw new Error('No request ID returned')
 
-  return pollNanoBananaResult(requestId, apiKey, signal)
+  return pollNanoBananaResult(requestId, apiKey, signal, input.pollIntervalMs ?? POLL_INTERVAL_MS)
 }

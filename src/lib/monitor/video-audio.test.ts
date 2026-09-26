@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { videoHasAudio, muxTracks, ensureVideoHasAudio } from './video-audio'
+import { videoHasAudio, muxTracks, ensureVideoHasAudio, muxStoragePath } from './video-audio'
 
 function ffmpeg(args: string[]) {
   execFileSync('ffmpeg', ['-y', '-v', 'error', ...args])
@@ -45,4 +45,16 @@ test('ensureVideoHasAudio leaves the URL alone when no audio track is offered or
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('re-joined files get a stable storage path per reel, independent of the signed query string', () => {
+  const a = muxStoragePath('https://cdn.example/o1/v/t2/f2/m367/AQOaCJK6Zrw2.mp4?_nc_ht=x&oh=111&oe=AAA')
+  const b = muxStoragePath('https://other-edge.example/o1/v/t2/f2/m367/AQOaCJK6Zrw2.mp4?oh=222&oe=BBB')
+  const c = muxStoragePath('https://cdn.example/o1/v/t2/f2/m367/DIFFERENT.mp4?oh=111')
+  assert.match(a, /^monitor\/audio-mux\/[0-9a-f]{24}\.mp4$/)
+  assert.equal(a, muxStoragePath('https://cdn.example/o1/v/t2/f2/m367/AQOaCJK6Zrw2.mp4?_nc_ht=x&oh=111&oe=AAA'))
+  assert.notEqual(a, c)
+  // a different CDN host but the same asset path collides on purpose only if the path is identical
+  assert.notEqual(b, c)
+  assert.match(muxStoragePath('not a url'), /^monitor\/audio-mux\/[0-9a-f]{24}\.mp4$/)
 })

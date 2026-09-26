@@ -42,7 +42,8 @@ import { runI2vItem, runAnimateItem, runTalkItem } from '@/lib/my-pod/runners'
 import { fishTts } from '@/lib/my-pod/fish-tts'
 import { generateCopyPasteKeyframes, finishCopyPasteVideo, regenerateCopyPasteKeyframes } from '@/lib/monitor/process-item'
 import { runWanGeneration } from '@/lib/monitor/wan-jobs'
-import { runKlingRecreateAction } from '@/lib/kling-recreate/process-job'
+import { runKlingRecreateAction, handleRenderSubmitFailure } from '@/lib/kling-recreate/process-job'
+import { SeedanceSubmitError } from '@/lib/kling-recreate/seedance-client'
 import type { KlingRecreateQueueInput } from '@/lib/kling-recreate/types'
 
 interface ComfyUIRow {
@@ -2132,7 +2133,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       })
 
       await query(
-        `UPDATE generation_queue SET status='done', finished_at=now(), progress=100,
+        `UPDATE generation_queue SET status='done', finished_at=now(), progress=100, error=NULL,
                 output = coalesce(output, '{}'::jsonb) || $2::jsonb
           WHERE id=$1`,
         [id, JSON.stringify({
@@ -2157,7 +2158,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     const errMsg = err instanceof Error ? err.message : 'Unknown error'
     console.error(`[queue/process] job ${id} fatal error:`, errMsg)
 
-    if (job.attempts >= job.max_attempts) {
+    // A refused Seedance submit billed nothing. Credit/auth/validation refusals
+    // cannot be fixed by retrying, so give up at once and say so, instead of
+    // spending attempts silently while the person waits.
+    const submitErr = job.job_type === 'kling_recreate_v1' && err instanceof SeedanceSubmitError ? err : null
+    const giveUp = job.attempts >= job.max_attempts || (submitErr !== null && !submitErr.retryable)
+
+    if (giveUp) {
       await query(
         `UPDATE generation_queue SET status='failed', error=$1, finished_at=now() WHERE id=$2`,
         [errMsg, id],
@@ -2171,14 +2178,23 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       }
       if (job.job_type === 'kling_recreate_v1') {
         const input = job.input as { recreateJobId?: string; chatId?: number }
-        await query(
-          `UPDATE kling_recreate_jobs SET status='failed', error=$2, updated_at=now()
-            WHERE id=$1 AND status <> 'done'`,
-          [input.recreateJobId, errMsg],
-        ).catch(() => {})
-        if (input.chatId != null) {
-          const { sendText } = await import('@/lib/telegram-recreate')
-          await sendText(input.chatId, `❌ Recreate failed: ${errMsg.slice(0, 300)}`).catch(() => {})
+        // Refused submit and the job is back at the prompt gate: tell the person
+        // and keep it open so one tap retries. Anything else fails it as before.
+        const keptOpen = submitErr && input.recreateJobId
+          ? await handleRenderSubmitFailure({
+              recreateJobId: input.recreateJobId, chatId: input.chatId, err: submitErr,
+            }).catch(() => false)
+          : false
+        if (!keptOpen) {
+          await query(
+            `UPDATE kling_recreate_jobs SET status='failed', error=$2, updated_at=now()
+              WHERE id=$1 AND status <> 'done'`,
+            [input.recreateJobId, errMsg],
+          ).catch(() => {})
+          if (input.chatId != null) {
+            const { sendText } = await import('@/lib/telegram-recreate')
+            await sendText(input.chatId, `❌ Recreate failed: ${errMsg.slice(0, 300)}`).catch(() => {})
+          }
         }
       }
     } else {

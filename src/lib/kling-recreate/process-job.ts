@@ -14,6 +14,7 @@ import {
   clampSeedanceDuration,
   generateSeedanceI2V,
   SEEDANCE_RESOLUTION_DEFAULT,
+  SeedanceSubmitError,
   type SeedanceI2VInput,
   type SeedanceVariant,
 } from './seedance-client'
@@ -838,6 +839,37 @@ async function regeneratePrompt(opts: {
   return { ok: true, awaitingApproval: true }
 }
 
+export type ApprovePromptDisposition = 'cached' | 'run' | 'resume' | 'ignore'
+
+/**
+ * What approve_prompt must do for a job in this state.
+ *  - 'cached' : the video already exists.
+ *  - 'run'    : first approval (or a retry after a submit that never reached
+ *               WaveSpeed and put the job back here).
+ *  - 'resume' : THIS queue row already submitted to WaveSpeed (prediction id
+ *               saved) and died while polling — keep polling that same
+ *               prediction. Never submit again: it would bill twice.
+ *  - 'ignore' : a duplicate tap or a stale retry from a different queue row; the
+ *               job is somewhere else in the flow and must not be touched.
+ * Before this existed the retry of a failed render fell into 'ignore', was
+ * reported as success, and left the job in 'rendering' forever with no message.
+ */
+export function approvePromptDisposition(
+  row: Pick<KlingRecreateJobRow, 'status' | 'kling_video_url' | 'kling_request'>,
+  queueJobId: string,
+): ApprovePromptDisposition {
+  if (row.kling_video_url) return 'cached'
+  if (!row.kling_request) return 'ignore'
+  if (row.status === 'awaiting_prompt_approval') return 'run'
+  const req = row.kling_request as { _prediction_id?: unknown; _queue_job_id?: unknown }
+  if (
+    row.status === 'rendering'
+    && typeof req._prediction_id === 'string' && req._prediction_id
+    && req._queue_job_id === queueJobId
+  ) return 'resume'
+  return 'ignore'
+}
+
 /** Prompt approved -> the actual paid Seedance call. */
 async function approvePrompt(opts: {
   queueJobId: string
@@ -849,20 +881,59 @@ async function approvePrompt(opts: {
     [opts.input.recreateJobId, opts.userId],
   )
   if (!row) throw new Error('kling_recreate_jobs row not found')
-  if (row.kling_video_url) return { ok: true, videoUrl: row.kling_video_url, cached: true }
-  if (row.status !== 'awaiting_prompt_approval' || !row.kling_request) {
+  const disposition = approvePromptDisposition(row, opts.queueJobId)
+  if (disposition === 'cached') return { ok: true, videoUrl: row.kling_video_url!, cached: true }
+  if (disposition === 'ignore') {
+    console.warn(`[kling-recreate] approve_prompt ignored for ${row.id}: status=${row.status}`)
     return { ok: true, awaitingApproval: row.status === 'awaiting_prompt_approval' }
   }
   const chatId = opts.input.chatId ?? row.chat_id
   const context = (row.context ?? null) as KlingVideoContext | null
   const sourceDuration = row.duration_sec != null ? Number(row.duration_sec) : null
   const apiKey = await getUserApiKey(opts.userId, 'wavespeed_api_key')
-  const seedanceInput = row.kling_request as unknown as SeedanceI2VInput
+  // `variant` defaulted because an older render attempt overwrote kling_request
+  // with the bare payload, which has none, and the endpoint is chosen by it.
+  const seedanceInput = { variant: SEEDANCE_VARIANT, ...(row.kling_request as object) } as unknown as SeedanceI2VInput
 
   return finishSeedanceRender({
     row, queueJobId: opts.queueJobId, userId: opts.userId, chatId,
     masterPrompt: row.master_prompt, context, sourceDuration, seedanceInput, apiKey,
+    revertStatusOnSubmitFailure: disposition === 'run' ? 'awaiting_prompt_approval' : undefined,
   })
+}
+
+/**
+ * The queue gave up on a render because WaveSpeed refused the SUBMIT (nothing
+ * was billed, see SeedanceSubmitError). If finishSeedanceRender managed to put
+ * the job back at the prompt gate, tell the person why and re-show the
+ * Approve button so one tap retries — no re-analysis, no new stills. Returns
+ * false when the job is not at that gate, so the caller fails it as before.
+ */
+export async function handleRenderSubmitFailure(opts: {
+  recreateJobId: string
+  chatId?: number | string | null
+  err: SeedanceSubmitError
+}): Promise<boolean> {
+  const row = await one<Pick<KlingRecreateJobRow, 'status' | 'chat_id' | 'source_label'>>(
+    `SELECT status, chat_id, source_label FROM kling_recreate_jobs WHERE id = $1`,
+    [opts.recreateJobId],
+  )
+  if (!row || row.status !== 'awaiting_prompt_approval') return false
+
+  const why =
+    opts.err.kind === 'credits'
+      ? 'your WaveSpeed account is out of credits. Top up, then tap Approve again.'
+      : opts.err.kind === 'auth'
+        ? 'WaveSpeed rejected the API key. Fix the key in Settings, then tap Approve again.'
+        : opts.err.kind === 'invalid'
+          ? `WaveSpeed rejected the request (${escapeHtml(opts.err.message.slice(0, 200))}). Tap Regenerate to rebuild the prompt, or Approve to try once more.`
+          : 'WaveSpeed did not accept the job after several attempts. Tap Approve to try again.'
+  await notify(
+    opts.chatId ?? row.chat_id,
+    `${labelFor(row)}⚠️ <b>Seedance did not start</b> — ${why}\nNothing was charged.`,
+    promptApprovalKeyboard(opts.recreateJobId),
+  )
+  return true
 }
 
 async function finishSeedanceRender(opts: {
@@ -875,26 +946,54 @@ async function finishSeedanceRender(opts: {
   sourceDuration: number | null
   seedanceInput: SeedanceI2VInput
   apiKey: string
+  /** Where to put the job back if WaveSpeed refuses the SUBMIT (nothing was
+   * billed). Only set for paths that have an approval gate to return to. */
+  revertStatusOnSubmitFailure?: 'awaiting_prompt_approval'
 }): Promise<{ ok: true; videoUrl: string }> {
   const { row, seedanceInput } = opts
   const existingRequestId =
     (row.kling_request as { _prediction_id?: string } | null)?._prediction_id ?? null
 
   const payload = buildSeedanceI2VPayload(seedanceInput)
+  // kling_request is spread over the INPUT, not replaced by the bare payload:
+  // the payload has no `variant`, and losing it made the row unsubmittable on
+  // the next attempt (the endpoint is chosen by variant).
+  const record = { ...seedanceInput, ...payload } as Record<string, unknown>
   await updateRecreate(row.id, {
     status: 'rendering',
     kling_variant: SEEDANCE_VARIANT,
-    kling_request: existingRequestId ? { ...payload, _prediction_id: existingRequestId } : payload,
+    kling_request: existingRequestId
+      ? { ...record, _prediction_id: existingRequestId, _queue_job_id: opts.queueJobId }
+      : record,
   })
   await heartbeat(opts.queueJobId, 'rendering', { progress: 88 })
   await syncBulkRowSafe(row, { status: 'rendering' })
 
-  const result = await generateSeedanceI2V(seedanceInput, opts.apiKey, {
-    existingRequestId,
-    onSubmitted: async (requestId, submitted) => {
-      await updateRecreate(row.id, { kling_request: { ...submitted, _prediction_id: requestId } })
-    },
-  })
+  let result: Awaited<ReturnType<typeof generateSeedanceI2V>>
+  try {
+    result = await generateSeedanceI2V(seedanceInput, opts.apiKey, {
+      existingRequestId,
+      onSubmitted: async (requestId, submitted) => {
+        await updateRecreate(row.id, {
+          kling_request: { ...seedanceInput, ...submitted, _prediction_id: requestId, _queue_job_id: opts.queueJobId },
+        })
+      },
+    })
+  } catch (err) {
+    // A refused submit created no prediction and billed nothing, so the job goes
+    // back to the prompt gate instead of sitting in 'rendering' — a retry (or the
+    // person's next tap) can then run it. A failure AFTER submit is different: the
+    // render may exist, so the row keeps its prediction id and is resumed, not reset.
+    if (err instanceof SeedanceSubmitError && opts.revertStatusOnSubmitFailure) {
+      await updateRecreate(row.id, {
+        status: opts.revertStatusOnSubmitFailure,
+        kling_request: seedanceInput as unknown as Record<string, unknown>,
+      }).catch(e => console.error('[kling-recreate] could not revert job after submit failure:', e))
+      await heartbeat(opts.queueJobId, opts.revertStatusOnSubmitFailure, { progress: 82 }).catch(() => {})
+      await syncBulkRowSafe(row, { status: 'awaiting prompt approval' }).catch(() => {})
+    }
+    throw err
+  }
 
   const hosted = await uploadImageFromUrl(
     result.videoUrl,
