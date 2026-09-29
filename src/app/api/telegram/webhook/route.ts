@@ -13,7 +13,7 @@ import {
   sendText,
 } from '@/lib/telegram'
 import { EnqueueUrlsError } from '@/lib/monitor/enqueue-from-urls'
-import { createWanJobsFromUrls } from '@/lib/monitor/wan-jobs'
+import { createWanJobsFromUrls, stillApprovalKeyboard } from '@/lib/monitor/wan-jobs'
 import {
   addUrlsToBatch,
   claimClassifiedItemIds,
@@ -69,6 +69,44 @@ const TELEGRAM_BOT_DOWNLOAD_LIMIT = 20 * 1024 * 1024
 
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/**
+ * One copy_paste_wan queue job, started right away instead of waiting up to a
+ * minute for cron — same claim-then-kick pattern queue/submit uses.
+ * 'still' makes scene stills for approval; 'video' runs the paid Wan call.
+ */
+async function queueCopyPasteWan(userId: string, jobIds: string[], phase: 'still' | 'video'): Promise<void> {
+  const settings = await getRepurposeSettings(userId)
+  const row = await one<{ id: string }>(
+    `INSERT INTO generation_queue (user_id, job_type, input, total_items)
+     VALUES ($1, 'copy_paste_wan', $2, $3)
+     RETURNING id`,
+    [
+      userId,
+      JSON.stringify({
+        jobIds,
+        phase,
+        repurposeCount: settings.variantCount,
+        outputDriveFolderId: settings.outputDriveFolderId,
+      }),
+      jobIds.length,
+    ],
+  )
+  if (!row) throw new Error('Queue insert returned no row')
+  const secret = process.env.CRON_SECRET
+  if (!secret) return
+  const claimed = await one<{ id: string }>(
+    `UPDATE generation_queue SET status='processing', started_at=now(), attempts=attempts+1
+      WHERE id=$1 AND status='pending' RETURNING id`,
+    [row.id],
+  ).catch(() => null)
+  if (claimed) {
+    fetch(`${internalBaseUrl()}/api/queue/process/${row.id}`, {
+      method: 'POST',
+      headers: { 'x-cron-secret': secret },
+    }).catch(err => console.error('[telegram/webhook] fire copy_paste_wan worker:', err))
+  }
 }
 
 /** Saved characters as buttons, so a batch never needs its reference photo sent again. */
@@ -270,6 +308,7 @@ export async function POST(req: NextRequest) {
           const lines = [
             `📊 <b>Copy-Paste status</b> (last 24h)`,
             `⏳ Awaiting confirm: <b>${byStatus.awaiting_confirm ?? 0}</b>`,
+            `🖼 Still in progress / awaiting approval: <b>${byStatus.still_generating ?? 0}</b> / <b>${byStatus.awaiting_approval ?? 0}</b>`,
             `🔄 Generating: <b>${byStatus.generating ?? 0}</b>`,
             `✅ Done: <b>${byStatus.done ?? 0}</b>`,
             `❌ Failed: <b>${byStatus.failed ?? 0}</b>`,
@@ -602,6 +641,53 @@ export async function POST(req: NextRequest) {
 
     const [action, postId] = data.split(':')
 
+    // ── Scene still approval: wanok / wanre / wanno ────────────────────────
+    // Each claim is a single conditional UPDATE, so a double tap or a
+    // redelivered callback cannot start Wan (or a regeneration) twice.
+    if (action === 'wanok' || action === 'wanre' || action === 'wanno') {
+      const chatId = cbMessage?.chat?.id as number | undefined
+      const approverId = chatId != null ? await findUserByChat(chatId) : null
+      if (!chatId || !approverId || !postId) {
+        await answerCallbackQuery(callbackId, 'Chat not linked')
+        return NextResponse.json({ ok: true })
+      }
+      const next = action === 'wanok' ? 'approved' : action === 'wanre' ? 'awaiting_confirm' : 'cancelled'
+      const claimed = await one<{ id: string }>(
+        `UPDATE copy_paste_wan_jobs SET status = $3
+          WHERE id = $1 AND user_id = $2 AND status = 'awaiting_approval'
+          RETURNING id`,
+        [postId, approverId, next],
+      )
+      if (!claimed) {
+        await answerCallbackQuery(callbackId, 'Already handled')
+        return NextResponse.json({ ok: true })
+      }
+      const label = action === 'wanok'
+        ? '✅ Approved — generating the Wan 3.0 video. It will arrive here when done.'
+        : action === 'wanre'
+          ? '🔁 Regenerating the still…'
+          : '✖️ Cancelled — no video for this one.'
+      await answerCallbackQuery(callbackId, action === 'wanok' ? 'Approved' : action === 'wanre' ? 'Regenerating' : 'Cancelled')
+      if (cbMessage?.message_id) {
+        await editMessageReplyMarkup(chatId, cbMessage.message_id, {})
+        await editMessageCaption(chatId, cbMessage.message_id, label).catch(() => {})
+      }
+      if (action !== 'wanno') {
+        try {
+          await queueCopyPasteWan(approverId, [postId], action === 'wanok' ? 'video' : 'still')
+        } catch (err) {
+          console.error(`[telegram/webhook] ${action} queue failed:`, err)
+          // Back to the approval state so the buttons can be used again.
+          await query(`UPDATE copy_paste_wan_jobs SET status = 'awaiting_approval' WHERE id = $1`, [postId])
+          if (cbMessage?.message_id) {
+            await editMessageReplyMarkup(chatId, cbMessage.message_id, stillApprovalKeyboard(postId)).catch(() => {})
+          }
+          await sendText(chatId, '❌ Could not start that — tap the button again.')
+        }
+      }
+      return NextResponse.json({ ok: true })
+    }
+
     // ── /character buttons ────────────────────────────────────────────────
     if (action === 'cpchar') {
       const chatId = cbMessage?.chat?.id as number | undefined
@@ -849,7 +935,7 @@ export async function POST(req: NextRequest) {
                 ? `🖼 Seedream still (reel frame + reference photo) with additions: “${escapeHtml(stillPrompt.slice(0, 300))}” — then Wan gets the reference photo and the still.`
                 : '🖼 Seedream still (reel frame + reference photo), no additions — then Wan gets the reference photo and the still.',
               '',
-              `Confirm to start generating? Each one is a paid Wan 3.0 call.`,
+              `Confirm to make the scene still${result.jobIds.length === 1 ? '' : 's'}? You approve each one before its paid Wan 3.0 call.`,
             ].filter(Boolean).join('\n'),
           )
           await editMessageReplyMarkup(chatId, cbMessage.message_id, {
@@ -905,44 +991,11 @@ export async function POST(req: NextRequest) {
       }
 
       try {
-        const settings = await getRepurposeSettings(batch.user_id)
-        const row = await one<{ id: string }>(
-          `INSERT INTO generation_queue (user_id, job_type, input, total_items)
-           VALUES ($1, 'copy_paste_wan', $2, $3)
-           RETURNING id`,
-          [
-            batch.user_id,
-            JSON.stringify({
-              jobIds: itemIds,
-              repurposeCount: settings.variantCount,
-              outputDriveFolderId: settings.outputDriveFolderId,
-            }),
-            itemIds.length,
-          ],
-        )
-        if (!row) throw new Error('Queue insert returned no row')
-
-        // Start now instead of waiting up to a minute for cron — same
-        // claim-then-kick pattern queue/submit uses for every job type.
-        const secret = process.env.CRON_SECRET
-        if (secret) {
-          const claimed = await one<{ id: string }>(
-            `UPDATE generation_queue SET status='processing', started_at=now(), attempts=attempts+1
-              WHERE id=$1 AND status='pending' RETURNING id`,
-            [row.id],
-          ).catch(() => null)
-          if (claimed) {
-            fetch(`${internalBaseUrl()}/api/queue/process/${row.id}`, {
-              method: 'POST',
-              headers: { 'x-cron-secret': secret },
-            }).catch(err => console.error('[telegram/webhook] fire copy_paste_wan worker:', err))
-          }
-        }
-
+        await queueCopyPasteWan(batch.user_id, itemIds, 'still')
         if (chatId) {
           await sendText(
             chatId,
-            `🎬 Generating ${itemIds.length} reel${itemIds.length === 1 ? '' : 's'} with Wan 3.0. You will get the video here when it finishes.`,
+            `🖼 Making ${itemIds.length === 1 ? 'the scene still' : `${itemIds.length} scene stills`} — ${itemIds.length === 1 ? 'it comes' : 'each comes'} here for approval before the paid Wan 3.0 video.`,
           )
         }
       } catch (err) {

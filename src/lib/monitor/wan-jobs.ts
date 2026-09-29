@@ -8,7 +8,7 @@
  */
 import { one, query } from '@/lib/db'
 import { getUserApiKey } from '@/lib/user-config'
-import { resolveReelUrls, type ResolveError } from './enqueue-from-urls'
+import { EnqueueUrlsError, resolveReelUrls, type ResolveError } from './enqueue-from-urls'
 import { generateWanReferenceVideo } from './wan-reference'
 import { probeSourceVideo } from './analyze'
 import { videoHasAudio } from './video-audio'
@@ -17,6 +17,7 @@ import { enqueueRepurpose } from './process-item'
 import { enqueueDriveArchive } from '@/lib/drive-archive/enqueue'
 import { createHash } from 'node:crypto'
 import { uploadBuffer, uploadImageFromUrl } from '@/lib/supabase-storage'
+import { sendPhoto } from '@/lib/telegram'
 import { splitDirectVideoUrls } from './telegram-batch'
 import { KEYFRAME_IDENTITY_LOCK, PRESERVE_MOTION_CUE, REMOVE_ONSCREEN_TEXT } from './copy-paste-spec'
 import { characterDriveKey, getCharacter } from '@/lib/content-ops/characters'
@@ -36,7 +37,8 @@ export interface WanJobRow {
   still_image_url: string | null
   aspect_ratio: string | null
   source_duration: string | number | null
-  status: 'awaiting_confirm' | 'generating' | 'done' | 'failed'
+  status: 'awaiting_confirm' | 'still_generating' | 'awaiting_approval' | 'approved'
+    | 'generating' | 'done' | 'failed' | 'cancelled'
   error: string | null
   video_result_url: string | null
   video_model: string | null
@@ -71,14 +73,30 @@ export async function createWanJobsFromUrls(opts: {
   // Uploaded clips / direct video links need no fetching; only Instagram links
   // go through the resolver (which rejects a text with no reel link in it).
   const { direct, rest } = splitDirectVideoUrls(opts.rawText)
-  const resolved = rest.trim()
-    ? await resolveReelUrls({
+  const empty = { reels: [], resolveErrors: [] as ResolveError[], invalid: [] as string[], username: null, sourceUsername: null }
+  let resolved: Awaited<ReturnType<typeof resolveReelUrls>> | typeof empty = empty
+  if (rest.trim()) {
+    try {
+      resolved = await resolveReelUrls({
         userId: opts.userId,
         rawText: rest,
         username: opts.username,
         sourceUsername: opts.sourceUsername,
       })
-    : { reels: [], resolveErrors: [], invalid: [], username: null, sourceUsername: null }
+    } catch (err) {
+      // The resolver throws when none of its links could be fetched. With
+      // uploaded videos in the same batch that must not sink them too — the
+      // unfetchable links are skipped and reported like any partial failure.
+      if (!direct.length || !(err instanceof EnqueueUrlsError)) throw err
+      resolved = {
+        ...empty,
+        resolveErrors: err.detail?.resolveErrors?.length
+          ? err.detail.resolveErrors
+          : [{ permalink: rest.trim(), error: err.message }],
+        invalid: err.detail?.invalid ?? [],
+      }
+    }
+  }
   const { resolveErrors, invalid, username, sourceUsername } = resolved
   const reels = [
     ...resolved.reels,
@@ -176,6 +194,82 @@ async function generateSceneStill(opts: {
   return await uploadImageFromUrl(finalUrl, `monitor/${opts.jobId}/wan-still.jpg`).catch(() => finalUrl)
 }
 
+/** Buttons under a still waiting for approval; data is `<action>:<wan job id>`. */
+export function stillApprovalKeyboard(jobId: string) {
+  return {
+    inline_keyboard: [[
+      { text: '✅ Approve', callback_data: `wanok:${jobId}` },
+      { text: '🔁 Regenerate', callback_data: `wanre:${jobId}` },
+      { text: '✖️ Cancel', callback_data: `wanno:${jobId}` },
+    ]],
+  }
+}
+
+/**
+ * Phase 1 after Confirm: the Seedream + Z-Image scene still, sent to Telegram
+ * for approval. Nothing paid for Wan happens here; runWanGeneration only runs
+ * once the still is approved. Also serves Regenerate (the job is put back to
+ * awaiting_confirm and this runs again, replacing the still).
+ */
+// Re-entering still_generating is deliberate: a crashed worker's queue retry
+// must be able to finish it. Nothing paid for Wan happens in this phase.
+export async function prepareWanStill(jobId: string, userId: string): Promise<{ stillUrl: string }> {
+  const job = await one<WanJobRow>(
+    `UPDATE copy_paste_wan_jobs SET status = 'still_generating', error = NULL
+      WHERE id = $1 AND user_id = $2 AND status IN ('awaiting_confirm', 'still_generating')
+      RETURNING *`,
+    [jobId, userId],
+  )
+  if (!job) throw new Error('Job is not waiting for a still — already handled')
+  if (!job.video_url) throw new Error('Job has no source video')
+
+  try {
+    const apiKey = await getUserApiKey(userId, 'wavespeed_api_key')
+    const probe = await probeSourceVideo(job.video_url, 5)
+    if (!probe?.frames.length) throw new Error('Could not read frames from the source reel for the scene still')
+    const aspectRatio = job.aspect_ratio ?? (probe.aspectRatio === 'other' ? '9:16' : probe.aspectRatio)
+    const duration = job.source_duration != null ? Number(job.source_duration) : probe.duration
+
+    const stillUrl = await generateSceneStill({
+      jobId,
+      referenceImageUrl: job.reference_image_url,
+      sceneFrameBase64: probe.frames[sharpestFrameIndex(probe.frames)],
+      additions: job.still_prompt,
+      aspectRatio,
+      apiKey,
+    })
+    await query(
+      `UPDATE copy_paste_wan_jobs
+          SET status = 'awaiting_approval', still_image_url = $2, aspect_ratio = $3, source_duration = $4
+        WHERE id = $1`,
+      [jobId, stillUrl, aspectRatio, duration],
+    )
+
+    if (job.chat_id) {
+      await sendPhoto(
+        job.chat_id,
+        stillUrl,
+        [
+          '🖼 <b>Scene still</b> — approve to start the paid Wan 3.0 video.',
+          job.content_url ? `Source: ${escapeHtml(job.content_url)}` : '',
+          job.still_prompt ? `Additions: ${escapeHtml(job.still_prompt.slice(0, 300))}` : '',
+        ].filter(Boolean).join('\n'),
+        stillApprovalKeyboard(jobId),
+      )
+    }
+    return { stillUrl }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    await query(`UPDATE copy_paste_wan_jobs SET status = 'failed', error = $2 WHERE id = $1`, [jobId, msg])
+    await notifyReplicationFailed(userId, job.profile ?? 'copy-paste', `Scene still: ${msg}`).catch(() => {})
+    throw err
+  }
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
 export async function runWanGeneration(
   jobId: string,
   userId: string,
@@ -191,8 +285,9 @@ export async function runWanGeneration(
   }
   if (!job.video_url) throw new Error('Job has no source video')
 
-  // Atomic claim: only the caller that actually flips awaiting_confirm ->
-  // generating gets to fire the paid call. A second concurrent invocation
+  // Atomic claim: only the caller that actually flips approved ->
+  // generating gets to fire the paid call — and only after a human approved
+  // the scene still in Telegram (prepareWanStill). A second concurrent invocation
   // for the same job (e.g. a queue-job retry landing while the first attempt
   // is still genuinely running — see the cron/tick.ts exclusion this pipeline
   // needs) finds nothing to claim and fails loudly instead of billing Wan 3.0
@@ -200,7 +295,7 @@ export async function runWanGeneration(
   // twice before that cron exclusion existed.
   const claimed = await one<{ id: string }>(
     `UPDATE copy_paste_wan_jobs SET status = 'generating'
-      WHERE id = $1 AND status = 'awaiting_confirm'
+      WHERE id = $1 AND status = 'approved' AND still_image_url IS NOT NULL
       RETURNING id`,
     [jobId],
   )
@@ -211,21 +306,9 @@ export async function runWanGeneration(
   const apiKey = await getUserApiKey(userId, 'wavespeed_api_key')
 
   try {
-    let aspectRatio = job.aspect_ratio
-    let duration = job.source_duration != null ? Number(job.source_duration) : null
-    // Always probed now: the scene still needs a frame of the source reel.
-    const probe = await probeSourceVideo(job.video_url, 5)
-    if (!probe?.frames.length) throw new Error('Could not read frames from the source reel for the scene still')
-    if (!aspectRatio || duration == null) {
-      if (probe) {
-        aspectRatio = probe.aspectRatio === 'other' ? '9:16' : probe.aspectRatio
-        duration = probe.duration
-        await query(
-          `UPDATE copy_paste_wan_jobs SET aspect_ratio = $2, source_duration = $3 WHERE id = $1`,
-          [jobId, aspectRatio, duration],
-        )
-      }
-    }
+    // Both were recorded by prepareWanStill's probe.
+    const aspectRatio = job.aspect_ratio
+    const duration = job.source_duration != null ? Number(job.source_duration) : null
     // Conservative cap, not a measured one: the model documents total
     // input+output duration at <=30s but doesn't say exactly how the
     // reference video's own length counts against that, so this stays well
@@ -233,16 +316,7 @@ export async function runWanGeneration(
     // clip. Can be relaxed once real output is seen.
     const wanDuration = Math.min(Math.max(Math.round(duration ?? 5), 2), 15)
 
-    const stillUrl = await generateSceneStill({
-      jobId,
-      referenceImageUrl: job.reference_image_url,
-      sceneFrameBase64: probe.frames[sharpestFrameIndex(probe.frames)],
-      additions: job.still_prompt,
-      aspectRatio: aspectRatio ?? '9:16',
-      apiKey,
-    })
-    await query(`UPDATE copy_paste_wan_jobs SET still_image_url = $2 WHERE id = $1`, [jobId, stillUrl])
-    const referenceImageUrls = [job.reference_image_url, stillUrl]
+    const referenceImageUrls = [job.reference_image_url, job.still_image_url!]
 
     const result = await generateWanReferenceVideo({
       referenceImageUrls,
