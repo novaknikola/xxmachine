@@ -8,7 +8,7 @@
  */
 import { one, query } from '@/lib/db'
 import { getUserApiKey } from '@/lib/user-config'
-import { resolveReelUrls, type ResolveError } from './enqueue-from-urls'
+import { EnqueueUrlsError, resolveReelUrls, type ResolveError } from './enqueue-from-urls'
 import { generateWanReferenceVideo } from './wan-reference'
 import { probeSourceVideo } from './analyze'
 import { videoHasAudio } from './video-audio'
@@ -71,14 +71,30 @@ export async function createWanJobsFromUrls(opts: {
   // Uploaded clips / direct video links need no fetching; only Instagram links
   // go through the resolver (which rejects a text with no reel link in it).
   const { direct, rest } = splitDirectVideoUrls(opts.rawText)
-  const resolved = rest.trim()
-    ? await resolveReelUrls({
+  const empty = { reels: [], resolveErrors: [] as ResolveError[], invalid: [] as string[], username: null, sourceUsername: null }
+  let resolved: Awaited<ReturnType<typeof resolveReelUrls>> | typeof empty = empty
+  if (rest.trim()) {
+    try {
+      resolved = await resolveReelUrls({
         userId: opts.userId,
         rawText: rest,
         username: opts.username,
         sourceUsername: opts.sourceUsername,
       })
-    : { reels: [], resolveErrors: [], invalid: [], username: null, sourceUsername: null }
+    } catch (err) {
+      // The resolver throws when none of its links could be fetched. With
+      // uploaded videos in the same batch that must not sink them too — the
+      // unfetchable links are skipped and reported like any partial failure.
+      if (!direct.length || !(err instanceof EnqueueUrlsError)) throw err
+      resolved = {
+        ...empty,
+        resolveErrors: err.detail?.resolveErrors?.length
+          ? err.detail.resolveErrors
+          : [{ permalink: rest.trim(), error: err.message }],
+        invalid: err.detail?.invalid ?? [],
+      }
+    }
+  }
   const { resolveErrors, invalid, username, sourceUsername } = resolved
   const reels = [
     ...resolved.reels,
