@@ -53,6 +53,8 @@ export async function enqueueRepurposeJob(opts: {
   characterKey?: string | null
   seriesLabel?: string | null
   driveFileId?: string | null
+  /** False for API clients (the farm) that poll for the result themselves. */
+  notifyTelegram?: boolean
 }): Promise<string | null> {
   const count = Math.min(100, Math.max(1, Math.round(opts.count)))
   const row = await one<{ id: string }>(
@@ -72,6 +74,7 @@ export async function enqueueRepurposeJob(opts: {
         characterKey: opts.characterKey ?? null,
         outputDriveFolderId: (opts.outputDriveFolderId || '').trim() || null,
         seriesLabel: sanitizeArchiveLabel(opts.seriesLabel) || null,
+        notifyTelegram: opts.notifyTelegram ?? true,
       }),
       count,
     ],

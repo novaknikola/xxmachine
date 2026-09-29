@@ -17,6 +17,8 @@ export interface TelegramBatch {
   user_id: string
   chat_id: string
   reference_image_url: string | null
+  /** Character the Replicator output is filed under on Drive. */
+  character_id: string | null
   urls: string[]
   status: string
   prompt_message_id: string | number | null
@@ -56,24 +58,34 @@ export async function openBatch(chatId: number | string): Promise<TelegramBatch 
  * this photo instead" — and does restart, since two identities in one batch
  * has no meaning.
  */
+export async function uploadTelegramPhoto(userId: string, fileId: string): Promise<string> {
+  const { buffer, contentType, extension } = await downloadTelegramFile(fileId)
+  const path = `telegram/${userId}/ref_${Date.now()}.${extension}`
+  return await uploadBuffer(buffer, path, contentType)
+}
+
+/**
+ * A plain photo has no known character, so it clears one set earlier — the
+ * identity changed and filing the output under the old character would be wrong.
+ */
 export async function startBatchWithPhoto(opts: {
   userId: string
   chatId: number | string
-  fileId: string
+  referenceImageUrl: string
+  characterId?: string | null
 }): Promise<{ batch: TelegramBatch; replacedPrevious: boolean }> {
-  const { buffer, contentType, extension } = await downloadTelegramFile(opts.fileId)
-  const path = `telegram/${opts.userId}/ref_${Date.now()}.${extension}`
-  const referenceImageUrl = await uploadBuffer(buffer, path, contentType)
+  const { referenceImageUrl } = opts
+  const characterId = opts.characterId ?? null
 
   const open = await openBatch(opts.chatId)
 
   if (open && !open.reference_image_url) {
     const updated = await one<TelegramBatch>(
       `UPDATE telegram_batches
-          SET reference_image_url = $2, updated_at = now()
+          SET reference_image_url = $2, character_id = $3, updated_at = now()
         WHERE id = $1
         RETURNING *`,
-      [open.id, referenceImageUrl],
+      [open.id, referenceImageUrl, characterId],
     )
     return { batch: updated!, replacedPrevious: false }
   }
@@ -86,12 +98,42 @@ export async function startBatchWithPhoto(opts: {
   }
 
   const row = await one<TelegramBatch>(
-    `INSERT INTO telegram_batches (user_id, chat_id, reference_image_url)
-     VALUES ($1, $2, $3)
+    `INSERT INTO telegram_batches (user_id, chat_id, reference_image_url, character_id)
+     VALUES ($1, $2, $3, $4)
      RETURNING *`,
-    [opts.userId, String(opts.chatId), referenceImageUrl],
+    [opts.userId, String(opts.chatId), referenceImageUrl, characterId],
   )
   return { batch: row!, replacedPrevious: Boolean(open) }
+}
+
+/**
+ * Picking a character swaps the identity on the open batch in place: unlike a
+ * new photo, it is a deliberate choice, so links already sent are kept.
+ */
+export async function setBatchCharacter(opts: {
+  userId: string
+  chatId: number | string
+  characterId: string
+  referenceImageUrl: string
+}): Promise<TelegramBatch> {
+  const open = await openBatch(opts.chatId)
+  if (open) {
+    const updated = await one<TelegramBatch>(
+      `UPDATE telegram_batches
+          SET reference_image_url = $2, character_id = $3, updated_at = now()
+        WHERE id = $1
+        RETURNING *`,
+      [open.id, opts.referenceImageUrl, opts.characterId],
+    )
+    return updated!
+  }
+  const row = await one<TelegramBatch>(
+    `INSERT INTO telegram_batches (user_id, chat_id, reference_image_url, character_id)
+     VALUES ($1, $2, $3, $4)
+     RETURNING *`,
+    [opts.userId, String(opts.chatId), opts.referenceImageUrl, opts.characterId],
+  )
+  return row!
 }
 
 export interface AddUrlsResult {

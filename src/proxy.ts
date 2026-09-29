@@ -74,6 +74,8 @@ const PUBLIC_API_PREFIXES = [
   // cross-site request from the extension's own origin) — it authenticates
   // itself with a bearer token instead, checked inside the route.
   '/api/extension/',
+  // The Mac farm — same bearer-token model as the extension, checked in each route.
+  '/api/content-ops/',
 ]
 
 export function proxy(req: NextRequest) {
