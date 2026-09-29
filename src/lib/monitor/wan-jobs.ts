@@ -15,7 +15,9 @@ import { videoHasAudio } from './video-audio'
 import { notifyReplicationDone, notifyReplicationFailed } from './notify'
 import { enqueueRepurpose } from './process-item'
 import { enqueueDriveArchive } from '@/lib/drive-archive/enqueue'
+import { createHash } from 'node:crypto'
 import { uploadBuffer, uploadImageFromUrl } from '@/lib/supabase-storage'
+import { splitDirectVideoUrls } from './telegram-batch'
 import { KEYFRAME_IDENTITY_LOCK, PRESERVE_MOTION_CUE, REMOVE_ONSCREEN_TEXT } from './copy-paste-spec'
 import { characterDriveKey, getCharacter } from '@/lib/content-ops/characters'
 import { editImage as editImageSeedream, finalizeWithSkinEnhance } from '@/lib/wavespeed'
@@ -66,12 +68,26 @@ export async function createWanJobsFromUrls(opts: {
   username?: string | null
   sourceUsername?: string | null
 }): Promise<CreateWanJobsResult> {
-  const { reels, resolveErrors, invalid, username, sourceUsername } = await resolveReelUrls({
-    userId: opts.userId,
-    rawText: opts.rawText,
-    username: opts.username,
-    sourceUsername: opts.sourceUsername,
-  })
+  // Uploaded clips / direct video links need no fetching; only Instagram links
+  // go through the resolver (which rejects a text with no reel link in it).
+  const { direct, rest } = splitDirectVideoUrls(opts.rawText)
+  const resolved = rest.trim()
+    ? await resolveReelUrls({
+        userId: opts.userId,
+        rawText: rest,
+        username: opts.username,
+        sourceUsername: opts.sourceUsername,
+      })
+    : { reels: [], resolveErrors: [], invalid: [], username: null, sourceUsername: null }
+  const { resolveErrors, invalid, username, sourceUsername } = resolved
+  const reels = [
+    ...resolved.reels,
+    ...direct.map(url => ({
+      id: `upload-${createHash('sha1').update(url).digest('hex').slice(0, 12)}`,
+      permalink: url,
+      videoUrl: url,
+    })),
+  ]
 
   const jobIds: string[] = []
   let noAudioCount = 0
