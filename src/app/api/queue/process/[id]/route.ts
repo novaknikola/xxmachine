@@ -302,7 +302,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     if (job.job_type === 'video_repurpose') {
       const {
         videoUrl, videoName, count, baseSeed, effects, effectRanges, archiveToDrive, characterKey, seriesLabel,
-        driveFileId, outputDriveFolderId, sharpen, trimStartSec, notifyTelegram,
+        driveFileId, outputDriveFolderId, sharpen, trimStartSec, notifyTelegram, driveSection,
       } = job.input as unknown as VideoRepurposeJobInput
       let doneCount = job.done_items
 
@@ -429,6 +429,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               // Same prefix the source reel's raw/ copy carries, so an original
               // and its variants line up by name across the two folders.
               seriesLabel,
+              section: driveSection ?? null,
             })
           }
         } catch (err) {

@@ -39,4 +39,6 @@ export interface EnqueueDriveArchiveInput {
    * only ever sees drive_exports columns.
    */
   seriesFolder?: string | null
+  /** Top-level folder above the character, e.g. IGREPLICATOR_DRIVE_SECTION. Absent = character at the root. */
+  section?: string | null
 }

@@ -59,6 +59,7 @@ export async function enqueueRepurposeJob(opts: {
   effectRanges?: VideoEffectRanges
   sharpen?: boolean
   trimStartSec?: number
+  driveSection?: string | null
 }): Promise<string | null> {
   const count = Math.min(100, Math.max(1, Math.round(opts.count)))
   const row = await one<{ id: string }>(
@@ -82,6 +83,7 @@ export async function enqueueRepurposeJob(opts: {
         ...(opts.effectRanges ? { effectRanges: opts.effectRanges } : {}),
         ...(opts.sharpen ? { sharpen: true } : {}),
         ...(opts.trimStartSec ? { trimStartSec: opts.trimStartSec } : {}),
+        ...(opts.driveSection ? { driveSection: opts.driveSection } : {}),
       }),
       count,
     ],
