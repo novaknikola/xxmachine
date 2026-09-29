@@ -33,7 +33,18 @@ was then staged with the rest. No npm `postinstall`, git hook or workflow in thi
   so an infected tree can no longer build or deploy; the previous build stays live.
 - All remote branch tips were scanned: no full payload; all still carry the `createRequire` shim.
 
-## Still to do (cannot be done from the Mac — no VPS key there)
+## VPS check (2026-09-29)
+
+- Production deploys branch **`feature/seedance-recreate`**, not `main`.
+- `git reflog` shows infected trees checked out and built: `8748692` (2026-09-12),
+  `a613a8d` / `f370ab0` (2026-09-19). **The payload ran as root on the VPS.**
+- Now: no signature anywhere under `/var/www`, `/opt`, `/root`; no unknown cron entries,
+  systemd units or processes; outbound connections are Supabase, Craigslist, Telegram,
+  Monarx only; `authorized_keys` has one key (`t480s@DESKTOP-96LGM1E`).
+- Nothing persistent was found, but whatever the payload read (`.env.local`, SSH keys,
+  tokens) must be treated as stolen — rotation below is mandatory, not precautionary.
+
+## Still to do
 
 1. **Dev PC (the +0700 machine)** — treat as compromised: check editor extensions
    (VS Code/Cursor), `.vscode/tasks.json` in every repo (look for `runOn: folderOpen`),
