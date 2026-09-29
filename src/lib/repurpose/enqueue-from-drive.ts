@@ -1,3 +1,4 @@
+import type { VideoEffectRanges } from '@/lib/video-effect-ranges'
 /**
  * Drive folder → one video_repurpose job per video.
  *
@@ -55,6 +56,9 @@ export async function enqueueRepurposeJob(opts: {
   driveFileId?: string | null
   /** False for API clients (the farm) that poll for the result themselves. */
   notifyTelegram?: boolean
+  effectRanges?: VideoEffectRanges
+  sharpen?: boolean
+  trimStartSec?: number
 }): Promise<string | null> {
   const count = Math.min(100, Math.max(1, Math.round(opts.count)))
   const row = await one<{ id: string }>(
@@ -75,6 +79,9 @@ export async function enqueueRepurposeJob(opts: {
         outputDriveFolderId: (opts.outputDriveFolderId || '').trim() || null,
         seriesLabel: sanitizeArchiveLabel(opts.seriesLabel) || null,
         notifyTelegram: opts.notifyTelegram ?? true,
+        ...(opts.effectRanges ? { effectRanges: opts.effectRanges } : {}),
+        ...(opts.sharpen ? { sharpen: true } : {}),
+        ...(opts.trimStartSec ? { trimStartSec: opts.trimStartSec } : {}),
       }),
       count,
     ],
