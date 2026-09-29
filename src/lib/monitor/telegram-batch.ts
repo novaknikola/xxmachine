@@ -149,12 +149,33 @@ export interface AddUrlsResult {
  * before the photo. Deduped, because forwarding the same reel twice should not
  * bill twice.
  */
+/** A link straight to a video file — an uploaded clip or one downloaded elsewhere. */
+export const DIRECT_VIDEO_URL = /^https?:\/\/\S+\.(mp4|mov|m4v|webm)(\?\S*)?$/i
+
+/** `rest` is the text minus the video links, otherwise untouched — the reel parser reads line structure. */
+export function splitDirectVideoUrls(text: string): { direct: string[]; rest: string } {
+  const direct = text.split(/\s+/).filter(token => DIRECT_VIDEO_URL.test(token))
+  let rest = text
+  for (const url of direct) rest = rest.replace(url, ' ')
+  return { direct, rest: rest.trim() }
+}
+
+/** Uploaded video → public storage URL that a batch can carry like a reel link. */
+export async function uploadTelegramVideo(userId: string, fileId: string): Promise<string> {
+  const { buffer, contentType, extension } = await downloadTelegramFile(fileId)
+  const ext = /^(mp4|mov|m4v|webm)$/.test(extension) ? extension : 'mp4'
+  const path = `telegram/${userId}/upload_${Date.now()}.${ext}`
+  return await uploadBuffer(buffer, path, contentType.startsWith('video/') ? contentType : 'video/mp4')
+}
+
 export async function addUrlsToBatch(opts: {
   userId: string
   chatId: number | string
   text: string
 }): Promise<AddUrlsResult | null> {
-  const { parsed, invalid } = parseReelUrlList(opts.text, MAX_URLS)
+  const { direct, rest } = splitDirectVideoUrls(opts.text)
+  const { parsed: reels, invalid } = rest ? parseReelUrlList(rest, MAX_URLS) : { parsed: [], invalid: [] as string[] }
+  const parsed = [...reels, ...direct.map(url => ({ permalink: url }))]
   if (!parsed.length) return null
 
   let batch = await openBatch(opts.chatId)

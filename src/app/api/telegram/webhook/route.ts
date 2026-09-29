@@ -29,6 +29,7 @@ import {
   setBatchCharacter,
   startBatchWithPhoto,
   uploadTelegramPhoto,
+  uploadTelegramVideo,
   type TelegramBatch,
 } from '@/lib/monitor/telegram-batch'
 import {
@@ -62,6 +63,9 @@ import { copyPasteArchiveLabel } from '@/lib/drive-archive/label'
 import type { VideoEffectOpts } from '@/lib/video-ffmpeg'
 
 const CRON_SECRET = process.env.CRON_SECRET
+
+/** Bot API getFile refuses anything larger. */
+const TELEGRAM_BOT_DOWNLOAD_LIMIT = 20 * 1024 * 1024
 
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -482,6 +486,37 @@ export async function POST(req: NextRequest) {
           } catch (err) {
             console.error('[telegram/webhook] photo failed:', err)
             await sendText(chatId, '❌ Could not save that photo. Try sending it again.')
+          }
+          return NextResponse.json({ ok: true })
+        }
+
+        // An uploaded clip is a source video, same as a reel link — for reels
+        // that no fetcher can download. Sent as a video or as a file.
+        const document = message.document as { file_id: string; file_size?: number; mime_type?: string } | undefined
+        const video = (message.video as { file_id: string; file_size?: number } | undefined)
+          ?? (document?.mime_type?.startsWith('video/') ? document : undefined)
+        if (video) {
+          if ((video.file_size ?? 0) > TELEGRAM_BOT_DOWNLOAD_LIMIT) {
+            await sendText(
+              chatId,
+              '❌ That video is over 20 MB — the most a Telegram bot can download. Send a direct link to the .mp4 instead.',
+            )
+            return NextResponse.json({ ok: true })
+          }
+          try {
+            const videoUrl = await uploadTelegramVideo(userId, video.file_id)
+            const result = await addUrlsToBatch({ userId, chatId, text: videoUrl })
+            if (!result) throw new Error('upload produced no usable link')
+            const { batch } = result
+            await sendText(
+              chatId,
+              `🎞 Video added — ${batch.urls.length} source${batch.urls.length === 1 ? '' : 's'} in this batch.`,
+            )
+            if (batch.reference_image_url) await presentBatchReady(chatId, batch)
+            else await offerCharacters(chatId, userId)
+          } catch (err) {
+            console.error('[telegram/webhook] video upload failed:', err)
+            await sendText(chatId, '❌ Could not save that video. Try sending it again.')
           }
           return NextResponse.json({ ok: true })
         }
