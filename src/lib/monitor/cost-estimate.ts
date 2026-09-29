@@ -1,3 +1,4 @@
+import { WAN_RESOLUTION } from './wan-reference'
 /**
  * WaveSpeed unit-cost estimate for Copy-Paste v2 (Seedream v5 Pro Edit keyframe + Seedance 2.0 Video Edit).
  *
@@ -52,21 +53,23 @@ export function estimateCopyPasteCost(
 }
 
 /**
- * alibaba/wan-3.0/reference-to-video pricing (probed 2026-09-20):
- * $0.10/s at 720p (the wan-jobs.ts default resolution). One call does the
- * whole identity swap — no separate keyframe cost like the Seedream/Seedance
- * pipeline above.
+ * alibaba/wan-3.0/reference-to-video pricing (wavespeed.ai model page, 2026-09-29):
+ * $0.05/s 480p · $0.10/s 720p · $0.20/s 1080p, billed on the reference video's
+ * duration (1–15 s) plus the output duration — both, not just the output.
  */
-const WAN_PER_SEC_720P_USD = 0.10
+const WAN_PER_SEC_USD = { '480p': 0.05, '720p': 0.10, '1080p': 0.20 } as const
 
 export function estimateWanCost(durationSec?: number | null): { totalUsd: number; note: string } {
   const billedSec = durationSec == null || !Number.isFinite(durationSec) || durationSec <= 0
     ? 5
     : Math.min(15, Math.max(2, Math.round(durationSec)))
-  const totalUsd = roundUsd(WAN_PER_SEC_720P_USD * billedSec)
+  // Output duration = source duration (same cap), so input + output ≈ 2×.
+  const totalBilledSec = billedSec * 2
+  const rate = WAN_PER_SEC_USD[WAN_RESOLUTION]
+  const totalUsd = roundUsd(rate * totalBilledSec)
   return {
     totalUsd,
-    note: `WaveSpeed Wan 3.0 reference-to-video (720p): ≈$${WAN_PER_SEC_720P_USD.toFixed(2)}/s × ${billedSec}s.`,
+    note: `WaveSpeed Wan 3.0 reference-to-video (${WAN_RESOLUTION}): $${rate.toFixed(2)}/s × ${totalBilledSec}s (source + output). Seedream + Z-Image still not included.`,
   }
 }
 

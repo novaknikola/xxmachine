@@ -27,6 +27,9 @@ export const WAN_DEFAULT_PROMPT =
 export const WAN_MULTI_REFERENCE_PROMPT =
   'Replace woman in the video with the woman shown in the reference images (all of them are the same person). Remove text on screen, remove captions.'
 
+/** Output resolution for every Replicator video (user choice 2026-09-29: 480p). */
+export const WAN_RESOLUTION = '480p' as const
+
 /** The model accepts up to 10 reference images. */
 export const WAN_MAX_REFERENCE_IMAGES = 10
 
@@ -60,7 +63,7 @@ export async function generateWanReferenceVideo(
       || (input.referenceImageUrls.length > 1 ? WAN_MULTI_REFERENCE_PROMPT : WAN_DEFAULT_PROMPT),
     reference_images: input.referenceImageUrls.slice(0, WAN_MAX_REFERENCE_IMAGES),
     reference_videos: [input.referenceVideoUrl],
-    resolution: input.resolution ?? '720p',
+    resolution: input.resolution ?? WAN_RESOLUTION,
     aspect_ratio: input.aspectRatio ?? '9:16',
     duration: input.duration ?? 5,
     enable_prompt_expansion: false,
