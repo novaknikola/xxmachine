@@ -302,7 +302,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     if (job.job_type === 'video_repurpose') {
       const {
         videoUrl, videoName, count, baseSeed, effects, effectRanges, archiveToDrive, characterKey, seriesLabel,
-        driveFileId, outputDriveFolderId, sharpen, trimStartSec,
+        driveFileId, outputDriveFolderId, sharpen, trimStartSec, notifyTelegram,
       } = job.input as unknown as VideoRepurposeJobInput
       let doneCount = job.done_items
 
@@ -441,7 +441,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       // true). A web-dashboard submission never sets this, so it stays silent —
       // nothing there was ever triggered from Telegram, so a Telegram DM about
       // it has no start-of-loop to close.
-      if (archiveToDrive) {
+      if (archiveToDrive && notifyTelegram !== false) {
         const { notifyRepurposeDone } = await import('@/lib/monitor/notify')
         await notifyRepurposeDone({
           userId: job.user_id,
