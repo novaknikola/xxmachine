@@ -6,9 +6,11 @@ export interface ContentCharacter {
   name: string
   /** Own reference photo, else the first face ref — the photo Wan 3.0 takes identity from. */
   reference_image_url: string | null
+  /** Prompt for the Seedream + Z-Image still that goes to Wan with the reference photo. */
+  wan_prompt: string | null
 }
 
-const SELECT = `SELECT id, name, COALESCE(reference_image_url, face_ref_urls[1]) AS reference_image_url
+const SELECT = `SELECT id, name, COALESCE(reference_image_url, face_ref_urls[1]) AS reference_image_url, wan_prompt
                   FROM characters`
 
 /** The Drive folder name the character's archive lives under, e.g. "Tiana Goth" → "tiana_goth". */
@@ -45,8 +47,26 @@ export async function setCharacterReference(
   const created = await one<ContentCharacter>(
     `INSERT INTO characters (user_id, name, reference_image_url)
      VALUES ($1, $2, $3)
-     RETURNING id, name, reference_image_url`,
+     RETURNING id, name, reference_image_url, wan_prompt`,
     [userId, name.trim(), referenceImageUrl],
   )
   return created!
+}
+
+/** Empty text clears the prompt. Null when the character does not exist. */
+export async function setCharacterPrompt(
+  userId: string,
+  name: string,
+  prompt: string,
+): Promise<ContentCharacter | null> {
+  const existing = await findCharacterByName(userId, name)
+  if (!existing) return null
+  const value = prompt.trim() || null
+  await query(`UPDATE characters SET wan_prompt = $2 WHERE id = $1`, [existing.id, value])
+  return { ...existing, wan_prompt: value }
+}
+
+/** Character prompt, then the batch's own addition — what the still is generated from. */
+export function composeStillPrompt(characterPrompt: string | null | undefined, batchPrompt: string | null | undefined): string {
+  return [characterPrompt, batchPrompt].map(p => p?.trim()).filter(Boolean).join('\n')
 }

@@ -15,8 +15,12 @@ import { videoHasAudio } from './video-audio'
 import { notifyReplicationDone, notifyReplicationFailed } from './notify'
 import { enqueueRepurpose } from './process-item'
 import { enqueueDriveArchive } from '@/lib/drive-archive/enqueue'
-import { uploadImageFromUrl } from '@/lib/supabase-storage'
+import { createHash } from 'node:crypto'
+import { uploadBuffer, uploadImageFromUrl } from '@/lib/supabase-storage'
+import { splitDirectVideoUrls } from './telegram-batch'
+import { KEYFRAME_IDENTITY_LOCK, PRESERVE_MOTION_CUE, REMOVE_ONSCREEN_TEXT } from './copy-paste-spec'
 import { characterDriveKey, getCharacter } from '@/lib/content-ops/characters'
+import { editImage as editImageSeedream, finalizeWithSkinEnhance } from '@/lib/wavespeed'
 
 export interface WanJobRow {
   id: string
@@ -28,6 +32,8 @@ export interface WanJobRow {
   video_url: string | null
   reference_image_url: string
   character_id: string | null
+  still_prompt: string | null
+  still_image_url: string | null
   aspect_ratio: string | null
   source_duration: string | number | null
   status: 'awaiting_confirm' | 'generating' | 'done' | 'failed'
@@ -57,15 +63,31 @@ export async function createWanJobsFromUrls(opts: {
   rawText: string
   referenceImageUrl: string
   characterId?: string | null
+  /** Additions to the scene still (character prompt + batch prompt); may be empty. */
+  stillPrompt?: string | null
   username?: string | null
   sourceUsername?: string | null
 }): Promise<CreateWanJobsResult> {
-  const { reels, resolveErrors, invalid, username, sourceUsername } = await resolveReelUrls({
-    userId: opts.userId,
-    rawText: opts.rawText,
-    username: opts.username,
-    sourceUsername: opts.sourceUsername,
-  })
+  // Uploaded clips / direct video links need no fetching; only Instagram links
+  // go through the resolver (which rejects a text with no reel link in it).
+  const { direct, rest } = splitDirectVideoUrls(opts.rawText)
+  const resolved = rest.trim()
+    ? await resolveReelUrls({
+        userId: opts.userId,
+        rawText: rest,
+        username: opts.username,
+        sourceUsername: opts.sourceUsername,
+      })
+    : { reels: [], resolveErrors: [], invalid: [], username: null, sourceUsername: null }
+  const { resolveErrors, invalid, username, sourceUsername } = resolved
+  const reels = [
+    ...resolved.reels,
+    ...direct.map(url => ({
+      id: `upload-${createHash('sha1').update(url).digest('hex').slice(0, 12)}`,
+      permalink: url,
+      videoUrl: url,
+    })),
+  ]
 
   const jobIds: string[] = []
   let noAudioCount = 0
@@ -74,12 +96,13 @@ export async function createWanJobsFromUrls(opts: {
     if ((await videoHasAudio(reel.videoUrl)) === false) noAudioCount++
     const row = await one<{ id: string }>(
       `INSERT INTO copy_paste_wan_jobs
-         (user_id, chat_id, profile, content_url, content_id, video_url, reference_image_url, character_id, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'awaiting_confirm')
+         (user_id, chat_id, profile, content_url, content_id, video_url, reference_image_url, character_id, still_prompt, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'awaiting_confirm')
        RETURNING id`,
       [
         opts.userId, String(opts.chatId), sourceUsername ?? username,
         reel.permalink, reel.id, reel.videoUrl, opts.referenceImageUrl, opts.characterId ?? null,
+        opts.stillPrompt?.trim() || null,
       ],
     )
     if (row) jobIds.push(row.id)
@@ -92,6 +115,67 @@ export async function createWanJobsFromUrls(opts: {
  * The paid call — only reached after a human taps Confirm (Telegram cpgo).
  * Idempotent on a re-run: an already-done job just returns its cached result.
  */
+/**
+ * The Seedream scene still, as the old Copy-Paste keyframe did it: image 1 is a
+ * frame of the source reel (pose, framing, background), image 2 the character's
+ * reference photo (identity). The user's prompt only adds to that edit (props,
+ * wardrobe, body) — it is appended to the fixed swap instructions, never a
+ * replacement for them.
+ */
+export function renderWanStillPrompt(additions: string | null | undefined): string {
+  return [
+    'Image 1 is the scene reference, image 2 is the identity reference.',
+    'Keep the exact pose, camera framing, and background from image 1 unchanged.',
+    "Replace the main subject's face and body identity with the person from image 2.",
+    `Body and skin come from image 2, not image 1: ${KEYFRAME_IDENTITY_LOCK}.`,
+    PRESERVE_MOTION_CUE,
+    REMOVE_ONSCREEN_TEXT,
+    'Photorealistic, natural skin texture, no beauty filter, no AI skin smoothing.',
+    'Do not add any other people. Do not change the composition, angle, or background.',
+    additions?.trim(),
+  ].filter(Boolean).join(' ')
+}
+
+/** Blurred frames compress smaller, so the largest sampled JPEG is the sharpest. */
+export function sharpestFrameIndex(framesBase64: readonly string[]): number {
+  let best = 0
+  for (let i = 1; i < framesBase64.length; i++) {
+    if (framesBase64[i].length > framesBase64[best].length) best = i
+  }
+  return best
+}
+
+/**
+ * Seedream v5 Pro Edit of [source frame, reference photo], then the Z-Image
+ * Turbo skin pass — same still workflow as the recreate bot. It goes to Wan next
+ * to the original photo, never instead of it. Any failure here fails the job
+ * before the paid Wan call.
+ */
+async function generateSceneStill(opts: {
+  jobId: string
+  referenceImageUrl: string
+  sceneFrameBase64: string
+  additions: string | null
+  aspectRatio: string
+  apiKey: string
+}): Promise<string> {
+  const frameUrl = await uploadBuffer(
+    Buffer.from(opts.sceneFrameBase64, 'base64'),
+    `monitor/${opts.jobId}/wan-scene-frame.jpg`,
+    'image/jpeg',
+  )
+  const outputs = await editImageSeedream({
+    imageUrls: [frameUrl, opts.referenceImageUrl],
+    prompt: renderWanStillPrompt(opts.additions),
+    size: opts.aspectRatio,
+    apiKey: opts.apiKey,
+  })
+  if (!outputs.length) throw new Error('Seedream returned no image for the scene still')
+  const finalUrl = await finalizeWithSkinEnhance(outputs[0], opts.aspectRatio, opts.apiKey)
+  // Re-hosted: WaveSpeed result links are not guaranteed to outlive the Wan job.
+  return await uploadImageFromUrl(finalUrl, `monitor/${opts.jobId}/wan-still.jpg`).catch(() => finalUrl)
+}
+
 export async function runWanGeneration(
   jobId: string,
   userId: string,
@@ -129,8 +213,10 @@ export async function runWanGeneration(
   try {
     let aspectRatio = job.aspect_ratio
     let duration = job.source_duration != null ? Number(job.source_duration) : null
+    // Always probed now: the scene still needs a frame of the source reel.
+    const probe = await probeSourceVideo(job.video_url, 5)
+    if (!probe?.frames.length) throw new Error('Could not read frames from the source reel for the scene still')
     if (!aspectRatio || duration == null) {
-      const probe = await probeSourceVideo(job.video_url, 5)
       if (probe) {
         aspectRatio = probe.aspectRatio === 'other' ? '9:16' : probe.aspectRatio
         duration = probe.duration
@@ -147,8 +233,19 @@ export async function runWanGeneration(
     // clip. Can be relaxed once real output is seen.
     const wanDuration = Math.min(Math.max(Math.round(duration ?? 5), 2), 15)
 
-    const result = await generateWanReferenceVideo({
+    const stillUrl = await generateSceneStill({
+      jobId,
       referenceImageUrl: job.reference_image_url,
+      sceneFrameBase64: probe.frames[sharpestFrameIndex(probe.frames)],
+      additions: job.still_prompt,
+      aspectRatio: aspectRatio ?? '9:16',
+      apiKey,
+    })
+    await query(`UPDATE copy_paste_wan_jobs SET still_image_url = $2 WHERE id = $1`, [jobId, stillUrl])
+    const referenceImageUrls = [job.reference_image_url, stillUrl]
+
+    const result = await generateWanReferenceVideo({
+      referenceImageUrls,
       referenceVideoUrl: job.video_url,
       aspectRatio: aspectRatio ?? '9:16',
       duration: wanDuration,

@@ -23,13 +23,21 @@ export const WAN_MODEL = 'alibaba/wan-3.0/reference-to-video'
 export const WAN_DEFAULT_PROMPT =
   'Replace woman in the video with the one in the reference image. Remove text on screen, remove captions.'
 
+/** Used when several reference images are attached — all of them show the same person. */
+export const WAN_MULTI_REFERENCE_PROMPT =
+  'Replace woman in the video with the woman shown in the reference images (all of them are the same person). Remove text on screen, remove captions.'
+
+/** The model accepts up to 10 reference images. */
+export const WAN_MAX_REFERENCE_IMAGES = 10
+
 const POLL_ATTEMPTS = 360        // pollV3's own 5s interval × 360 = 30 min
 const ABORT_MS = 1_800_000       // 30 min
 
 export interface WanReferenceInput {
-  referenceImageUrl: string
+  /** Same identity in every image; the first is the original reference photo. */
+  referenceImageUrls: string[]
   referenceVideoUrl: string
-  /** Defaults to WAN_DEFAULT_PROMPT. */
+  /** Defaults to WAN_DEFAULT_PROMPT (one image) or WAN_MULTI_REFERENCE_PROMPT (several). */
   prompt?: string
   resolution?: '480p' | '720p' | '1080p'
   /** e.g. '9:16', '16:9' — passed through as-is. */
@@ -48,8 +56,9 @@ export async function generateWanReferenceVideo(
   apiKey: string,
 ): Promise<WanReferenceResult> {
   const payload = {
-    prompt: input.prompt?.trim() || WAN_DEFAULT_PROMPT,
-    reference_images: [input.referenceImageUrl],
+    prompt: input.prompt?.trim()
+      || (input.referenceImageUrls.length > 1 ? WAN_MULTI_REFERENCE_PROMPT : WAN_DEFAULT_PROMPT),
+    reference_images: input.referenceImageUrls.slice(0, WAN_MAX_REFERENCE_IMAGES),
     reference_videos: [input.referenceVideoUrl],
     resolution: input.resolution ?? '720p',
     aspect_ratio: input.aspectRatio ?? '9:16',

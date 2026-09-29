@@ -121,7 +121,8 @@ export async function downloadTelegramFile(fileId: string): Promise<{
   return {
     buffer: await res.arrayBuffer(),
     contentType: res.headers.get('content-type') ?? 'image/jpeg',
-    extension: /^(jpe?g|png|webp)$/.test(extension) ? extension : 'jpg',
+    // Videos keep their own extension; anything else unrecognised is treated as a photo.
+    extension: /^(jpe?g|png|webp|mp4|mov|m4v|webm)$/.test(extension) ? extension : 'jpg',
   }
 }
 
