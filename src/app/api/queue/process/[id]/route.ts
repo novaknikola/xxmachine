@@ -41,7 +41,7 @@ import {
 import { runI2vItem, runAnimateItem, runTalkItem } from '@/lib/my-pod/runners'
 import { fishTts } from '@/lib/my-pod/fish-tts'
 import { generateCopyPasteKeyframes, finishCopyPasteVideo, regenerateCopyPasteKeyframes } from '@/lib/monitor/process-item'
-import { runWanGeneration } from '@/lib/monitor/wan-jobs'
+import { prepareWanStill, runWanGeneration } from '@/lib/monitor/wan-jobs'
 import { runKlingRecreateAction, handleRenderSubmitFailure } from '@/lib/kling-recreate/process-job'
 import { SeedanceSubmitError } from '@/lib/kling-recreate/seedance-client'
 import type { KlingRecreateQueueInput } from '@/lib/kling-recreate/types'
@@ -1647,7 +1647,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     // gate already happened (Telegram cpgo) before this was ever queued, so
     // every job here goes straight to the paid call ──────────────────────────
     if (job.job_type === 'copy_paste_wan') {
-      const { jobIds, repurposeCount, outputDriveFolderId } = job.input as unknown as CopyPasteWanJobInput
+      const { jobIds, repurposeCount, outputDriveFolderId, phase } = job.input as unknown as CopyPasteWanJobInput
       if (!jobIds?.length) throw new Error('No items in job input')
 
       const copyPasteRows: CopyPasteRow[] = job.output?.copyPasteRows ? [...job.output.copyPasteRows] : []
@@ -1664,6 +1664,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
         const results = await Promise.all(batchIds.map(async (itemId): Promise<CopyPasteRow> => {
           try {
+            if (phase === 'still') {
+              const { stillUrl } = await prepareWanStill(itemId, job.user_id)
+              return { itemId, status: 'done', videoUrl: stillUrl }
+            }
             const result = await runWanGeneration(itemId, job.user_id, { repurposeCount, outputDriveFolderId })
             return { itemId, status: 'done', videoUrl: result.videoUrl }
           } catch (err) {
