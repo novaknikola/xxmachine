@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireApiToken } from '@/lib/api-token'
 import { enqueueRepurposeJob } from '@/lib/repurpose/enqueue-from-drive'
-import { getRepurposeSettings } from '@/lib/monitor/telegram-repurpose'
+import { FARM_VARIANT_EFFECTS, FARM_VARIANT_RANGES } from '@/lib/video-effect-ranges'
 import { sanitizeDriveKey } from '@/lib/drive-archive/paths'
 
 const MAX_VARIANTS = 20
@@ -9,8 +9,8 @@ const DRIVE_ID = /^[A-Za-z0-9_-]{10,200}$/
 
 /**
  * One repurpose job for a raw Drive reel: `count` variants, one per farm
- * device of that character. Uses the account's own /settings effects, same as
- * the Telegram folder command. Poll GET ./[id] for the variant URLs.
+ * account of that character, always with the fixed mild farm profile —
+ * independent of the bot's /settings. Poll GET ./[id] for the variant URLs.
  */
 export async function POST(req: NextRequest) {
   const auth = await requireApiToken(req)
@@ -36,13 +36,15 @@ export async function POST(req: NextRequest) {
     : `${driveFileId}.mp4`
   const characterKey = typeof body?.characterKey === 'string' ? sanitizeDriveKey(body.characterKey) : null
 
-  const settings = await getRepurposeSettings(auth.id)
   const jobId = await enqueueRepurposeJob({
     userId: auth.id,
     videoUrl: '',
     videoName: fileName,
     count,
-    effects: settings.effects,
+    effects: { ...FARM_VARIANT_EFFECTS },
+    effectRanges: FARM_VARIANT_RANGES,
+    sharpen: true,
+    trimStartSec: 0.5,
     characterKey,
     seriesLabel: fileName.replace(/\.[^.]+$/, ''),
     driveFileId,
