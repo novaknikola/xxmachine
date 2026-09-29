@@ -31,7 +31,7 @@ import {
   uploadTelegramPhoto,
   type TelegramBatch,
 } from '@/lib/monitor/telegram-batch'
-import { getCharacter, listCharacters, setCharacterReference } from '@/lib/content-ops/characters'
+import { findCharacterByName, getCharacter, listCharacters, setCharacterReference } from '@/lib/content-ops/characters'
 import { FARM_TOKEN_LABEL, generateToken, hashToken } from '@/lib/api-token'
 import { estimateWanCost, formatUsd } from '@/lib/monitor/cost-estimate'
 import {
@@ -58,6 +58,21 @@ const CRON_SECRET = process.env.CRON_SECRET
 
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/** Saved characters as buttons, so a batch never needs its reference photo sent again. */
+async function offerCharacters(chatId: number, userId: string): Promise<void> {
+  const chars = (await listCharacters(userId)).filter(c => c.reference_image_url)
+  if (!chars.length) return
+  const sent = await sendText(
+    chatId,
+    '👤 Pick a character (uses its saved reference photo) — or send a new photo:',
+  ) as { message_id?: number }
+  if (sent?.message_id) {
+    await editMessageReplyMarkup(chatId, sent.message_id, {
+      inline_keyboard: chars.map(c => [{ text: c.name, callback_data: `cpchar:${c.id}` }]),
+    })
+  }
 }
 
 /**
@@ -263,12 +278,7 @@ export async function POST(req: NextRequest) {
             )
             return NextResponse.json({ ok: true })
           }
-          const sent = await sendText(chatId, '👤 Which character is this batch for?') as { message_id?: number }
-          if (sent?.message_id) {
-            await editMessageReplyMarkup(chatId, sent.message_id, {
-              inline_keyboard: chars.map(c => [{ text: c.name, callback_data: `cpchar:${c.id}` }]),
-            })
-          }
+          await offerCharacters(chatId, userId)
           return NextResponse.json({ ok: true })
         }
 
@@ -441,6 +451,21 @@ export async function POST(req: NextRequest) {
         if (text && !text.startsWith('/')) {
           const result = await addUrlsToBatch({ userId, chatId, text })
           if (!result) {
+            // A character's name picks that character's saved reference photo.
+            const named = await findCharacterByName(userId, text.replace(/\s+/g, ' '))
+            if (named?.reference_image_url) {
+              const batch = await setBatchCharacter({
+                userId, chatId, characterId: named.id, referenceImageUrl: named.reference_image_url,
+              })
+              await sendText(
+                chatId,
+                batch.urls.length
+                  ? `👤 <b>${escapeHtml(named.name)}</b> — ${batch.urls.length} reel${batch.urls.length === 1 ? '' : 's'} in this batch.`
+                  : `👤 <b>${escapeHtml(named.name)}</b> — now send the Instagram reel links, one per line.`,
+              )
+              if (batch.urls.length) await presentBatchReady(chatId, batch)
+              return NextResponse.json({ ok: true })
+            }
             // Not links and not a command — say what the bot expects rather
             // than staying silent, which reads as broken.
             await sendText(
@@ -473,6 +498,7 @@ export async function POST(req: NextRequest) {
           } else if (sent?.message_id) {
             await setPromptMessage(batch.id, sent.message_id)
           }
+          if (!batch.reference_image_url) await offerCharacters(chatId, userId)
           return NextResponse.json({ ok: true })
         }
 
