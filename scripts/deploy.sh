@@ -58,6 +58,10 @@ git checkout "${BRANCH}"
 git pull --ff-only origin "${BRANCH}"
 log "At commit $(git log -1 --oneline)"
 
+# Before npm ci/build: building loads postcss.config.mjs, which is where the
+# injected dropper ran. A hit aborts the deploy with the old build still live.
+node scripts/check-code-integrity.mjs
+
 # ── Install & build ────────────────────────────────────────────
 # Keep the previous build's static assets so browsers that already have a page
 # open can still fetch their chunks. `next build` writes a new build id and the

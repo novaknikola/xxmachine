@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "node scripts/check-code-integrity.mjs",
     "dev": "node --use-system-ca --max-old-space-size=4096 server.mjs",
+    "prebuild": "node scripts/check-code-integrity.mjs",
     "build": "next build --webpack",
     "start": "NODE_ENV=production node server.mjs",
     "start:prod": "node server.mjs",
