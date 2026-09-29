@@ -45,6 +45,8 @@ export async function enqueueRepurpose(opts: {
   seriesLabel?: string
   /** Override destination. Empty keeps the computed archive tree. */
   outputDriveFolderId?: string | null
+  /** Archive section folder above the character (e.g. IGreplicator). */
+  driveSection?: string | null
 }): Promise<void> {
   if (!opts.count || opts.count < 1) return
 
@@ -74,6 +76,7 @@ export async function enqueueRepurpose(opts: {
         characterKey: opts.characterKey,
         seriesLabel: opts.seriesLabel,
         outputDriveFolderId: opts.outputDriveFolderId ?? null,
+        driveSection: opts.driveSection ?? null,
       }),
       opts.count,
     ],

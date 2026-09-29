@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireApiToken } from '@/lib/api-token'
 import { enqueueRepurposeJob } from '@/lib/repurpose/enqueue-from-drive'
 import { FARM_VARIANT_EFFECTS, FARM_VARIANT_RANGES } from '@/lib/video-effect-ranges'
-import { sanitizeDriveKey } from '@/lib/drive-archive/paths'
+import { IGREPLICATOR_DRIVE_SECTION, sanitizeDriveKey } from '@/lib/drive-archive/paths'
 
 const MAX_VARIANTS = 20
 const DRIVE_ID = /^[A-Za-z0-9_-]{10,200}$/
@@ -45,6 +45,7 @@ export async function POST(req: NextRequest) {
     effectRanges: FARM_VARIANT_RANGES,
     sharpen: true,
     trimStartSec: 0.5,
+    driveSection: IGREPLICATOR_DRIVE_SECTION,
     characterKey,
     seriesLabel: fileName.replace(/\.[^.]+$/, ''),
     driveFileId,

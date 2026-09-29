@@ -28,6 +28,7 @@ interface DriveExportRow {
   model_key: string
   /** '' for every row queued before per-set subfolders existed. */
   series_folder: string
+  section: string
   attempts: number
 }
 
@@ -63,7 +64,7 @@ async function claimNextExport(): Promise<DriveExportRow | null> {
       )
       RETURNING e.id, e.user_id, e.source_url, e.filename, e.mime_type,
                 e.character_key, e.kind, e.stage, e.date_key, e.model_key,
-                e.series_folder, e.attempts`,
+                e.series_folder, e.section, e.attempts`,
     [MAX_ATTEMPTS],
   )
 }
@@ -148,6 +149,7 @@ async function processOne(row: DriveExportRow): Promise<'done' | 'failed' | 'ski
       accessToken,
       rootFolderId: user.drive_root_folder_id,
       seriesFolder: row.series_folder,
+      section: row.section,
     })
     const buffer = await downloadUrl(row.source_url)
     const uploaded = await uploadBufferToDriveFolder(

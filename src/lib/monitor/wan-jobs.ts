@@ -15,6 +15,7 @@ import { videoHasAudio } from './video-audio'
 import { notifyReplicationDone, notifyReplicationFailed } from './notify'
 import { enqueueRepurpose } from './process-item'
 import { enqueueDriveArchive } from '@/lib/drive-archive/enqueue'
+import { IGREPLICATOR_DRIVE_SECTION } from '@/lib/drive-archive/paths'
 import { createHash } from 'node:crypto'
 import { uploadBuffer, uploadImageFromUrl } from '@/lib/supabase-storage'
 import { sendPhoto } from '@/lib/telegram'
@@ -350,6 +351,9 @@ export async function runWanGeneration(
     const character = job.character_id ? await getCharacter(userId, job.character_id) : null
     const characterKey = character ? characterDriveKey(character.name) : job.profile
 
+    // Neutral file name (date + job), no model name in it; all Replicator
+    // output sits under XXMachine Archives/IGreplicator/<character>/.
+    const archiveLabel = `${new Date().toISOString().slice(0, 10)}_${jobId.slice(0, 8)}`
     await enqueueDriveArchive({
       userId,
       sourceType: 'queue_job',
@@ -359,6 +363,8 @@ export async function runWanGeneration(
       kind: 'reels',
       stage: character ? 'raw' : 'ready',
       modelKey: result.model,
+      seriesLabel: archiveLabel,
+      section: IGREPLICATOR_DRIVE_SECTION,
     }).catch(err => console.error('[wan-jobs] drive archive failed:', err))
 
     await enqueueRepurpose({
@@ -367,6 +373,8 @@ export async function runWanGeneration(
       count: opts?.repurposeCount ?? 0,
       characterKey,
       itemId: jobId,
+      seriesLabel: archiveLabel,
+      driveSection: IGREPLICATOR_DRIVE_SECTION,
       outputDriveFolderId: opts?.outputDriveFolderId ?? null,
     }).catch(err => console.error('[wan-jobs] repurpose enqueue failed:', err))
 

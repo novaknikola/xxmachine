@@ -3,6 +3,7 @@ import { rows } from '@/lib/db'
 import { requireApiToken } from '@/lib/api-token'
 import { characterDriveKey, listCharacters } from '@/lib/content-ops/characters'
 import { driveFormatFolderName } from '@/lib/drive-archive/content-format'
+import { IGREPLICATOR_DRIVE_SECTION } from '@/lib/drive-archive/paths'
 
 /**
  * The farm's view of the Replicator: every character and the Drive folder its
@@ -15,7 +16,8 @@ export async function GET(req: NextRequest) {
   if (auth instanceof NextResponse) return auth
 
   const characters = await listCharacters(auth.id)
-  const rawPaths = characters.map(c => `${characterDriveKey(c.name)}/${driveFormatFolderName('reels')}/raw`)
+  const rawPaths = characters.map(c =>
+    `${IGREPLICATOR_DRIVE_SECTION}/${characterDriveKey(c.name)}/${driveFormatFolderName('reels')}/raw`)
   const cached = await rows<{ path: string; folder_id: string }>(
     `SELECT path, folder_id FROM drive_folders WHERE user_id = $1 AND path = ANY($2::text[])`,
     [auth.id, rawPaths],
