@@ -113,6 +113,8 @@ export interface CopyPasteFinishJobInput {
  */
 export interface CopyPasteWanJobInput {
   jobIds: string[]
+  /** 'still' makes the scene stills for approval; 'video' (or absent, older rows) runs Wan. */
+  phase?: 'still' | 'video'
   repurposeCount?: number
   outputDriveFolderId?: string | null
 }
