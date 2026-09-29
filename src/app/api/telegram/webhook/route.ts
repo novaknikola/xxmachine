@@ -311,7 +311,7 @@ export async function POST(req: NextRequest) {
               ? `❌ No character named “${escapeHtml(name.trim())}”.`
               : updated.wan_prompt
                 ? `🖼 <b>${escapeHtml(updated.name)}</b> prompt saved — used for its still on every batch.`
-                : `🖼 <b>${escapeHtml(updated.name)}</b> prompt cleared — only the reference photo goes to Wan.`,
+                : `🖼 <b>${escapeHtml(updated.name)}</b> prompt cleared — its still is the plain character swap.`,
           )
           return NextResponse.json({ ok: true })
         }
@@ -811,8 +811,8 @@ export async function POST(req: NextRequest) {
                 ? `⚠️ ${result.noAudioCount} of ${result.jobIds.length} source reel${result.jobIds.length === 1 ? ' has' : 's have'} no audio track — Wan will invent its own speech, which can sound garbled.`
                 : '',
               stillPrompt
-                ? `🖼 Reference photo + its Seedream/Z-Image still (prompt: “${escapeHtml(stillPrompt.slice(0, 300))}”) go to Wan together.`
-                : '🖼 Only the reference photo goes to Wan (no character or batch prompt set).',
+                ? `🖼 Seedream still (reel frame + reference photo) with additions: “${escapeHtml(stillPrompt.slice(0, 300))}” — then Wan gets the reference photo and the still.`
+                : '🖼 Seedream still (reel frame + reference photo), no additions — then Wan gets the reference photo and the still.',
               '',
               `Confirm to start generating? Each one is a paid Wan 3.0 call.`,
             ].filter(Boolean).join('\n'),
