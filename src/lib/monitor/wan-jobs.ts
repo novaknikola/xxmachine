@@ -16,6 +16,7 @@ import { notifyReplicationDone, notifyReplicationFailed } from './notify'
 import { enqueueRepurpose } from './process-item'
 import { enqueueDriveArchive } from '@/lib/drive-archive/enqueue'
 import { uploadImageFromUrl } from '@/lib/supabase-storage'
+import { characterDriveKey, getCharacter } from '@/lib/content-ops/characters'
 
 export interface WanJobRow {
   id: string
@@ -26,6 +27,7 @@ export interface WanJobRow {
   content_id: string
   video_url: string | null
   reference_image_url: string
+  character_id: string | null
   aspect_ratio: string | null
   source_duration: string | number | null
   status: 'awaiting_confirm' | 'generating' | 'done' | 'failed'
@@ -54,6 +56,7 @@ export async function createWanJobsFromUrls(opts: {
   chatId: string | number
   rawText: string
   referenceImageUrl: string
+  characterId?: string | null
   username?: string | null
   sourceUsername?: string | null
 }): Promise<CreateWanJobsResult> {
@@ -71,12 +74,12 @@ export async function createWanJobsFromUrls(opts: {
     if ((await videoHasAudio(reel.videoUrl)) === false) noAudioCount++
     const row = await one<{ id: string }>(
       `INSERT INTO copy_paste_wan_jobs
-         (user_id, chat_id, profile, content_url, content_id, video_url, reference_image_url, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'awaiting_confirm')
+         (user_id, chat_id, profile, content_url, content_id, video_url, reference_image_url, character_id, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'awaiting_confirm')
        RETURNING id`,
       [
         opts.userId, String(opts.chatId), sourceUsername ?? username,
-        reel.permalink, reel.id, reel.videoUrl, opts.referenceImageUrl,
+        reel.permalink, reel.id, reel.videoUrl, opts.referenceImageUrl, opts.characterId ?? null,
       ],
     )
     if (row) jobIds.push(row.id)
@@ -170,14 +173,20 @@ export async function runWanGeneration(
       [jobId, hostedVideoUrl, result.model],
     )
 
+    // With a character, the unedited Wan output lands in <character>/reels/raw/
+    // — the folder the farm polls and repurposes per device. Without one, the
+    // old behaviour: filed under the source account.
+    const character = job.character_id ? await getCharacter(userId, job.character_id) : null
+    const characterKey = character ? characterDriveKey(character.name) : job.profile
+
     await enqueueDriveArchive({
       userId,
       sourceType: 'queue_job',
       sourceId: jobId,
       urls: [hostedVideoUrl],
-      characterKey: job.profile ?? undefined,
+      characterKey: characterKey ?? undefined,
       kind: 'reels',
-      stage: 'ready',
+      stage: character ? 'raw' : 'ready',
       modelKey: result.model,
     }).catch(err => console.error('[wan-jobs] drive archive failed:', err))
 
@@ -185,7 +194,7 @@ export async function runWanGeneration(
       userId,
       videoUrl: hostedVideoUrl,
       count: opts?.repurposeCount ?? 0,
-      characterKey: job.profile,
+      characterKey,
       itemId: jobId,
       outputDriveFolderId: opts?.outputDriveFolderId ?? null,
     }).catch(err => console.error('[wan-jobs] repurpose enqueue failed:', err))
