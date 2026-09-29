@@ -9,6 +9,7 @@ import { internalBaseUrl } from '@/lib/internal-url'
 import { syncPoseLibraryFromPinterest, reapStaleAdhocJobs } from '@/lib/pose-recreate-sync'
 import { notifyMonitorUser } from '@/lib/monitor/notify'
 import { refreshDueTokens } from '@/lib/instagram/tokens'
+import { syncViralSheet } from '@/lib/monitor/viral-sheet'
 
 const CRON_SECRET = process.env.CRON_SECRET
 const QUEUE_CONCURRENCY = 2
@@ -214,6 +215,13 @@ export async function GET(req: NextRequest) {
         [STALE_JOB_ERROR, job.id],
       )
       if (failed.rowCount) {
+        // The queue row alone failing left its Wan items in e.g. 'generating'
+        // forever — the Sheet and /status would show them as still running.
+        if (job.job_type === 'copy_paste_wan') {
+          const { failStaleWanItems } = await import('@/lib/monitor/wan-jobs')
+          await failStaleWanItems(job.id, STALE_JOB_ERROR)
+            .catch(err => console.error('[cron/tick] fail stale wan items:', err))
+        }
         if (job.job_type === 'kling_recreate_v1') {
           const rec = await one<{ chat_id: string | number | null; sheet_row: number | null; source_label: string | null }>(
             `SELECT chat_id, sheet_row, source_label FROM kling_recreate_jobs WHERE queue_job_id = $1`,
@@ -482,6 +490,16 @@ export async function GET(req: NextRequest) {
     console.error('[cron/tick] stalled batch sweep error:', err)
   }
 
+  // ── Viral monitoring Sheet → IG Replicator ────────────────────
+  // Ticked rows become Wan jobs; every job's status is written back to its row.
+  let viralSheet: Awaited<ReturnType<typeof syncViralSheet>> | { error: string } | 'skipped' = 'skipped'
+  try {
+    viralSheet = await syncViralSheet()
+  } catch (err) {
+    console.error('[cron/tick] viral sheet sync error:', err)
+    viralSheet = { error: err instanceof Error ? err.message : String(err) }
+  }
+
   // ── Google Drive auto-archive uploads ─────────────────────────
   let driveArchive: Awaited<ReturnType<typeof processDriveExports>> | { error: string } = {
     processed: 0,
@@ -528,6 +546,7 @@ export async function GET(req: NextRequest) {
     stalledBatchesFinalized,
     monitor: monitorScans,
     driveArchive,
+    viralSheet,
     viralMonitor,
     autoSchedule: 'fire-and-forget — not awaited, check logs for its own [auto-schedule] lines',
   })

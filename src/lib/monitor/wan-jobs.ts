@@ -23,6 +23,7 @@ import { splitDirectVideoUrls } from './telegram-batch'
 import { KEYFRAME_IDENTITY_LOCK, PRESERVE_MOTION_CUE, REMOVE_ONSCREEN_TEXT } from './copy-paste-spec'
 import { characterDriveKey, getCharacter } from '@/lib/content-ops/characters'
 import { editImage as editImageSeedream, finalizeWithSkinEnhance } from '@/lib/wavespeed'
+import type { CopyPasteWanPhase } from './wan-queue'
 
 export interface WanJobRow {
   id: string
@@ -38,11 +39,62 @@ export interface WanJobRow {
   still_image_url: string | null
   aspect_ratio: string | null
   source_duration: string | number | null
-  status: 'awaiting_confirm' | 'still_generating' | 'awaiting_approval' | 'approved'
-    | 'generating' | 'done' | 'failed' | 'cancelled'
+  status: WanJobStatus
   error: string | null
   video_result_url: string | null
   video_model: string | null
+  origin: 'telegram' | 'sheet'
+  error_code: WanErrorCode | null
+  started_at: string | null
+  completed_at: string | null
+}
+
+export type WanJobStatus =
+  | 'queued' | 'acquiring'
+  | 'awaiting_confirm' | 'still_generating' | 'awaiting_approval' | 'approved'
+  | 'generating' | 'done' | 'failed' | 'cancelled'
+
+/** Machine-readable failure reason stored next to the free-text `error` (migration 104). */
+export type WanErrorCode =
+  | 'INVALID_INPUT'
+  | 'DUPLICATE_JOB'
+  | 'SOURCE_UNAVAILABLE'
+  | 'ACQUISITION_FAILED'
+  | 'STORAGE_FAILED'
+  | 'REPLICATOR_UNAVAILABLE'
+  | 'PROCESSING_FAILED'
+  | 'STALLED'
+  | 'UNKNOWN_ERROR'
+
+/** A failure whose reason is already known where it is thrown. */
+export class WanJobError extends Error {
+  constructor(readonly code: WanErrorCode, message: string) {
+    super(message)
+  }
+}
+
+/** Reason for a failure in the still / Wan phases, read from the error it threw. */
+export function classifyWanError(err: unknown): WanErrorCode {
+  if (err instanceof WanJobError) return err.code
+  const msg = err instanceof Error ? err.message : String(err)
+  if (/Storage upload failed|SUPABASE_SERVICE_KEY/i.test(msg)) return 'STORAGE_FAILED'
+  if (/No API key configured|\b401\b|unauthori[sz]ed/i.test(msg)) return 'REPLICATOR_UNAVAILABLE'
+  return 'PROCESSING_FAILED'
+}
+
+/** Reason for a failed source resolution — which part broke decides what fixes it. */
+export function classifyAcquireError(err: unknown): WanErrorCode {
+  if (err instanceof WanJobError) return err.code
+  if (err instanceof EnqueueUrlsError) {
+    if (err.status === 400) return 'INVALID_INPUT'
+    // A fetcher that is missing, erroring, or out of quota: retrying later can work.
+    if (/No reel fetcher configured|Apify could not fetch it|out of requests|\b429\b/i.test(err.message)) {
+      return 'ACQUISITION_FAILED'
+    }
+    // Every fetcher answered and none had the video: private, deleted, age-gated.
+    return 'SOURCE_UNAVAILABLE'
+  }
+  return classifyWanError(err)
 }
 
 export interface CreateWanJobsResult {
@@ -261,10 +313,21 @@ export async function prepareWanStill(jobId: string, userId: string): Promise<{ 
     return { stillUrl }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    await query(`UPDATE copy_paste_wan_jobs SET status = 'failed', error = $2 WHERE id = $1`, [jobId, msg])
+    const code = classifyWanError(err)
+    await markWanJobFailed(jobId, code, msg)
+    console.error(`[wan-jobs] job ${jobId} still failed [${code}]: ${msg}`)
     await notifyReplicationFailed(userId, job.profile ?? 'copy-paste', `Scene still: ${msg}`).catch(() => {})
     throw err
   }
+}
+
+export async function markWanJobFailed(jobId: string, code: WanErrorCode, msg: string): Promise<void> {
+  await query(
+    `UPDATE copy_paste_wan_jobs
+        SET status = 'failed', error = $2, error_code = $3, completed_at = now(), updated_at = now()
+      WHERE id = $1`,
+    [jobId, msg, code],
+  )
 }
 
 function escapeHtml(s: string): string {
@@ -340,7 +403,8 @@ export async function runWanGeneration(
 
     await query(
       `UPDATE copy_paste_wan_jobs
-          SET status = 'done', video_result_url = $2, video_model = $3, error = NULL
+          SET status = 'done', video_result_url = $2, video_model = $3, error = NULL, error_code = NULL,
+              completed_at = now(), updated_at = now()
         WHERE id = $1`,
       [jobId, hostedVideoUrl, result.model],
     )
@@ -392,8 +456,194 @@ export async function runWanGeneration(
     return { videoUrl: hostedVideoUrl }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    await query(`UPDATE copy_paste_wan_jobs SET status = 'failed', error = $2 WHERE id = $1`, [jobId, msg])
+    const code = classifyWanError(err)
+    await markWanJobFailed(jobId, code, msg)
+    console.error(`[wan-jobs] job ${jobId} Wan failed [${code}]: ${msg}`)
     await notifyReplicationFailed(userId, job.profile ?? 'copy-paste', msg).catch(() => {})
     throw err
   }
+}
+
+// ── Viral monitoring Sheet bridge (viral-sheet.ts) ─────────────────────────
+
+export interface CreateSheetWanJobResult {
+  jobId: string
+  /** false: the same reel + character was already live — jobId is that job. */
+  created: boolean
+  status: WanJobStatus
+}
+
+/**
+ * One ticked Sheet row → one 'queued' job. Resolving the reel happens later in
+ * the queue (acquireWanJobSource), so the Sheet gets its Job ID within one tick.
+ * The partial unique index from migration 104 is the duplicate guard: two ticks
+ * racing on the same row, or two rows with the same reel + character, end up
+ * with one job.
+ */
+export async function createSheetWanJob(opts: {
+  userId: string
+  chatId: string | number | null
+  shortCode: string
+  permalink: string
+  /** The Sheet's "Nalog" — lets the resolver fall back to listing that profile. */
+  sourceUsername: string | null
+  characterId: string
+  referenceImageUrl: string
+  stillPrompt: string | null
+}): Promise<CreateSheetWanJobResult> {
+  const inserted = await one<{ id: string }>(
+    `INSERT INTO copy_paste_wan_jobs
+       (user_id, chat_id, profile, content_url, content_id, reference_image_url, character_id, still_prompt, status, origin)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'queued','sheet')
+     ON CONFLICT (user_id, lower(content_id), character_id)
+       WHERE origin = 'sheet' AND status NOT IN ('failed', 'cancelled')
+     DO NOTHING
+     RETURNING id`,
+    [
+      opts.userId, opts.chatId != null ? String(opts.chatId) : null, opts.sourceUsername,
+      opts.permalink, opts.shortCode, opts.referenceImageUrl, opts.characterId,
+      opts.stillPrompt?.trim() || null,
+    ],
+  )
+  if (inserted) {
+    console.log(`[wan-jobs] sheet job ${inserted.id} queued for ${opts.permalink} (character ${opts.characterId})`)
+    return { jobId: inserted.id, created: true, status: 'queued' }
+  }
+
+  const existing = await one<{ id: string; status: WanJobStatus }>(
+    `SELECT id, status FROM copy_paste_wan_jobs
+      WHERE user_id = $1 AND lower(content_id) = lower($2) AND character_id = $3
+        AND origin = 'sheet' AND status NOT IN ('failed', 'cancelled')
+      LIMIT 1`,
+    [opts.userId, opts.shortCode, opts.characterId],
+  )
+  // Only possible if the conflicting job failed in the instant between the two
+  // statements; the row stays ticked, so the next tick simply tries again.
+  if (!existing) throw new Error('Conflicting job disappeared before it could be read — will retry next tick')
+  return { jobId: existing.id, created: false, status: existing.status }
+}
+
+/**
+ * The acquire phase of a Sheet job: resolve the reel through the same chain the
+ * Telegram batch uses, then keep our own copy — an Instagram CDN link can expire
+ * while the scene still waits hours for approval. Leaves the job at
+ * 'awaiting_confirm', which is exactly what prepareWanStill claims next.
+ */
+// Re-entering 'acquiring' is deliberate, same as still_generating: a crashed
+// worker's queue retry must be able to finish it. Nothing here is billed.
+export async function acquireWanJobSource(jobId: string, userId: string): Promise<{ videoUrl: string }> {
+  const job = await one<WanJobRow>(
+    `UPDATE copy_paste_wan_jobs
+        SET status = 'acquiring', started_at = COALESCE(started_at, now()),
+            error = NULL, error_code = NULL, updated_at = now()
+      WHERE id = $1 AND user_id = $2 AND status IN ('queued', 'acquiring')
+      RETURNING *`,
+    [jobId, userId],
+  )
+  if (!job) throw new Error('Job is not waiting for its source — already handled')
+  console.log(`[wan-jobs] job ${jobId} acquiring ${job.content_url}`)
+
+  try {
+    let sourceUrl: string | null | undefined
+    try {
+      const resolved = await resolveReelUrls({ userId, rawText: job.content_url, sourceUsername: job.profile })
+      sourceUrl = resolved.reels[0]?.videoUrl
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new WanJobError(err instanceof EnqueueUrlsError ? classifyAcquireError(err) : 'ACQUISITION_FAILED', msg)
+    }
+    if (!sourceUrl) throw new WanJobError('SOURCE_UNAVAILABLE', 'No playable video URL for this reel')
+
+    // Already on our storage (e.g. an audio re-join) — copying it again gains nothing.
+    let videoUrl = sourceUrl
+    const ownStorage = process.env.SUPABASE_URL ? `${process.env.SUPABASE_URL}/storage/v1/object/public/` : null
+    if (!ownStorage || !sourceUrl.startsWith(ownStorage)) {
+      try {
+        videoUrl = await uploadImageFromUrl(sourceUrl, `monitor/${jobId}/source.mp4`)
+      } catch (err) {
+        throw new WanJobError('STORAGE_FAILED', `Could not store the source video: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+
+    await query(
+      `UPDATE copy_paste_wan_jobs SET status = 'awaiting_confirm', video_url = $2, updated_at = now()
+        WHERE id = $1 AND status = 'acquiring'`,
+      [jobId, videoUrl],
+    )
+    console.log(`[wan-jobs] job ${jobId} source stored: ${videoUrl}`)
+    return { videoUrl }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    const code = classifyAcquireError(err)
+    await markWanJobFailed(jobId, code, msg)
+    console.error(`[wan-jobs] job ${jobId} acquire failed [${code}]: ${msg}`)
+    await notifyReplicationFailed(userId, job.profile ?? 'copy-paste', `Source: ${msg}`).catch(() => {})
+    throw err
+  }
+}
+
+/**
+ * Explicit retry of a failed/cancelled Sheet job — the same row starts over from
+ * 'queued' (the old source link may have expired, so it is resolved again).
+ * 'duplicate': meanwhile another row started the same reel + character.
+ */
+export async function retrySheetWanJob(
+  jobId: string,
+  userId: string,
+): Promise<'retried' | 'duplicate' | 'not_retryable'> {
+  try {
+    const row = await one<{ id: string }>(
+      `UPDATE copy_paste_wan_jobs
+          SET status = 'queued', error = NULL, error_code = NULL,
+              video_url = NULL, still_image_url = NULL, video_result_url = NULL, video_model = NULL,
+              aspect_ratio = NULL, source_duration = NULL,
+              started_at = NULL, completed_at = NULL, updated_at = now()
+        WHERE id = $1 AND user_id = $2 AND origin = 'sheet' AND status IN ('failed', 'cancelled')
+        RETURNING id`,
+      [jobId, userId],
+    )
+    if (row) console.log(`[wan-jobs] sheet job ${jobId} retried`)
+    return row ? 'retried' : 'not_retryable'
+  } catch (err) {
+    if ((err as { code?: string }).code === '23505') return 'duplicate'
+    throw err
+  }
+}
+
+/** Item states a copy_paste_wan queue job of each phase is responsible for moving on. */
+const PHASE_ITEM_STATUSES: Record<CopyPasteWanPhase, WanJobStatus[]> = {
+  acquire: ['queued', 'acquiring', 'awaiting_confirm', 'still_generating'],
+  still: ['awaiting_confirm', 'still_generating'],
+  video: ['approved', 'generating'],
+}
+
+/**
+ * cron/tick fails a stalled copy_paste_wan queue job; this fails the items it
+ * left mid-phase, which otherwise sit in e.g. 'generating' forever. Items a
+ * newer, still-live queue job has picked up (a Regenerate) are left alone.
+ */
+export async function failStaleWanItems(queueJobId: string, message: string): Promise<number> {
+  const q = await one<{ input: { jobIds?: string[]; phase?: CopyPasteWanPhase } | null }>(
+    `SELECT input FROM generation_queue WHERE id = $1`,
+    [queueJobId],
+  )
+  const jobIds = q?.input?.jobIds ?? []
+  if (!jobIds.length) return 0
+  const statuses = PHASE_ITEM_STATUSES[q?.input?.phase ?? 'video']
+  const res = await query(
+    `UPDATE copy_paste_wan_jobs cpw
+        SET status = 'failed', error = $2, error_code = 'STALLED', completed_at = now(), updated_at = now()
+      WHERE cpw.id = ANY($1::uuid[])
+        AND cpw.status = ANY($3::text[])
+        AND NOT EXISTS (
+          SELECT 1 FROM generation_queue g
+           WHERE g.id <> $4 AND g.job_type = 'copy_paste_wan'
+             AND g.status IN ('pending', 'processing')
+             AND g.input->'jobIds' ? cpw.id::text
+        )`,
+    [jobIds, message, statuses, queueJobId],
+  )
+  const n = res.rowCount ?? 0
+  if (n) console.error(`[wan-jobs] queue job ${queueJobId} stalled — failed ${n} item(s)`)
+  return n
 }

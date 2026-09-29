@@ -14,6 +14,7 @@ import {
 } from '@/lib/telegram'
 import { EnqueueUrlsError } from '@/lib/monitor/enqueue-from-urls'
 import { createWanJobsFromUrls, stillApprovalKeyboard } from '@/lib/monitor/wan-jobs'
+import { queueCopyPasteWan } from '@/lib/monitor/wan-queue'
 import {
   addUrlsToBatch,
   claimClassifiedItemIds,
@@ -69,44 +70,6 @@ const TELEGRAM_BOT_DOWNLOAD_LIMIT = 20 * 1024 * 1024
 
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-}
-
-/**
- * One copy_paste_wan queue job, started right away instead of waiting up to a
- * minute for cron — same claim-then-kick pattern queue/submit uses.
- * 'still' makes scene stills for approval; 'video' runs the paid Wan call.
- */
-async function queueCopyPasteWan(userId: string, jobIds: string[], phase: 'still' | 'video'): Promise<void> {
-  const settings = await getRepurposeSettings(userId)
-  const row = await one<{ id: string }>(
-    `INSERT INTO generation_queue (user_id, job_type, input, total_items)
-     VALUES ($1, 'copy_paste_wan', $2, $3)
-     RETURNING id`,
-    [
-      userId,
-      JSON.stringify({
-        jobIds,
-        phase,
-        repurposeCount: settings.variantCount,
-        outputDriveFolderId: settings.outputDriveFolderId,
-      }),
-      jobIds.length,
-    ],
-  )
-  if (!row) throw new Error('Queue insert returned no row')
-  const secret = process.env.CRON_SECRET
-  if (!secret) return
-  const claimed = await one<{ id: string }>(
-    `UPDATE generation_queue SET status='processing', started_at=now(), attempts=attempts+1
-      WHERE id=$1 AND status='pending' RETURNING id`,
-    [row.id],
-  ).catch(() => null)
-  if (claimed) {
-    fetch(`${internalBaseUrl()}/api/queue/process/${row.id}`, {
-      method: 'POST',
-      headers: { 'x-cron-secret': secret },
-    }).catch(err => console.error('[telegram/webhook] fire copy_paste_wan worker:', err))
-  }
 }
 
 /** Saved characters as buttons, so a batch never needs its reference photo sent again. */

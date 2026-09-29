@@ -41,7 +41,7 @@ import {
 import { runI2vItem, runAnimateItem, runTalkItem } from '@/lib/my-pod/runners'
 import { fishTts } from '@/lib/my-pod/fish-tts'
 import { generateCopyPasteKeyframes, finishCopyPasteVideo, regenerateCopyPasteKeyframes } from '@/lib/monitor/process-item'
-import { prepareWanStill, runWanGeneration } from '@/lib/monitor/wan-jobs'
+import { acquireWanJobSource, prepareWanStill, runWanGeneration } from '@/lib/monitor/wan-jobs'
 import { runKlingRecreateAction, handleRenderSubmitFailure } from '@/lib/kling-recreate/process-job'
 import { SeedanceSubmitError } from '@/lib/kling-recreate/seedance-client'
 import type { KlingRecreateQueueInput } from '@/lib/kling-recreate/types'
@@ -1665,7 +1665,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
         const results = await Promise.all(batchIds.map(async (itemId): Promise<CopyPasteRow> => {
           try {
-            if (phase === 'still') {
+            if (phase === 'acquire') {
+              // Sheet-started job: resolve + store the source, then straight on to
+              // the still — ticking the row was the confirm (viral-sheet.ts).
+              await acquireWanJobSource(itemId, job.user_id)
+            }
+            if (phase === 'still' || phase === 'acquire') {
               const { stillUrl } = await prepareWanStill(itemId, job.user_id)
               return { itemId, status: 'done', videoUrl: stillUrl }
             }
