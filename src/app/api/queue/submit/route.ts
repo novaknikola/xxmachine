@@ -211,6 +211,8 @@ export interface VideoRepurposeJobInput {
    * everything sorted — this only exists for "put these right here" runs.
    */
   outputDriveFolderId?: string | null
+  /** Absent (older rows) means true. False for API clients that poll instead. */
+  notifyTelegram?: boolean
 }
 
 export interface ImageRepurposeJobInput {

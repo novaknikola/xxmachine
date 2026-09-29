@@ -26,9 +26,13 @@ import {
   setCustomPrompt,
   setItemIds,
   setPromptMessage,
+  setBatchCharacter,
   startBatchWithPhoto,
+  uploadTelegramPhoto,
   type TelegramBatch,
 } from '@/lib/monitor/telegram-batch'
+import { getCharacter, listCharacters, setCharacterReference } from '@/lib/content-ops/characters'
+import { FARM_TOKEN_LABEL, generateToken, hashToken } from '@/lib/api-token'
 import { estimateWanCost, formatUsd } from '@/lib/monitor/cost-estimate'
 import {
   endFrameKeyboard,
@@ -248,6 +252,42 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ ok: true })
         }
 
+        // ── /character — pick whose reference photo this batch uses; the
+        // output is then filed under that character's Drive folder.
+        if (rawText.startsWith('/character')) {
+          const chars = (await listCharacters(userId)).filter(c => c.reference_image_url)
+          if (!chars.length) {
+            await sendText(
+              chatId,
+              'No characters with a reference photo yet. Send a photo with the character name as its caption (e.g. <code>Tiana Goth</code>) to set one up.',
+            )
+            return NextResponse.json({ ok: true })
+          }
+          const sent = await sendText(chatId, '👤 Which character is this batch for?') as { message_id?: number }
+          if (sent?.message_id) {
+            await editMessageReplyMarkup(chatId, sent.message_id, {
+              inline_keyboard: chars.map(c => [{ text: c.name, callback_data: `cpchar:${c.id}` }]),
+            })
+          }
+          return NextResponse.json({ ok: true })
+        }
+
+        // ── /farmtoken — access token for the Mac farm's content-ops client.
+        // Replaces only the previous farm token; the extension keeps its own.
+        if (rawText.startsWith('/farmtoken')) {
+          const token = generateToken()
+          await query(`DELETE FROM personal_access_tokens WHERE user_id = $1 AND label = $2`, [userId, FARM_TOKEN_LABEL])
+          await query(
+            `INSERT INTO personal_access_tokens (user_id, token_hash, label) VALUES ($1, $2, $3)`,
+            [userId, hashToken(token), FARM_TOKEN_LABEL],
+          )
+          await sendText(
+            chatId,
+            `🔐 Farm token (shown once — the previous farm token no longer works):\n\n<code>${token}</code>\n\nPut it in the farm's config, then delete this message.`,
+          )
+          return NextResponse.json({ ok: true })
+        }
+
         // ── /settings — repurpose options the bot remembers ──────────
         if (rawText.startsWith('/settings')) {
           const s = await getRepurposeSettings(userId)
@@ -359,14 +399,23 @@ export async function POST(req: NextRequest) {
         const photo = message.photo as Array<{ file_id: string }> | undefined
         if (photo?.length) {
           try {
+            const referenceImageUrl = await uploadTelegramPhoto(userId, photo[photo.length - 1].file_id)
+            // A caption names the character this photo belongs to: it becomes
+            // that character's reference and the output is filed under it.
+            const caption = String(message.caption ?? '').trim()
+            const character = caption
+              ? await setCharacterReference(userId, caption, referenceImageUrl)
+              : null
             const { batch, replacedPrevious } = await startBatchWithPhoto({
-              userId, chatId, fileId: photo[photo.length - 1].file_id,
+              userId, chatId, referenceImageUrl, characterId: character?.id ?? null,
             })
             const already = batch.urls.length
             await sendText(
               chatId,
               [
-                '📌 Reference photo saved.',
+                character
+                  ? `📌 Reference photo saved for <b>${escapeHtml(character.name)}</b> — output goes to its Drive folder.`
+                  : '📌 Reference photo saved. No character set — output is filed under the source account, not a character. Add a caption with the character name, or use /character.',
                 replacedPrevious ? 'Previous batch replaced.' : '',
                 '',
                 already
@@ -452,6 +501,36 @@ export async function POST(req: NextRequest) {
     }
 
     const [action, postId] = data.split(':')
+
+    // ── /character buttons ────────────────────────────────────────────────
+    if (action === 'cpchar') {
+      const chatId = cbMessage?.chat?.id as number | undefined
+      const charUserId = chatId != null ? await findUserByChat(chatId) : null
+      const character = charUserId && postId ? await getCharacter(charUserId, postId) : null
+      if (!chatId || !charUserId || !character?.reference_image_url) {
+        await answerCallbackQuery(callbackId, 'Character not found')
+        return NextResponse.json({ ok: true })
+      }
+      const batch = await setBatchCharacter({
+        userId: charUserId,
+        chatId,
+        characterId: character.id,
+        referenceImageUrl: character.reference_image_url,
+      })
+      await answerCallbackQuery(callbackId, character.name)
+      if (cbMessage?.message_id) {
+        await editMessageReplyMarkup(chatId, cbMessage.message_id, {})
+        await editMessageText(
+          chatId,
+          cbMessage.message_id,
+          batch.urls.length
+            ? `👤 <b>${escapeHtml(character.name)}</b> — ${batch.urls.length} reel${batch.urls.length === 1 ? '' : 's'} in this batch.`
+            : `👤 <b>${escapeHtml(character.name)}</b> — now send the Instagram reel links, one per line.`,
+        )
+      }
+      if (batch.urls.length) await presentBatchReady(chatId, batch)
+      return NextResponse.json({ ok: true })
+    }
 
     // ── /settings buttons ─────────────────────────────────────────────────
     if (action === 'rscount' || action === 'rsfx' || action === 'rsfolder') {
@@ -640,6 +719,7 @@ export async function POST(req: NextRequest) {
           chatId: batch.chat_id,
           rawText: batch.urls.join('\n'),
           referenceImageUrl: batch.reference_image_url,
+          characterId: batch.character_id,
         })
         await setItemIds(batch.id, result.jobIds)
         if (!result.jobIds.length) {

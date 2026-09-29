@@ -12,6 +12,9 @@ import { isOwnerEmail } from './session'
 
 const TOKEN_PREFIX = 'xmpat_'
 
+export const EXTENSION_TOKEN_LABEL = 'Browser extension'
+export const FARM_TOKEN_LABEL = 'Farm (Mac)'
+
 export function generateToken(): string {
   return TOKEN_PREFIX + randomBytes(24).toString('base64url')
 }
