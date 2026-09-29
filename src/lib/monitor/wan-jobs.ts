@@ -17,6 +17,7 @@ import { enqueueRepurpose } from './process-item'
 import { enqueueDriveArchive } from '@/lib/drive-archive/enqueue'
 import { uploadImageFromUrl } from '@/lib/supabase-storage'
 import { characterDriveKey, getCharacter } from '@/lib/content-ops/characters'
+import { editImage as editImageSeedream, finalizeWithSkinEnhance } from '@/lib/wavespeed'
 
 export interface WanJobRow {
   id: string
@@ -28,6 +29,8 @@ export interface WanJobRow {
   video_url: string | null
   reference_image_url: string
   character_id: string | null
+  still_prompt: string | null
+  still_image_url: string | null
   aspect_ratio: string | null
   source_duration: string | number | null
   status: 'awaiting_confirm' | 'generating' | 'done' | 'failed'
@@ -57,6 +60,8 @@ export async function createWanJobsFromUrls(opts: {
   rawText: string
   referenceImageUrl: string
   characterId?: string | null
+  /** Character prompt + batch prompt; empty means Wan gets only the original photo. */
+  stillPrompt?: string | null
   username?: string | null
   sourceUsername?: string | null
 }): Promise<CreateWanJobsResult> {
@@ -74,12 +79,13 @@ export async function createWanJobsFromUrls(opts: {
     if ((await videoHasAudio(reel.videoUrl)) === false) noAudioCount++
     const row = await one<{ id: string }>(
       `INSERT INTO copy_paste_wan_jobs
-         (user_id, chat_id, profile, content_url, content_id, video_url, reference_image_url, character_id, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'awaiting_confirm')
+         (user_id, chat_id, profile, content_url, content_id, video_url, reference_image_url, character_id, still_prompt, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'awaiting_confirm')
        RETURNING id`,
       [
         opts.userId, String(opts.chatId), sourceUsername ?? username,
         reel.permalink, reel.id, reel.videoUrl, opts.referenceImageUrl, opts.characterId ?? null,
+        opts.stillPrompt?.trim() || null,
       ],
     )
     if (row) jobIds.push(row.id)
@@ -92,6 +98,31 @@ export async function createWanJobsFromUrls(opts: {
  * The paid call — only reached after a human taps Confirm (Telegram cpgo).
  * Idempotent on a re-run: an already-done job just returns its cached result.
  */
+/**
+ * The character photo re-created from its prompt: Seedream v5 Pro Edit, then
+ * the Z-Image Turbo skin pass — the same still workflow the recreate bot uses.
+ * It goes to Wan next to the original photo, never instead of it. Failing here
+ * fails the job before the paid Wan call.
+ */
+async function generateCharacterStill(opts: {
+  jobId: string
+  referenceImageUrl: string
+  prompt: string
+  aspectRatio: string
+  apiKey: string
+}): Promise<string> {
+  const outputs = await editImageSeedream({
+    imageUrls: [opts.referenceImageUrl],
+    prompt: opts.prompt,
+    size: opts.aspectRatio,
+    apiKey: opts.apiKey,
+  })
+  if (!outputs.length) throw new Error('Seedream returned no image for the character still')
+  const finalUrl = await finalizeWithSkinEnhance(outputs[0], opts.aspectRatio, opts.apiKey)
+  // Re-hosted: WaveSpeed result links are not guaranteed to outlive the Wan job.
+  return await uploadImageFromUrl(finalUrl, `monitor/${opts.jobId}/wan-still.jpg`).catch(() => finalUrl)
+}
+
 export async function runWanGeneration(
   jobId: string,
   userId: string,
@@ -147,8 +178,18 @@ export async function runWanGeneration(
     // clip. Can be relaxed once real output is seen.
     const wanDuration = Math.min(Math.max(Math.round(duration ?? 5), 2), 15)
 
+    const referenceImageUrls = [job.reference_image_url]
+    if (job.still_prompt) {
+      const stillUrl = await generateCharacterStill({
+        jobId, referenceImageUrl: job.reference_image_url, prompt: job.still_prompt,
+        aspectRatio: aspectRatio ?? '9:16', apiKey,
+      })
+      await query(`UPDATE copy_paste_wan_jobs SET still_image_url = $2 WHERE id = $1`, [jobId, stillUrl])
+      referenceImageUrls.push(stillUrl)
+    }
+
     const result = await generateWanReferenceVideo({
-      referenceImageUrl: job.reference_image_url,
+      referenceImageUrls,
       referenceVideoUrl: job.video_url,
       aspectRatio: aspectRatio ?? '9:16',
       duration: wanDuration,

@@ -31,7 +31,14 @@ import {
   uploadTelegramPhoto,
   type TelegramBatch,
 } from '@/lib/monitor/telegram-batch'
-import { findCharacterByName, getCharacter, listCharacters, setCharacterReference } from '@/lib/content-ops/characters'
+import {
+  composeStillPrompt,
+  findCharacterByName,
+  getCharacter,
+  listCharacters,
+  setCharacterPrompt,
+  setCharacterReference,
+} from '@/lib/content-ops/characters'
 import { FARM_TOKEN_LABEL, generateToken, hashToken } from '@/lib/api-token'
 import { estimateWanCost, formatUsd } from '@/lib/monitor/cost-estimate'
 import {
@@ -282,6 +289,33 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ ok: true })
         }
 
+        // ── /charprompt Name | prompt — the character's prompt for its Wan still.
+        // No "|" lists every character's prompt; an empty prompt clears it.
+        if (rawText.startsWith('/charprompt')) {
+          const arg = rawText.slice('/charprompt'.length).trim()
+          if (!arg.includes('|')) {
+            const chars = await listCharacters(userId)
+            await sendText(chatId, [
+              '🖼 <b>Character prompts</b>',
+              ...chars.filter(c => c.reference_image_url).map(c => `• <b>${escapeHtml(c.name)}</b>: ${c.wan_prompt ? escapeHtml(c.wan_prompt) : '<i>none</i>'}`),
+              '',
+              'Set: <code>/charprompt Diana Normal | your prompt</code> · clear: <code>/charprompt Diana Normal |</code>',
+            ].join('\n'))
+            return NextResponse.json({ ok: true })
+          }
+          const [name, ...rest] = arg.split('|')
+          const updated = await setCharacterPrompt(userId, name.trim(), rest.join('|'))
+          await sendText(
+            chatId,
+            !updated
+              ? `❌ No character named “${escapeHtml(name.trim())}”.`
+              : updated.wan_prompt
+                ? `🖼 <b>${escapeHtml(updated.name)}</b> prompt saved — used for its still on every batch.`
+                : `🖼 <b>${escapeHtml(updated.name)}</b> prompt cleared — only the reference photo goes to Wan.`,
+          )
+          return NextResponse.json({ ok: true })
+        }
+
         // ── /farmtoken — access token for the Mac farm's content-ops client.
         // Replaces only the previous farm token; the extension keeps its own.
         if (rawText.startsWith('/farmtoken')) {
@@ -412,10 +446,15 @@ export async function POST(req: NextRequest) {
             const referenceImageUrl = await uploadTelegramPhoto(userId, photo[photo.length - 1].file_id)
             // A caption names the character this photo belongs to: it becomes
             // that character's reference and the output is filed under it.
-            const caption = String(message.caption ?? '').trim()
-            const character = caption
-              ? await setCharacterReference(userId, caption, referenceImageUrl)
+            // Caption: first line is the character name; any further lines are
+            // its prompt for the Seedream + Z-Image still that goes to Wan.
+            const [captionName = '', ...captionPrompt] = String(message.caption ?? '').trim().split('\n')
+            let character = captionName.trim()
+              ? await setCharacterReference(userId, captionName.trim(), referenceImageUrl)
               : null
+            if (character && captionPrompt.join('\n').trim()) {
+              character = await setCharacterPrompt(userId, character.name, captionPrompt.join('\n')) ?? character
+            }
             const { batch, replacedPrevious } = await startBatchWithPhoto({
               userId, chatId, referenceImageUrl, characterId: character?.id ?? null,
             })
@@ -740,12 +779,15 @@ export async function POST(req: NextRequest) {
         // as the old flow did (this batch's ids are now copy_paste_wan_jobs
         // rows, not discovery_items rows).
         if (!batch.reference_image_url) throw new Error('No reference photo on this batch')
+        const batchCharacter = batch.character_id ? await getCharacter(batch.user_id, batch.character_id) : null
+        const stillPrompt = composeStillPrompt(batchCharacter?.wan_prompt, batch.custom_prompt)
         const result = await createWanJobsFromUrls({
           userId: batch.user_id,
           chatId: batch.chat_id,
           rawText: batch.urls.join('\n'),
           referenceImageUrl: batch.reference_image_url,
           characterId: batch.character_id,
+          stillPrompt,
         })
         await setItemIds(batch.id, result.jobIds)
         if (!result.jobIds.length) {
@@ -768,6 +810,9 @@ export async function POST(req: NextRequest) {
               result.noAudioCount
                 ? `⚠️ ${result.noAudioCount} of ${result.jobIds.length} source reel${result.jobIds.length === 1 ? ' has' : 's have'} no audio track — Wan will invent its own speech, which can sound garbled.`
                 : '',
+              stillPrompt
+                ? `🖼 Reference photo + its Seedream/Z-Image still (prompt: “${escapeHtml(stillPrompt.slice(0, 300))}”) go to Wan together.`
+                : '🖼 Only the reference photo goes to Wan (no character or batch prompt set).',
               '',
               `Confirm to start generating? Each one is a paid Wan 3.0 call.`,
             ].filter(Boolean).join('\n'),
