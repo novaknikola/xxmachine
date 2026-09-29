@@ -46,3 +46,15 @@ export const IGREPLICATOR_REPURPOSE_RANGES: VideoEffectRanges = {
   saturation: { min: 0.97, max: 1.03 },
   hue: { min: -3, max: 3 },
 }
+
+/**
+ * Farm variants (one per account of the character, user decision 2026-09-29):
+ * always mild — light brightness/contrast/saturation, a small zoom (crop),
+ * a slight speed change and a fixed sharpen. No hue shift and no mirror flip:
+ * those read as a different video rather than a gentle edit.
+ */
+export const FARM_VARIANT_EFFECTS = {
+  brightness: true, contrast: true, saturation: true,
+  hue: false, speed: true, flipH: false, crop: true, fade: false,
+} as const
+export const FARM_VARIANT_RANGES: VideoEffectRanges = IGREPLICATOR_REPURPOSE_RANGES
