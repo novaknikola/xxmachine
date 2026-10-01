@@ -9,14 +9,15 @@
 import { one, query } from '@/lib/db'
 import { getUserApiKey } from '@/lib/user-config'
 import { EnqueueUrlsError, resolveReelUrls, type ResolveError } from './enqueue-from-urls'
-import { generateWanReferenceVideo } from './wan-reference'
+import { generateWanReferenceVideo, type WanReferenceInput } from './wan-reference'
+import { buildMotionReference } from './wan-motion-reference'
 import { probeSourceVideo } from './analyze'
 import { videoHasAudio } from './video-audio'
 import { notifyReplicationDone, notifyReplicationFailed } from './notify'
 import { enqueueRepurpose } from './process-item'
 import { enqueueDriveArchive } from '@/lib/drive-archive/enqueue'
 import { IGREPLICATOR_DRIVE_SECTION } from '@/lib/drive-archive/paths'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { uploadBuffer, uploadImageFromUrl } from '@/lib/supabase-storage'
 import { sendPhoto } from '@/lib/telegram'
 import { splitDirectVideoUrls } from './telegram-batch'
@@ -37,6 +38,8 @@ export interface WanJobRow {
   character_id: string | null
   still_prompt: string | null
   still_image_url: string | null
+  /** The reel as Wan gets it, person scrubbed (migration 105). */
+  motion_video_url: string | null
   aspect_ratio: string | null
   source_duration: string | number | null
   status: WanJobStatus
@@ -244,7 +247,51 @@ async function generateSceneStill(opts: {
   if (!outputs.length) throw new Error('Seedream returned no image for the scene still')
   const finalUrl = await finalizeWithSkinEnhance(outputs[0], opts.aspectRatio, opts.apiKey)
   // Re-hosted: WaveSpeed result links are not guaranteed to outlive the Wan job.
-  return await uploadImageFromUrl(finalUrl, `monitor/${opts.jobId}/wan-still.jpg`).catch(() => finalUrl)
+  // A fresh name per still: Regenerate used to overwrite one URL, and a cached
+  // copy of the rejected still could then be what Wan fetched after Approve.
+  return await uploadImageFromUrl(finalUrl, `monitor/${opts.jobId}/wan-still-${randomUUID().slice(0, 8)}.jpg`)
+    .catch(() => finalUrl)
+}
+
+/**
+ * The job's scrubbed reel (wan-motion-reference.ts), built once per source and
+ * kept on the row; Regenerate reuses it. Throws instead of falling back to the
+ * raw reel — that fallback is exactly how the source person reached Wan.
+ */
+async function ensureMotionReference(
+  job: Pick<WanJobRow, 'id' | 'video_url' | 'motion_video_url'>,
+  apiKey: string,
+): Promise<string> {
+  if (job.motion_video_url) return job.motion_video_url
+  if (!job.video_url) throw new Error('Job has no source video')
+  const url = await buildMotionReference({ jobId: job.id, sourceVideoUrl: job.video_url, apiKey })
+  await query(`UPDATE copy_paste_wan_jobs SET motion_video_url = $2, updated_at = now() WHERE id = $1`, [job.id, url])
+  return url
+}
+
+/**
+ * Exactly what Wan 3.0 gets for a job: Image 1 the character's photo, Image 2
+ * the approved still, Video 1 the scrubbed reel — the raw reel never.
+ */
+export function wanReferenceInput(
+  job: Pick<WanJobRow, 'reference_image_url' | 'still_image_url' | 'motion_video_url' | 'video_url' | 'aspect_ratio' | 'source_duration'>,
+): WanReferenceInput {
+  if (!job.still_image_url) throw new Error('Job has no approved still')
+  if (!job.motion_video_url || job.motion_video_url === job.video_url) {
+    throw new Error('Job has no scrubbed motion reference — not sending the raw reel to Wan 3.0')
+  }
+  const duration = job.source_duration != null ? Number(job.source_duration) : null
+  return {
+    referenceImageUrls: [job.reference_image_url, job.still_image_url],
+    motionVideoUrl: job.motion_video_url,
+    aspectRatio: job.aspect_ratio ?? '9:16',
+    // Conservative cap, not a measured one: the model documents total
+    // input+output duration at <=30s but doesn't say exactly how the
+    // reference video's own length counts against that, so this stays well
+    // under it rather than risk a rejected/truncated call on a long source
+    // clip. Can be relaxed once real output is seen.
+    duration: Math.min(Math.max(Math.round(duration ?? 5), 2), 15),
+  }
 }
 
 /** Buttons under a still waiting for approval; data is `<action>:<wan job id>`. */
@@ -283,14 +330,19 @@ export async function prepareWanStill(jobId: string, userId: string): Promise<{ 
     const aspectRatio = job.aspect_ratio ?? (probe.aspectRatio === 'other' ? '9:16' : probe.aspectRatio)
     const duration = job.source_duration != null ? Number(job.source_duration) : probe.duration
 
-    const stillUrl = await generateSceneStill({
-      jobId,
-      referenceImageUrl: job.reference_image_url,
-      sceneFrameBase64: probe.frames[sharpestFrameIndex(probe.frames)],
-      additions: job.still_prompt,
-      aspectRatio,
-      apiKey,
-    })
+    // The motion reference is built here, beside the still, so a failure shows
+    // before Approve and the paid video phase does not wait on it.
+    const [stillUrl] = await Promise.all([
+      generateSceneStill({
+        jobId,
+        referenceImageUrl: job.reference_image_url,
+        sceneFrameBase64: probe.frames[sharpestFrameIndex(probe.frames)],
+        additions: job.still_prompt,
+        aspectRatio,
+        apiKey,
+      }),
+      ensureMotionReference(job, apiKey),
+    ])
     await query(
       `UPDATE copy_paste_wan_jobs
           SET status = 'awaiting_approval', still_image_url = $2, aspect_ratio = $3, source_duration = $4
@@ -370,24 +422,14 @@ export async function runWanGeneration(
   const apiKey = await getUserApiKey(userId, 'wavespeed_api_key')
 
   try {
-    // Both were recorded by prepareWanStill's probe.
-    const aspectRatio = job.aspect_ratio
-    const duration = job.source_duration != null ? Number(job.source_duration) : null
-    // Conservative cap, not a measured one: the model documents total
-    // input+output duration at <=30s but doesn't say exactly how the
-    // reference video's own length counts against that, so this stays well
-    // under it rather than risk a rejected/truncated call on a long source
-    // clip. Can be relaxed once real output is seen.
-    const wanDuration = Math.min(Math.max(Math.round(duration ?? 5), 2), 15)
-
-    const referenceImageUrls = [job.reference_image_url, job.still_image_url!]
-
-    const result = await generateWanReferenceVideo({
-      referenceImageUrls,
-      referenceVideoUrl: job.video_url,
-      aspectRatio: aspectRatio ?? '9:16',
-      duration: wanDuration,
-    }, apiKey)
+    // Aspect ratio and duration were recorded by prepareWanStill's probe, and
+    // normally the motion reference too; a job stilled before migration 105
+    // gets its motion reference here.
+    const motionVideoUrl = await ensureMotionReference(job, apiKey)
+    const result = await generateWanReferenceVideo(
+      wanReferenceInput({ ...job, motion_video_url: motionVideoUrl }),
+      apiKey,
+    )
 
     // Re-hosted rather than used as-is: WaveSpeed's own CloudFront result
     // link isn't reliably fetchable by Telegram's own URL-fetch for sendVideo
@@ -595,7 +637,7 @@ export async function retrySheetWanJob(
     const row = await one<{ id: string }>(
       `UPDATE copy_paste_wan_jobs
           SET status = 'queued', error = NULL, error_code = NULL,
-              video_url = NULL, still_image_url = NULL, video_result_url = NULL, video_model = NULL,
+              video_url = NULL, still_image_url = NULL, motion_video_url = NULL, video_result_url = NULL, video_model = NULL,
               aspect_ratio = NULL, source_duration = NULL,
               started_at = NULL, completed_at = NULL, updated_at = now()
         WHERE id = $1 AND user_id = $2 AND origin = 'sheet' AND status IN ('failed', 'cancelled')

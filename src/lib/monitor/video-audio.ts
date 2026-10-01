@@ -64,7 +64,7 @@ export async function muxTracks(videoPath: string, audioPath: string, outPath: s
   )
 }
 
-async function downloadTrack(url: string, path: string): Promise<void> {
+export async function downloadTrack(url: string, path: string): Promise<void> {
   const res = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) })
   if (!res.ok) throw new Error(`track fetch failed: ${res.status}`)
   const declared = Number(res.headers.get('content-length') ?? 0)

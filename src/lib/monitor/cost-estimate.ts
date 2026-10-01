@@ -69,7 +69,7 @@ export function estimateWanCost(durationSec?: number | null): { totalUsd: number
   const totalUsd = roundUsd(rate * totalBilledSec)
   return {
     totalUsd,
-    note: `WaveSpeed Wan 3.0 reference-to-video (${WAN_RESOLUTION}): $${rate.toFixed(2)}/s × ${totalBilledSec}s (source + output). Seedream + Z-Image still not included.`,
+    note: `WaveSpeed Wan 3.0 reference-to-video (${WAN_RESOLUTION}): $${rate.toFixed(2)}/s × ${totalBilledSec}s (source + output). Seedream + Z-Image still and the subject matte (≈$0.01/s of source) not included.`,
   }
 }
 

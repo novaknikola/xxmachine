@@ -9,12 +9,14 @@ import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
 import type { CellValue, SheetIO } from './viral-sheet'
+import { inkIn, renderInkFixtures, streamFacts, type InkFixtures } from './ink-fixture.test-util'
+import { WAN_MOTION_REFERENCE_PROMPT } from './wan-reference'
 
 const TEST_DB = process.env.TEST_DATABASE_URL
 
@@ -60,7 +62,11 @@ class MemorySheet implements SheetIO {
 
 const store = new Map<string, { body: Buffer; type: string }>()
 const telegramCalls: { method: string; body: Record<string, unknown> }[] = []
+const wavespeedPosts: { url: string; body: Record<string, unknown> }[] = []
 let wavespeedFail = false
+let ink: InkFixtures
+/** What the fake WaveSpeed hands back: images (Seedream / Z-Image) and the background remover's matte. */
+const served: { image: Buffer; matte: Buffer } = { image: Buffer.alloc(0), matte: Buffer.alloc(0) }
 let base = ''
 let server: http.Server
 const workerRuns = new Set<Promise<unknown>>()
@@ -83,6 +89,17 @@ async function jobRow(id: string) {
     `SELECT status, error_code, error, video_url, origin, completed_at FROM copy_paste_wan_jobs WHERE id = $1`, [id]))!
 }
 
+/** A local copy of what a URL serves — the fake servers live in this process, so ffmpeg must not read them synchronously. */
+async function localCopy(url: string): Promise<string> {
+  const res = await fetch(url)
+  assert.ok(res.ok, `fetch ${url}: ${res.status}`)
+  const file = join(mkdtempSync(join(tmpdir(), 'media-')), 'media')
+  writeFileSync(file, Buffer.from(await res.arrayBuffer()))
+  return file
+}
+
+const inkAt = async (url: string) => inkIn(await localCopy(url))
+
 /** One cron tick of the bridge, then let every worker it kicked finish. */
 async function tick(sheet: MemorySheet) {
   const r = await m.sync.syncViralSheet(sheet)
@@ -99,6 +116,12 @@ describe('viral sheet → IG Replicator bridge', { skip: !TEST_DB && 'TEST_DATAB
     execFileSync('ffmpeg', ['-loglevel', 'error', '-i', join(dir, 'reel.mp4'), '-frames:v', '1', join(dir, 'out.jpg')])
     const reel = readFileSync(join(dir, 'reel.mp4'))
     const jpg = readFileSync(join(dir, 'out.jpg'))
+    ink = renderInkFixtures(dir)
+    const inkedReel = readFileSync(ink.source)
+    // The plain reel's "matte": its right half is the subject, the left half key green.
+    execFileSync('ffmpeg', ['-loglevel', 'error', '-i', join(dir, 'reel.mp4'), '-vf', 'drawbox=x=0:y=0:w=iw/2:h=ih:color=0x00FF00:t=fill',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', join(dir, 'reel-matte.mp4')])
+    Object.assign(served, { image: jpg, matte: readFileSync(join(dir, 'reel-matte.mp4')) })
 
     server = http.createServer((req, res) => {
       const url = req.url ?? ''
@@ -119,7 +142,9 @@ describe('viral sheet → IG Replicator bridge', { skip: !TEST_DB && 'TEST_DATAB
         return void res.writeHead(200, { 'content-type': f.type }).end(f.body)
       }
       if (url === '/cdn/reel.mp4' || url === '/ws/out.mp4') return void res.writeHead(200, { 'content-type': 'video/mp4' }).end(reel)
-      if (url === '/ws/out.jpg') return void res.writeHead(200, { 'content-type': 'image/jpeg' }).end(jpg)
+      if (url === '/cdn/inked.mp4') return void res.writeHead(200, { 'content-type': 'video/mp4' }).end(inkedReel)
+      if (url === '/ws/matte.mp4') return void res.writeHead(200, { 'content-type': 'video/mp4' }).end(served.matte)
+      if (url === '/ws/out.jpg') return void res.writeHead(200, { 'content-type': 'image/jpeg' }).end(served.image)
       res.writeHead(404).end('not found')
     })
     await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
@@ -157,11 +182,13 @@ describe('viral sheet → IG Replicator bridge', { skip: !TEST_DB && 'TEST_DATAB
       }
       if (url.includes('api.wavespeed.ai')) {
         if (init?.method === 'POST') {
+          wavespeedPosts.push({ url, body: init.body ? JSON.parse(String(init.body)) : {} })
           if (wavespeedFail) return Response.json({ code: 500, message: 'model overloaded' })
-          const isWan = /wan/i.test(url)
-          return Response.json({ code: 200, data: { id: isWan ? 'req-wan' : 'req-img' } })
+          const id = /wan/i.test(url) ? 'req-wan' : url.includes('video-background-remover') ? 'req-matte' : 'req-img'
+          return Response.json({ code: 200, data: { id } })
         }
-        const output = url.includes('req-wan') ? `${base}/ws/out.mp4` : `${base}/ws/out.jpg`
+        const output = url.includes('req-wan') ? `${base}/ws/out.mp4`
+          : url.includes('req-matte') ? `${base}/ws/matte.mp4` : `${base}/ws/out.jpg`
         return Response.json({ code: 200, data: { status: 'completed', outputs: [output] } })
       }
       if (url.includes('api.telegram.org')) {
@@ -202,11 +229,11 @@ describe('viral sheet → IG Replicator bridge', { skip: !TEST_DB && 'TEST_DATAB
   })
 
   /** A reel the resolver finds in its own cache, served by the fake CDN. */
-  async function cachedReel(code: string, views = 2_400_000) {
+  async function cachedReel(code: string, views = 2_400_000, cdnPath = '/cdn/reel.mp4') {
     await m.db.query(
       `INSERT INTO ig_downloader_reels (user_id, username, shortcode, permalink, video_url, views, source)
        VALUES ($1, 'creator', $2, $3, $4, $5, 'test')`,
-      [ownerId, code, `https://www.instagram.com/reel/${code}/`, `${base}/cdn/reel.mp4`, views],
+      [ownerId, code, `https://www.instagram.com/reel/${code}/`, `${base}${cdnPath}`, views],
     )
     return `https://www.instagram.com/reels/${code}/`
   }
@@ -447,6 +474,82 @@ describe('viral sheet → IG Replicator bridge', { skip: !TEST_DB && 'TEST_DATAB
     })))
     assert.equal(results.filter(x => x.created).length, 1)
     assert.equal(new Set(results.map(x => x.jobId)).size, 1)
+  })
+
+  it('11. tattoos on the source person never reach Wan: every reference it gets is ink-free', async () => {
+    // The source reel's subject carries ink; the character photo and the scene
+    // still (what Seedream / Z-Image return here) are clean — the exact bug setup.
+    const prev = { ...served }
+    const mine = wavespeedPosts.length // calls from earlier tests are not this job's
+    Object.assign(served, { image: readFileSync(ink.cleanImage), matte: readFileSync(ink.matte) })
+    try {
+      const sheet = new MemorySheet()
+      const row = sheet.addRow('creator', await cachedReel('InkedReel001', 2_400_000, '/cdn/inked.mp4'), 'Tiana Goth', true)
+      await tick(sheet)
+      const jobId = sheet.cell(row, 'M')
+      const urls = () => m.db.one<{ video_url: string; reference_image_url: string; still_image_url: string; motion_video_url: string | null }>(
+        `SELECT video_url, reference_image_url, still_image_url, motion_video_url FROM copy_paste_wan_jobs WHERE id = $1`, [jobId])
+      assert.equal((await jobRow(jobId)).status, 'awaiting_approval')
+      const firstStill = (await urls())!.still_image_url
+      const matteCalls = () => wavespeedPosts.slice(mine).filter(p => p.url.endsWith('/wavespeed-ai/video-background-remover'))
+      const mattes = matteCalls().length
+      assert.equal(mattes, 1, 'one matte, built with the first still')
+
+      // Regenerate: a new still under a new URL (a re-used URL can be served
+      // stale — the rejected still), the same motion reference, no second matte.
+      const motionBefore = (await urls())!.motion_video_url
+      await m.db.query(`UPDATE copy_paste_wan_jobs SET status = 'awaiting_confirm' WHERE id = $1`, [jobId])
+      await m.queue.queueCopyPasteWan(ownerId, [jobId], 'still')
+      await drainWorkers()
+      const approved = (await urls())!
+      assert.notEqual(approved.still_image_url, firstStill)
+      assert.match(approved.still_image_url, new RegExp(`/monitor/${jobId}/wan-still-[0-9a-f]{8}\\.jpg$`))
+      assert.equal(approved.motion_video_url, motionBefore)
+      assert.equal(matteCalls().length, mattes)
+
+      await m.db.query(`UPDATE copy_paste_wan_jobs SET status = 'approved' WHERE id = $1`, [jobId])
+      await m.queue.queueCopyPasteWan(ownerId, [jobId], 'video')
+      await drainWorkers()
+      assert.equal((await jobRow(jobId)).status, 'done')
+
+      const wanCalls = wavespeedPosts.slice(mine).filter(p => p.url.endsWith('/alibaba/wan-3.0/reference-to-video'))
+      assert.equal(wanCalls.length, 1, 'exactly one paid Wan call')
+      const body = wanCalls[0].body as { reference_images: string[]; reference_videos: string[] } & Record<string, unknown>
+      const job = (await urls())!
+
+      const sourceUrl = job.video_url
+      assert.ok(await inkAt(sourceUrl) > 10_000, 'fixture sanity: the stored source reel carries the ink')
+      const [characterRef, still] = body.reference_images
+      assert.equal(await inkAt(characterRef), 0, 'character reference is ink-free')
+      assert.equal(await inkAt(still), 0, 'characterized still is ink-free')
+      assert.ok(!body.reference_videos.includes(sourceUrl), 'the raw source reel is not sent to Wan')
+      for (const video of body.reference_videos) assert.equal(await inkAt(video), 0, `Wan reference video carries the source ink: ${video}`)
+
+      // The intended references, in order: Image 1 identity, Image 2 the still
+      // that was approved, Video 1 the scrubbed reel — and nothing else.
+      assert.deepEqual(body.reference_images, [job.reference_image_url, job.still_image_url])
+      assert.deepEqual(body.reference_videos, [job.motion_video_url])
+      assert.match(job.motion_video_url!, new RegExp(`/monitor/${jobId}/wan-motion-[0-9a-f]{8}\\.mp4$`))
+      // The remover matted the stored reel against a key-green background.
+      const matte = matteCalls().at(-1)!.body
+      assert.equal(matte.video, sourceUrl)
+      assert.match(String(matte.background_image), new RegExp(`/monitor/${jobId}/matte-key\\.png$`))
+
+      // Prompt and the rest of the body: no weight/strength or negative-prompt field exists on this API.
+      assert.equal(body.prompt, WAN_MOTION_REFERENCE_PROMPT)
+      assert.deepEqual(Object.keys(body).sort(), [
+        'aspect_ratio', 'duration', 'enable_audio', 'enable_prompt_expansion', 'prompt',
+        'reference_images', 'reference_videos', 'resolution',
+      ])
+      assert.equal(body.enable_prompt_expansion, false)
+      assert.equal(body.resolution, '480p')
+
+      // Motion is untouched: same frames, rate, length and sound as the source.
+      const [src, motion] = [streamFacts(await localCopy(sourceUrl)), streamFacts(await localCopy(job.motion_video_url!))]
+      assert.deepEqual(motion, src)
+    } finally {
+      Object.assign(served, prev)
+    }
   })
 })
 
