@@ -17,7 +17,10 @@ export type ReelSourceErrorType =
   | 'ACCESS_RESTRICTED'
   | 'NOT_VIDEO'
   | 'NOT_FOUND'
+  /** One provider's own quota: Intropix's free capacity, a RapidAPI plan. */
   | 'QUOTA'
+  /** The shared Apify account's monthly limit — every Apify actor stops at once, Intropix included. */
+  | 'ACCOUNT_QUOTA'
   | 'PROVIDER_DOWN'
   | 'TIMEOUT'
   | 'INVALID'
@@ -65,9 +68,12 @@ function fail(provider: ReelProviderName, errorType: ReelSourceErrorType, retrya
 export function classifyProviderError(provider: ReelProviderName, err: unknown): ReelSourceFailure {
   const msg = err instanceof Error ? err.message : String(err)
   // Apify's own wording for a spent plan is "Monthly usage hard limit exceeded"
-  // (type platform-feature-disabled); Intropix refuses a full free tier with
+  // (type platform-feature-disabled). That is the ACCOUNT's limit, shared by the
+  // anonymous actor and Intropix alike, so neither can stand in for the other.
+  if (/monthly usage hard limit|platform-feature-disabled/i.test(msg)) return fail(provider, 'ACCOUNT_QUOTA', false, msg)
+  // One provider's own quota: Intropix refuses a full free tier with
   // free_capacity_exhausted; RapidAPI answers 429.
-  if (/monthly usage hard limit|platform-feature-disabled|free_capacity_exhausted|usage limit|\b402\b|\b429\b|exceeded the .*quota|out of requests|insufficient credit/i.test(msg)) {
+  if (/free_capacity_exhausted|usage limit|\b402\b|\b429\b|exceeded the .*quota|out of requests|insufficient credit/i.test(msg)) {
     return fail(provider, 'QUOTA', false, msg)
   }
   if (/timed? ?out|TimeoutError|aborted due to timeout|ETIMEDOUT/i.test(msg)) return fail(provider, 'TIMEOUT', true, msg)
@@ -156,7 +162,8 @@ export interface ReelProviders {
   /** intropix~instagram-posts-reels-scraper. Throws on a provider-level failure. */
   intropix(permalinks: string[]): Promise<IntropixPost[]>
   rapidApi(permalink: string, apiKey: string): Promise<{ videoUrl: string; thumbnail: string | null; likes: number | null; views: number | null }>
-  listProfile(username: string, limit: number, rapidApiKey: string | null): Promise<{ reels: ApifyReel[] }>
+  /** `skipApify`: the shared Apify account is spent — list through RapidAPI only. */
+  listProfile(username: string, limit: number, rapidApiKey: string | null, opts?: { skipApify?: boolean }): Promise<{ reels: ApifyReel[] }>
   /** Joins Instagram's separate audio track onto a listed reel when it has one. */
   ensureAudio(reel: ApifyReel): Promise<ApifyReel>
   sleep(ms: number): Promise<void>
@@ -184,7 +191,8 @@ export interface ChainOutcome {
  * every reel first; only what it could not see goes on to the authenticated
  * actor, one run per reel; the anonymous RapidAPI and listing fallbacks take
  * what is left. A known restriction or a photo is never retried through the
- * same anonymous path — that only spends money on the same answer.
+ * same anonymous path — that only spends money on the same answer — and once
+ * the shared Apify account is over its limit no Apify actor is asked again.
  */
 export async function runReelProviderChain(
   reels: ReelRef[],
@@ -202,6 +210,9 @@ export async function runReelProviderChain(
   const saw = (r: ReelRef, t: ReelSourceErrorType) => attempts.get(key(r))!.some(f => f.errorType === t)
   // A photo stays a photo whoever is asked.
   const settled = (r: ReelRef) => saw(r, 'NOT_VIDEO')
+  // Once the shared Apify account is over its monthly limit no Apify actor can
+  // start — Intropix, the listing run and the retry included — so none is asked.
+  const apifyAccountSpent = () => [...attempts.values()].some(fs => fs.some(f => f.errorType === 'ACCOUNT_QUOTA'))
 
   // 1. Anonymous Apify, one run for the batch.
   let apifyFailure: ReelSourceFailure | null = null
@@ -220,8 +231,9 @@ export async function runReelProviderChain(
   }
 
   // 2. The authenticated actor — only for what anonymous Apify could not see,
-  // one run per reel. A spent or broken provider is not asked again this pass.
-  if (ctx.apifyEnabled) {
+  // one run per reel. A spent or broken provider is not asked again this pass,
+  // and a spent Apify account is not asked at all.
+  if (ctx.apifyEnabled && !apifyAccountSpent()) {
     let intropixDown: ReelSourceFailure | null = null
     for (const r of missing()) {
       if (settled(r)) continue
@@ -238,7 +250,7 @@ export async function runReelProviderChain(
       } catch (err) {
         const f = classifyProviderError('intropix', err)
         record(r, f)
-        if (f.errorType === 'QUOTA' || f.errorType === 'PROVIDER_DOWN') intropixDown = f
+        if (f.errorType === 'QUOTA' || f.errorType === 'ACCOUNT_QUOTA' || f.errorType === 'PROVIDER_DOWN') intropixDown = f
       }
     }
   }
@@ -272,9 +284,10 @@ export async function runReelProviderChain(
   // 4. The owner's profile listing — anonymous, so useless for a reel Instagram
   // already gated (it hides exactly those); only for the rest.
   const listable = missing().filter(r => !settled(r) && !saw(r, 'ACCESS_RESTRICTED'))
-  if (listable.length && ctx.sourceUsername && (ctx.apifyEnabled || ctx.rapidApiKey)) {
+  const skipApify = apifyAccountSpent()
+  if (listable.length && ctx.sourceUsername && ((ctx.apifyEnabled && !skipApify) || ctx.rapidApiKey)) {
     try {
-      const { reels: listed } = await p.listProfile(ctx.sourceUsername, ctx.listLimit, ctx.rapidApiKey)
+      const { reels: listed } = await p.listProfile(ctx.sourceUsername, ctx.listLimit, ctx.rapidApiKey, { skipApify })
       // A gated account answers the listing with one error item ("Restricted profile").
       const gate = listed.find(x => x.error)
       const gateFailure = gate ? classifyItemError('profile-list', gate.error, gate.errorDescription) : null
@@ -301,7 +314,7 @@ export async function runReelProviderChain(
   const retry = missing().filter(r =>
     attempts.get(key(r))!.some(f => f.provider === 'apify' && f.errorType === 'NOT_FOUND')
     && !saw(r, 'ACCESS_RESTRICTED') && !settled(r))
-  if (ctx.apifyEnabled && !apifyFailure && retry.length) {
+  if (ctx.apifyEnabled && !apifyFailure && !apifyAccountSpent() && retry.length) {
     await p.sleep(ctx.retryDelayMs)
     try {
       const byCode = await p.apifyAnonymous(retry.map(r => r.permalink))
@@ -326,8 +339,8 @@ export interface FinalReelFailure extends ReelSourceFailure {
 
 /**
  * A photo is a photo; otherwise the authenticated actor's verdict decides when
- * it ran (it is the one that can open gated reels), then a known restriction,
- * then whatever came first.
+ * it ran (it is the one that can open gated reels), then a spent Apify account
+ * (the reason it did not run), then a known restriction, then whatever came first.
  */
 export function finalReelFailure(failures: ReelSourceFailure[]): FinalReelFailure {
   if (!failures.length) return fail('apify', 'UNKNOWN', true)
@@ -336,6 +349,8 @@ export function finalReelFailure(failures: ReelSourceFailure[]): FinalReelFailur
   const primary = failures.find(f => f.provider === 'apify')
   const intropix = failures.find(f => f.provider === 'intropix')
   if (intropix) return { ...intropix, primary }
+  const account = failures.find(f => f.errorType === 'ACCOUNT_QUOTA')
+  if (account) return { ...account, primary }
   const restricted = failures.find(f => f.errorType === 'ACCESS_RESTRICTED')
   if (restricted) return { ...restricted, primary }
   return { ...(primary ?? failures[0]), primary }
@@ -351,6 +366,9 @@ export function describeReelFailure(f: FinalReelFailure): string {
     case 'QUOTA':
       return 'Instagram scraper provider quota is exhausted'
         + ` (${f.provider})${gated ? ' — the Reel is restricted/age-gated and needs that fallback' : ''}.`
+    case 'ACCOUNT_QUOTA':
+      return 'Apify account monthly usage limit exhausted — no Apify scraper can run until the limit resets or the plan is raised.'
+        + (gated ? ' The Reel is restricted/age-gated and needs the authenticated scraper, which runs on that account.' : '')
     case 'NOT_VIDEO':
       return 'The Instagram URL does not point to a downloadable video Reel.'
     case 'NOT_FOUND':

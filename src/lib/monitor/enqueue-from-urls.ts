@@ -11,6 +11,7 @@ import {
   ensureReelAudio,
   fetchPostsViaIntropix,
   listProfileReels,
+  listReelsViaRapidApi,
   resolveVideoUrlViaRapidApi,
   resolveVideoUrlsViaApify,
 } from '@/lib/instagram-scrape'
@@ -78,7 +79,9 @@ const PROVIDERS: ReelProviders = {
   apifyAnonymous: resolveVideoUrlsViaApify,
   intropix: fetchPostsViaIntropix,
   rapidApi: resolveVideoUrlViaRapidApi,
-  listProfile: listProfileReels,
+  // A spent Apify account would refuse the listing run too: straight to RapidAPI.
+  listProfile: (username, limit, rapidApiKey, opts) =>
+    opts?.skipApify && rapidApiKey ? listReelsViaRapidApi(username, rapidApiKey, limit) : listProfileReels(username, limit, rapidApiKey),
   ensureAudio: ensureReelAudio,
   sleep: ms => new Promise(r => setTimeout(r, ms)),
 }

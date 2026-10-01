@@ -95,6 +95,7 @@ const REEL_SOURCE_CODE: Record<ReelSourceErrorType, WanErrorCode> = {
   NOT_VIDEO: 'INVALID_INPUT',
   // Retrying later can work: a quota resets, a provider comes back.
   QUOTA: 'ACQUISITION_FAILED',
+  ACCOUNT_QUOTA: 'ACQUISITION_FAILED',
   PROVIDER_DOWN: 'ACQUISITION_FAILED',
   TIMEOUT: 'ACQUISITION_FAILED',
   INVALID: 'ACQUISITION_FAILED',

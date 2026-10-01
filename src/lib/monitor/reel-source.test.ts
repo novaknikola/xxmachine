@@ -42,7 +42,7 @@ function fakes(o: {
   rapid?: (url: string) => { videoUrl: string; thumbnail: string | null; likes: number | null; views: number | null }
   list?: (user: string) => ApifyReel[]
 } = {}) {
-  const calls = { apify: [] as string[][], intropix: [] as string[][], rapid: [] as string[], list: [] as string[], sleep: 0 }
+  const calls = { apify: [] as string[][], intropix: [] as string[][], rapid: [] as string[], list: [] as string[], listOpts: [] as unknown[], sleep: 0 }
   const p: ReelProviders = {
     apifyAnonymous: async urls => { calls.apify.push(urls); return o.apify ? o.apify(urls, calls.apify.length) : new Map() },
     intropix: async urls => { calls.intropix.push(urls); return o.intropix ? o.intropix(urls) : [] },
@@ -51,7 +51,11 @@ function fakes(o: {
       if (o.rapid) return o.rapid(url)
       throw new Error('No video media in the response (probably not a reel) (fallback: No video media in scraper fallback response)')
     },
-    listProfile: async user => { calls.list.push(user); return { reels: o.list ? o.list(user) : [] } },
+    listProfile: async (user, _limit, _key, opts) => {
+      calls.list.push(user)
+      calls.listOpts.push(opts)
+      return { reels: o.list ? o.list(user) : [] }
+    },
     ensureAudio: async r => r,
     sleep: async () => { calls.sleep++ },
   }
@@ -61,6 +65,8 @@ const ctx = (over: Partial<ChainContext> = {}): ChainContext => ({
   apifyEnabled: true, rapidApiKey: null, sourceUsername: null, listLimit: 50, retryDelayMs: 0, ...over,
 })
 const byCode = (...items: [string, ApifyReel][]) => new Map(items.map(([c, i]) => [c.toLowerCase(), i]))
+// Exactly what Apify answers a run start once the account's monthly limit is spent.
+const HARD_LIMIT = 'Apify run failed to start: {"error":{"type":"platform-feature-disabled","message":"Monthly usage hard limit exceeded"}}'
 
 describe('reel provider chain', () => {
   it('1, 13, 14. Apify success: the existing path, untouched — nothing else is asked', async () => {
@@ -116,15 +122,54 @@ describe('reel provider chain', () => {
     assert.equal(calls.sleep, 0)
   })
 
-  it('4. Apify out of quota → Intropix, without re-trying the spent Apify path', async () => {
+  it('4. the shared Apify account over its monthly limit → no Intropix (same account), no Apify retry; RapidAPI still answers', async () => {
     const { p, calls } = fakes({
-      apify: () => { throw new Error('Apify run failed to start: {"error":{"type":"platform-feature-disabled","message":"Monthly usage hard limit exceeded"}}') },
+      apify: () => { throw new Error(HARD_LIMIT) },
       intropix: () => [intropixReel('Dd4MWoXBuZS')],
+      rapid: () => ({ videoUrl: cdn('rapid'), thumbnail: null, likes: 3, views: 40 }),
     })
-    const out = await runReelProviderChain([reel('Dd4MWoXBuZS')], ctx(), p)
-    assert.equal(out.resolved.get('dd4mwoxbuzs')?.provider, 'intropix')
+    const out = await runReelProviderChain([reel('Dd4MWoXBuZS')], ctx({ rapidApiKey: 'k', sourceUsername: 'owner' }), p)
+    assert.equal(out.resolved.get('dd4mwoxbuzs')?.provider, 'rapidapi')
+    assert.equal(calls.intropix.length, 0, 'Intropix runs on the same Apify account: not asked')
     assert.equal(calls.apify.length, 1)
     assert.equal(calls.sleep, 0)
+    assert.equal(out.attempts.get('dd4mwoxbuzs')![0].errorType, 'ACCOUNT_QUOTA')
+  })
+
+  it('4. platform-feature-disabled in any wording is the account too: no Apify actor at all, the listing goes through RapidAPI only, and the user is told it is the Apify account', async () => {
+    const { p, calls } = fakes({
+      apify: () => { throw new Error('Apify run failed to start: {"error":{"type":"platform-feature-disabled","message":"Actor runs are disabled for this account"}}') },
+      intropix: () => [intropixReel('ACCT0001')],
+      rapid: () => { throw new Error('RapidAPI request failed (HTTP 429)') },
+    })
+    const out = await runReelProviderChain([reel('ACCT0001'), reel('ACCT0002')], ctx({ rapidApiKey: 'k', sourceUsername: 'owner' }), p)
+    assert.equal(out.resolved.size, 0)
+    assert.deepEqual([calls.apify.length, calls.intropix.length, calls.sleep], [1, 0, 0])
+    assert.deepEqual(calls.list, ['owner'])
+    assert.deepEqual(calls.listOpts, [{ skipApify: true }])
+    for (const code of ['acct0001', 'acct0002']) {
+      const final = finalReelFailure(out.attempts.get(code)!)
+      assert.deepEqual([final.provider, final.errorType], ['apify', 'ACCOUNT_QUOTA'])
+      const text = describeReelFailure(final)
+      assert.equal(text, 'Apify account monthly usage limit exhausted — no Apify scraper can run until the limit resets or the plan is raised.')
+      assert.doesNotMatch(text, /intropix/i)
+    }
+  })
+
+  it('Intropix meeting the account limit itself: asked once, no Apify retry or listing run, and the Apify account named as the cause', async () => {
+    const { p, calls } = fakes({
+      apify: () => byCode(['GATED001', apifyRestricted('GATED001')], ['GATED002', apifyRestricted('GATED002')]), // EMPTY001: no item
+      intropix: () => { throw new Error(HARD_LIMIT) },
+    })
+    const out = await runReelProviderChain([reel('GATED001'), reel('GATED002'), reel('EMPTY001')], ctx({ sourceUsername: 'owner' }), p)
+    assert.deepEqual([calls.apify.length, calls.intropix.length, calls.list.length, calls.sleep], [1, 1, 0, 0])
+    for (const code of ['gated001', 'gated002']) {
+      const text = describeReelFailure(finalReelFailure(out.attempts.get(code)!))
+      assert.equal(text, 'Apify account monthly usage limit exhausted — no Apify scraper can run until the limit resets or the plan is raised.'
+        + ' The Reel is restricted/age-gated and needs the authenticated scraper, which runs on that account.')
+      assert.doesNotMatch(text, /intropix/i)
+    }
+    assert.equal(finalReelFailure(out.attempts.get('empty001')!).errorType, 'ACCOUNT_QUOTA')
   })
 
   it('5. Apify timeout or failed run → Intropix', async () => {
@@ -211,7 +256,8 @@ describe('reel provider chain', () => {
 describe('reel source classification', () => {
   it('names provider-level failures', () => {
     const cases: [string, string][] = [
-      ['Apify run failed to start: {"error":{"type":"platform-feature-disabled","message":"Monthly usage hard limit exceeded"}}', 'QUOTA'],
+      [HARD_LIMIT, 'ACCOUNT_QUOTA'],
+      ['Apify run failed to start: {"error":{"type":"platform-feature-disabled","message":"Actor runs are disabled"}}', 'ACCOUNT_QUOTA'],
       ['Apify run failed: FAILED (free_capacity_exhausted)', 'QUOTA'],
       ['You have exceeded the MONTHLY quota for Requests on your current plan', 'QUOTA'],
       ['RapidAPI request failed (HTTP 429)', 'QUOTA'],
@@ -238,7 +284,7 @@ describe('reel source classification', () => {
     assert.equal(describeReelFailure(restricted), 'Instagram Reel is restricted/age-gated and the primary scraper could not access it.')
     const quota = finalReelFailure([{ ok: false, provider: 'rapidapi', errorType: 'QUOTA', retryable: false }])
     assert.equal(describeReelFailure(quota), 'Instagram scraper provider quota is exhausted (rapidapi).')
-    for (const t of ['ACCESS_RESTRICTED', 'NOT_VIDEO', 'NOT_FOUND', 'QUOTA', 'PROVIDER_DOWN', 'TIMEOUT', 'INVALID', 'UNKNOWN'] as const) {
+    for (const t of ['ACCESS_RESTRICTED', 'NOT_VIDEO', 'NOT_FOUND', 'QUOTA', 'ACCOUNT_QUOTA', 'PROVIDER_DOWN', 'TIMEOUT', 'INVALID', 'UNKNOWN'] as const) {
       const text = describeReelFailure(finalReelFailure([{ ok: false, provider: 'apify', errorType: t, retryable: true }]))
       assert.doesNotMatch(text, /could not be downloaded/i, t)
     }
@@ -247,11 +293,12 @@ describe('reel source classification', () => {
   it('maps a classified failure onto the job error code', async () => {
     const { classifyAcquireError, WanJobError } = await import('./wan-jobs')
     const { EnqueueUrlsError } = await import('./enqueue-from-urls')
-    const err = (reason: 'ACCESS_RESTRICTED' | 'NOT_VIDEO' | 'QUOTA' | 'NOT_FOUND') => new EnqueueUrlsError('Could not fetch that reel. x', 502, { reason })
+    const err = (reason: 'ACCESS_RESTRICTED' | 'NOT_VIDEO' | 'QUOTA' | 'ACCOUNT_QUOTA' | 'NOT_FOUND') => new EnqueueUrlsError('Could not fetch that reel. x', 502, { reason })
     assert.equal(classifyAcquireError(err('ACCESS_RESTRICTED')), 'SOURCE_UNAVAILABLE')
     assert.equal(classifyAcquireError(err('NOT_FOUND')), 'SOURCE_UNAVAILABLE')
     assert.equal(classifyAcquireError(err('NOT_VIDEO')), 'INVALID_INPUT')
     assert.equal(classifyAcquireError(err('QUOTA')), 'ACQUISITION_FAILED')
+    assert.equal(classifyAcquireError(err('ACCOUNT_QUOTA')), 'ACQUISITION_FAILED')
     assert.equal(classifyAcquireError(new WanJobError('DOWNLOAD_FAILED', 'x')), 'DOWNLOAD_FAILED')
   })
 })
