@@ -9,10 +9,20 @@ import { one, query } from '@/lib/db'
 import { resolveKey } from '@/lib/user-keys'
 import {
   ensureReelAudio,
+  fetchPostsViaIntropix,
   listProfileReels,
   resolveVideoUrlViaRapidApi,
   resolveVideoUrlsViaApify,
 } from '@/lib/instagram-scrape'
+import {
+  describeReelFailure,
+  finalReelFailure,
+  runReelProviderChain,
+  type ChainOutcome,
+  type FinalReelFailure,
+  type ReelProviders,
+  type ReelSourceErrorType,
+} from './reel-source'
 import { enqueueDiscoveryReels, type EnqueueReelInput } from './enqueue'
 import { parseReelUrlList } from './parse-reel-url'
 import { scheduleAutoClassify } from './auto-classify'
@@ -44,6 +54,10 @@ export class EnqueueUrlsError extends Error {
       resolveErrors?: ResolveError[]
       invalid?: string[]
       apifyDown?: boolean
+      /** Why nothing could be fetched, when every reel failed for the same reason. */
+      reason?: ReelSourceErrorType
+      /** The deciding failure per reel. */
+      failures?: { permalink: string; failure: FinalReelFailure }[]
     },
   ) {
     super(message)
@@ -59,10 +73,21 @@ export interface ResolveReelUrlsResult {
   truncated: boolean
 }
 
+/** The production providers behind runReelProviderChain. */
+const PROVIDERS: ReelProviders = {
+  apifyAnonymous: resolveVideoUrlsViaApify,
+  intropix: fetchPostsViaIntropix,
+  rapidApi: resolveVideoUrlViaRapidApi,
+  listProfile: listProfileReels,
+  ensureAudio: ensureReelAudio,
+  sleep: ms => new Promise(r => setTimeout(r, ms)),
+}
+
 /**
- * The actual link → playable video URL resolution (cached lookup, then Apify,
- * then per-reel RapidAPI download, then profile-listing fallback, then one
- * delayed Apify retry) — everything enqueueReelUrlsForUser needs BEFORE it
+ * The actual link → playable video URL resolution (cached lookup, then
+ * runReelProviderChain: anonymous Apify, the authenticated Apify actor for what
+ * it could not see, RapidAPI, profile listing, one delayed Apify retry for an
+ * empty answer) — everything enqueueReelUrlsForUser needs BEFORE it
  * decides what to do with the resolved reels. Split out 2026-09-20 so the
  * new Wan 3.0 Copy-Paste pipeline (wan-jobs.ts) can reuse this exact
  * resolution chain without going through discovery_items at all — that
@@ -160,146 +185,61 @@ export async function resolveReelUrls(opts: {
     }
   }
 
-  // 2) Apify by permalink — one run for the whole batch, and unlike the RapidAPI
-  //    downloaders it is not metered per request, so it survives a spent plan.
-  let missing = parsed.filter(p => !resolved.has(p.shortCode.toLowerCase()))
-  let apifyError: string | null = null
-  if (missing.length && process.env.APIFY_API_KEY) {
-    try {
-      const byCode = await resolveVideoUrlsViaApify(missing.map(p => p.permalink))
-      for (const p of missing) {
-        const match = byCode.get(p.shortCode.toLowerCase())
-        if (!match?.videoUrl || !isPlayableVideoUrl(match.videoUrl)) continue
-        resolved.set(p.shortCode.toLowerCase(), {
-          id: match.shortCode ?? p.shortCode,
-          permalink: match.url ?? p.permalink,
-          videoUrl: match.videoUrl,
-          thumbnailUrl: match.displayUrl ?? match.images?.[0] ?? null,
-          views: match.videoViewCount ?? match.videoPlayCount ?? 0,
-          likes: match.likesCount ?? 0,
-          comments: match.commentsCount ?? 0,
-          postedAt: match.timestamp ?? null,
-        })
-      }
-    } catch (err) {
-      apifyError = err instanceof Error ? err.message : String(err)
-      /* fall through to the RapidAPI downloaders */
-    }
-  }
-
-  // 3) Download API — per-reel fallback when Apify could not see the post
-  missing = parsed.filter(p => !resolved.has(p.shortCode.toLowerCase()))
-  // A spent RapidAPI plan looks exactly like a broken one from here: every call
-  // fails. The failure message used to guess "service is down / upgrading",
-  // which sent people looking at Instagram instead of at their own plan.
-  let quotaExhausted = false
-  if (missing.length && rapidApiKey) {
-    for (const p of missing) {
-      try {
-        const r = await resolveVideoUrlViaRapidApi(p.permalink, rapidApiKey)
-        if (!isPlayableVideoUrl(r.videoUrl)) continue
-        resolved.set(p.shortCode.toLowerCase(), {
-          id: p.shortCode,
-          permalink: p.permalink,
-          videoUrl: r.videoUrl,
-          thumbnailUrl: r.thumbnail,
-          views: r.views ?? 0,
-          likes: r.likes ?? 0,
-        })
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        if (/\b429\b|exceeded the .*quota|too many requests/i.test(msg)) quotaExhausted = true
-        /* fall through to the listing path */
-      }
-    }
-  }
-
-  // 4) Profile listing fallback — needs a real owner handle
-  missing = parsed.filter(p => !resolved.has(p.shortCode.toLowerCase()))
-  if (missing.length && sourceUsername && (process.env.APIFY_API_KEY || rapidApiKey)) {
-    try {
-      const { reels } = await listProfileReels(sourceUsername, LIST_LIMIT, rapidApiKey)
-      const listedByCode = new Map(
-        reels.filter(r => r.shortCode).map(r => [r.shortCode!.toLowerCase(), r]),
+  // 2) The providers, for whatever the cache did not have.
+  const missing = parsed.filter(p => !resolved.has(p.shortCode.toLowerCase()))
+  const apifyEnabled = !!process.env.APIFY_API_KEY
+  const { resolved: found, attempts }: ChainOutcome = missing.length
+    ? await runReelProviderChain(
+        missing.map(p => ({ shortCode: p.shortCode, permalink: p.permalink })),
+        { apifyEnabled, rapidApiKey, sourceUsername, listLimit: LIST_LIMIT, retryDelayMs: 4_000 },
+        PROVIDERS,
       )
-      for (const p of missing) {
-        const match = listedByCode.get(p.shortCode.toLowerCase())
-        if (!match?.videoUrl || !isPlayableVideoUrl(match.videoUrl)) continue
-        await ensureReelAudio(match)
-        resolved.set(p.shortCode.toLowerCase(), {
-          id: match.shortCode ?? p.shortCode,
-          permalink: match.url ?? p.permalink,
-          videoUrl: match.videoUrl,
-          thumbnailUrl: match.displayUrl ?? match.images?.[0] ?? null,
-          views: match.videoViewCount ?? 0,
-          likes: match.likesCount ?? 0,
-          comments: match.commentsCount ?? 0,
-          postedAt: match.timestamp ?? null,
-        })
-      }
-    } catch {
-      /* reported as resolveErrors below */
-    }
-  }
-
-  // 5) One retry through Apify for whatever is still missing. Apify's own
-  // headless scrape sometimes comes back empty for a post that is perfectly
-  // public and fetches fine seconds later — not worth reporting as "private
-  // or age-restricted" without giving it a second, delayed shot first. Only
-  // when Apify itself didn't already throw (a dead key/plan won't recover).
-  missing = parsed.filter(p => !resolved.has(p.shortCode.toLowerCase()))
-  if (missing.length && process.env.APIFY_API_KEY && !apifyError) {
-    await new Promise(r => setTimeout(r, 4_000))
-    try {
-      const byCode = await resolveVideoUrlsViaApify(missing.map(p => p.permalink))
-      for (const p of missing) {
-        const match = byCode.get(p.shortCode.toLowerCase())
-        if (!match?.videoUrl || !isPlayableVideoUrl(match.videoUrl)) continue
-        resolved.set(p.shortCode.toLowerCase(), {
-          id: match.shortCode ?? p.shortCode,
-          permalink: match.url ?? p.permalink,
-          videoUrl: match.videoUrl,
-          thumbnailUrl: match.displayUrl ?? match.images?.[0] ?? null,
-          views: match.videoViewCount ?? match.videoPlayCount ?? 0,
-          likes: match.likesCount ?? 0,
-          comments: match.commentsCount ?? 0,
-          postedAt: match.timestamp ?? null,
-        })
-      }
-    } catch (err) {
-      apifyError = err instanceof Error ? err.message : String(err)
-    }
-  }
-
-  for (const p of parsed.filter(p => !resolved.has(p.shortCode.toLowerCase()))) {
-    resolveErrors.push({
-      permalink: p.permalink,
-      error: 'no playable video URL from download API or profile listing',
+    : { resolved: new Map(), attempts: new Map() }
+  for (const p of missing) {
+    const hit = found.get(p.shortCode.toLowerCase())
+    if (!hit) continue
+    const m = hit.metadata ?? {}
+    resolved.set(p.shortCode.toLowerCase(), {
+      id: m.shortCode ?? p.shortCode,
+      permalink: m.permalink ?? p.permalink,
+      videoUrl: hit.videoUrl,
+      thumbnailUrl: m.thumbnailUrl ?? null,
+      views: m.views ?? 0,
+      likes: m.likes ?? 0,
+      comments: m.comments ?? 0,
+      postedAt: m.postedAt ?? null,
     })
+    if (hit.provider !== 'apify') console.log(`[reel-source] ${p.shortCode} resolved by ${hit.provider}`)
+  }
+
+  const failures = parsed
+    .filter(p => !resolved.has(p.shortCode.toLowerCase()))
+    .map(p => {
+      const tried = attempts.get(p.shortCode.toLowerCase()) ?? []
+      console.warn(`[reel-source] ${p.shortCode} not resolved: ${tried.map(f => `${f.provider} ${f.errorType}`).join(' → ') || 'no provider ran'}`)
+      return { permalink: p.permalink, failure: finalReelFailure(tried) }
+    })
+  for (const { permalink, failure } of failures) {
+    resolveErrors.push({ permalink, error: `${failure.errorType}: ${describeReelFailure(failure)}` })
   }
 
   const reels = [...resolved.values()]
   if (!reels.length) {
-    // Prefer a concrete reason over a vague "try again" — usually RapidAPI
-    // download outage + Apify quota + age-gated profile with empty listing.
-    const apifyDown = !process.env.APIFY_API_KEY
-    // Apify runs first now, so lead with its verdict. Blaming the RapidAPI quota
-    // when Apify is the path that actually failed sends people to buy the wrong
-    // upgrade — and vice versa once Apify is out of credit too.
-    const detail = apifyDown && !rapidApiKey
-      ? 'No reel fetcher configured — set APIFY_API_KEY or add a RapidAPI key in Settings.'
-      : apifyError
-        ? `Apify could not fetch it (${apifyError})${quotaExhausted ? ', and the RapidAPI fallback is out of monthly requests (HTTP 429)' : ''}.`
-        : quotaExhausted
-          // Named exactly, because the fix is a plan upgrade and no amount of
-          // retrying or picking a different reel will help.
-          ? 'Apify returned nothing for this reel and your RapidAPI fallback is out of requests for this month (HTTP 429). Upgrade the plan or wait for the quota to reset.'
-          : 'The reel could not be fetched by Apify or the download API, and we could not list it from the source profile either (private and age-restricted accounts often return nothing).'
-    throw new EnqueueUrlsError(`Could not fetch that reel. ${detail}`, 502, {
-      resolveErrors,
-      invalid,
-      apifyDown,
-    })
+    const apifyDown = !apifyEnabled
+    if (apifyDown && !rapidApiKey) {
+      throw new EnqueueUrlsError(
+        'Could not fetch that reel. No reel fetcher configured — set APIFY_API_KEY or add a RapidAPI key in Settings.',
+        502,
+        { resolveErrors, invalid, apifyDown },
+      )
+    }
+    // One reason for the whole batch only when every reel shares it.
+    const types = [...new Set(failures.map(f => f.failure.errorType))]
+    const reason = types.length === 1 ? types[0] : undefined
+    const message = failures.length === 1 || reason
+      ? `Could not fetch that reel. ${describeReelFailure(failures[0].failure)}`
+      : `Could not fetch those reels: ${types.map(t => `${failures.filter(f => f.failure.errorType === t).length} ${t}`).join(', ')}.`
+    throw new EnqueueUrlsError(message, 502, { resolveErrors, invalid, apifyDown, reason, failures })
   }
 
   for (const reel of reels) {

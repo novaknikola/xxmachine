@@ -257,6 +257,10 @@ describe('viral sheet → IG Replicator bridge', { skip: !TEST_DB && 'TEST_DATAB
     assert.equal(job.status, 'awaiting_approval')
     assert.equal(job.video_url, `${base}/storage/v1/object/public/generations/monitor/${jobId}/source.mp4`)
     assert.ok(store.has(`monitor/${jobId}/source.mp4`), 'source copied to storage')
+    // The reel cache now answers with our copy, not the CDN link it was found under.
+    const cached = await m.db.one<{ video_url: string }>(
+      `SELECT video_url FROM ig_downloader_reels WHERE user_id = $1 AND shortcode = 'NormalReel01'`, [ownerId])
+    assert.equal(cached!.video_url, job.video_url)
     const photo = telegramCalls.find(c => c.method === 'sendPhoto')
     assert.ok(photo, 'still sent to Telegram')
     assert.equal(String(photo!.body.chat_id), '424242')
@@ -320,7 +324,7 @@ describe('viral sheet → IG Replicator bridge', { skip: !TEST_DB && 'TEST_DATAB
     assert.match(sheet.cell(row, 'N'), /^ACQUISITION_FAILED: Could not fetch that reel\. No reel fetcher configured/)
   })
 
-  it('3b. storage failure: CDN link dead → STORAGE_FAILED', async () => {
+  it('3b. download failure: the reel was found, its CDN link is dead → DOWNLOAD_FAILED', async () => {
     const sheet = new MemorySheet()
     await m.db.query(
       `INSERT INTO ig_downloader_reels (user_id, username, shortcode, permalink, video_url, source)
@@ -329,7 +333,8 @@ describe('viral sheet → IG Replicator bridge', { skip: !TEST_DB && 'TEST_DATAB
     await tick(sheet)
     const job = await jobRow(sheet.cell(row, 'M'))
     assert.equal(job.status, 'failed')
-    assert.equal(job.error_code, 'STORAGE_FAILED')
+    assert.equal(job.error_code, 'DOWNLOAD_FAILED')
+    assert.match(job.error ?? '', /^The Reel was found, but the video could not be downloaded: track fetch failed: 404/)
   })
 
   it('4 + 5. Replicator failure → PROCESSING_FAILED; ticking again retries the same job to success', async () => {
@@ -474,6 +479,30 @@ describe('viral sheet → IG Replicator bridge', { skip: !TEST_DB && 'TEST_DATAB
     })))
     assert.equal(results.filter(x => x.created).length, 1)
     assert.equal(new Set(results.map(x => x.jobId)).size, 1)
+  })
+
+  it('12. Telegram submission: the job keeps our checked copy, never the provider CDN link', async () => {
+    const url = await cachedReel('TgCopy00001')
+    const created = await m.wan.createWanJobsFromUrls({
+      userId: ownerId, chatId: 424242, rawText: url, referenceImageUrl: `${base}/ws/out.jpg`,
+    })
+    assert.equal(created.jobIds.length, 1)
+    assert.equal(created.noAudioCount, 0)
+    const jobId = created.jobIds[0]
+    const job = await jobRow(jobId)
+    assert.equal(job.video_url, `${base}/storage/v1/object/public/generations/monitor/${jobId}/source.mp4`)
+    assert.notEqual(job.video_url, `${base}/cdn/reel.mp4`)
+    assert.ok(store.has(`monitor/${jobId}/source.mp4`))
+
+    // A dead link is reported per reel as a download failure, not a resolve failure.
+    await m.db.query(
+      `INSERT INTO ig_downloader_reels (user_id, username, shortcode, permalink, video_url, source)
+       VALUES ($1, 'creator', 'TgDead00001', 'x', $2, 'test')`, [ownerId, `${base}/cdn/expired.mp4`])
+    const dead = await m.wan.createWanJobsFromUrls({
+      userId: ownerId, chatId: 424242, rawText: 'https://www.instagram.com/reel/TgDead00001/', referenceImageUrl: `${base}/ws/out.jpg`,
+    })
+    assert.equal(dead.jobIds.length, 0)
+    assert.match(dead.resolveErrors[0].error, /^DOWNLOAD_FAILED: The Reel was found, but the video could not be downloaded/)
   })
 
   it('11. tattoos on the source person never reach Wan: every reference it gets is ink-free', async () => {

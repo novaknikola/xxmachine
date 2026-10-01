@@ -3,6 +3,14 @@ import { ensureVideoHasAudio, videoHasAudio } from '@/lib/monitor/video-audio'
 
 const APIFY_TOKEN = process.env.APIFY_API_KEY!
 const ACTOR_ID = 'apify~instagram-scraper'
+/**
+ * Fallback for reels the anonymous actor above cannot see (age-gated reels and
+ * profiles answer it with `restricted_page`). It reads through logged-in
+ * sessions its maintainer runs — none of ours. Pay per event: $0.005 per run,
+ * $0.002 per profile, $0.0019 per delivered post; failed lookups are free.
+ * Validated live 2026-10-01 on 4/4 restricted reels.
+ */
+export const INTROPIX_ACTOR_ID = 'intropix~instagram-posts-reels-scraper'
 const POLL_INTERVAL_MS = 5_000
 const MAX_POLLS = 48 // 4 min cap
 
@@ -44,16 +52,30 @@ export interface ApifyReel {
   timestamp?: string
   /** Echo of the directUrls entry that produced this item. */
   inputUrl?: string
+  /** 'Video' | 'Image' | 'Sidecar'. */
+  type?: string
+  productType?: string
+  /** Set instead of media when Instagram refused the post, e.g. `restricted_page`. */
+  error?: string
+  errorDescription?: string
 }
 
-async function runApifyActor<T = ApifyReel>(input: object): Promise<T[]> {
+async function runApifyActor<T = ApifyReel>(
+  input: object,
+  opts: {
+    actorId?: string
+    /** Throw when the run has not SUCCEEDED by the end of polling, instead of reading a partial dataset. */
+    requireSuccess?: boolean
+  } = {},
+): Promise<T[]> {
+  const actorId = opts.actorId ?? ACTOR_ID
   // Explicit timeouts on every leg: none of these had one before, so a stuck
   // TCP connection to Apify (not just a slow actor run) could hang past
   // MAX_POLLS' own bookkeeping and stall whatever awaited this indefinitely —
   // that chain is what starved the daily profile-scan cron (see
   // runDueProfileScans in monitor/process-item.ts).
   const startRes = await fetch(
-    `https://api.apify.com/v2/acts/${ACTOR_ID}/runs?token=${APIFY_TOKEN}`,
+    `https://api.apify.com/v2/acts/${actorId}/runs?token=${APIFY_TOKEN}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -65,15 +87,23 @@ async function runApifyActor<T = ApifyReel>(input: object): Promise<T[]> {
   const runId: string = startData?.data?.id
   if (!runId) throw new Error('Apify run failed to start: ' + JSON.stringify(startData))
 
+  let status = ''
   for (let i = 0; i < MAX_POLLS; i++) {
     await new Promise(r => setTimeout(r, POLL_INTERVAL_MS))
     const statusRes = await fetch(`https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY_TOKEN}`, {
       signal: AbortSignal.timeout(15_000),
     })
     const statusData = await statusRes.json()
-    const status: string = statusData?.data?.status
+    status = statusData?.data?.status
     if (status === 'SUCCEEDED') break
-    if (status === 'FAILED' || status === 'ABORTED') throw new Error('Apify run failed: ' + status)
+    if (status === 'FAILED' || status === 'ABORTED' || (opts.requireSuccess && status === 'TIMED-OUT')) {
+      // statusMessage is where an actor says why, e.g. free_capacity_exhausted.
+      const why = statusData?.data?.statusMessage
+      throw new Error(`Apify run failed: ${status}${why ? ` (${why})` : ''}`)
+    }
+  }
+  if (opts.requireSuccess && status !== 'SUCCEEDED') {
+    throw new Error(`Apify run timed out (still ${status || 'unknown'} after ${(MAX_POLLS * POLL_INTERVAL_MS) / 1000}s)`)
   }
 
   const dataRes = await fetch(
@@ -155,6 +185,42 @@ export async function resolveVideoUrlsViaApify(
   // videoUrl is the video-only track; re-join the audio so every caller gets sound.
   await Promise.all([...out.values()].map(item => ensureReelAudio(item)))
   return out
+}
+
+/** One post as intropix~instagram-posts-reels-scraper delivers it (the fields we use). */
+export interface IntropixPost {
+  shortcode?: string
+  permalink?: string
+  username?: string
+  /** 'reel' | 'post' | 'carousel' … */
+  post_type?: string
+  taken_at?: string
+  like_count?: number
+  comment_count?: number
+  view_count?: number | null
+  media?: {
+    media_type?: string
+    media_url?: string
+    cover_url?: string
+    width?: number
+    height?: number
+    video_duration?: number
+  }[]
+  error?: string
+  errorDescription?: string
+}
+
+/**
+ * Posts for the given permalinks through the authenticated actor — one run for
+ * all of them (the start fee is per run). Throws on a run that fails or does
+ * not finish; the per-post outcome is the caller's to read.
+ */
+export async function fetchPostsViaIntropix(permalinks: string[]): Promise<IntropixPost[]> {
+  if (!APIFY_TOKEN || !permalinks.length) return []
+  return runApifyActor<IntropixPost>(
+    { postUrls: permalinks, maxPosts: permalinks.length },
+    { actorId: INTROPIX_ACTOR_ID, requireSuccess: true },
+  )
 }
 
 /**

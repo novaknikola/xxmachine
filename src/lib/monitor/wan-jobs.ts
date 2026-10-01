@@ -12,7 +12,8 @@ import { EnqueueUrlsError, resolveReelUrls, type ResolveError } from './enqueue-
 import { generateWanReferenceVideo, type WanReferenceInput } from './wan-reference'
 import { buildMotionReference } from './wan-motion-reference'
 import { probeSourceVideo } from './analyze'
-import { videoHasAudio } from './video-audio'
+import { acquireReelVideo, rememberAcquiredReel, ReelDownloadError } from './reel-download'
+import type { ReelSourceErrorType } from './reel-source'
 import { notifyReplicationDone, notifyReplicationFailed } from './notify'
 import { enqueueRepurpose } from './process-item'
 import { enqueueDriveArchive } from '@/lib/drive-archive/enqueue'
@@ -64,6 +65,8 @@ export type WanErrorCode =
   | 'SOURCE_UNAVAILABLE'
   | 'ACQUISITION_FAILED'
   | 'STORAGE_FAILED'
+  /** The reel was found, but its video could not be downloaded or is not a video. */
+  | 'DOWNLOAD_FAILED'
   | 'REPLICATOR_UNAVAILABLE'
   | 'PROCESSING_FAILED'
   | 'STALLED'
@@ -85,11 +88,25 @@ export function classifyWanError(err: unknown): WanErrorCode {
   return 'PROCESSING_FAILED'
 }
 
+/** What a classified provider failure means for the job (reel-source.ts). */
+const REEL_SOURCE_CODE: Record<ReelSourceErrorType, WanErrorCode> = {
+  ACCESS_RESTRICTED: 'SOURCE_UNAVAILABLE',
+  NOT_FOUND: 'SOURCE_UNAVAILABLE',
+  NOT_VIDEO: 'INVALID_INPUT',
+  // Retrying later can work: a quota resets, a provider comes back.
+  QUOTA: 'ACQUISITION_FAILED',
+  PROVIDER_DOWN: 'ACQUISITION_FAILED',
+  TIMEOUT: 'ACQUISITION_FAILED',
+  INVALID: 'ACQUISITION_FAILED',
+  UNKNOWN: 'SOURCE_UNAVAILABLE',
+}
+
 /** Reason for a failed source resolution — which part broke decides what fixes it. */
 export function classifyAcquireError(err: unknown): WanErrorCode {
   if (err instanceof WanJobError) return err.code
   if (err instanceof EnqueueUrlsError) {
     if (err.status === 400) return 'INVALID_INPUT'
+    if (err.detail?.reason) return REEL_SOURCE_CODE[err.detail.reason]
     // A fetcher that is missing, erroring, or out of quota: retrying later can work.
     if (/No reel fetcher configured|Apify could not fetch it|out of requests|\b429\b/i.test(err.message)) {
       return 'ACQUISITION_FAILED'
@@ -153,7 +170,8 @@ export async function createWanJobsFromUrls(opts: {
       }
     }
   }
-  const { resolveErrors, invalid, username, sourceUsername } = resolved
+  const { invalid, username, sourceUsername } = resolved
+  const resolveErrors = [...resolved.resolveErrors]
   const reels = [
     ...resolved.reels,
     ...direct.map(url => ({
@@ -167,15 +185,32 @@ export async function createWanJobsFromUrls(opts: {
   let noAudioCount = 0
   for (const reel of reels) {
     if (!reel.videoUrl) continue
-    if ((await videoHasAudio(reel.videoUrl)) === false) noAudioCount++
+    // Our own checked copy right away: the provider's CDN link can expire long
+    // before Confirm, and nothing later should depend on it.
+    const id = randomUUID()
+    let acquired
+    try {
+      acquired = await acquireReelVideo({ mediaUrl: reel.videoUrl, storagePath: `monitor/${id}/source.mp4` })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      resolveErrors.push({
+        permalink: reel.permalink,
+        error: err instanceof ReelDownloadError
+          ? `DOWNLOAD_FAILED: The Reel was found, but the video could not be downloaded (${msg}).`
+          : `STORAGE_FAILED: Could not store the source video (${msg}).`,
+      })
+      continue
+    }
+    if (!acquired.hasAudio) noAudioCount++
+    if (acquired.copied) await rememberAcquiredReel(opts.userId, reel.id, acquired.url)
     const row = await one<{ id: string }>(
       `INSERT INTO copy_paste_wan_jobs
-         (user_id, chat_id, profile, content_url, content_id, video_url, reference_image_url, character_id, still_prompt, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'awaiting_confirm')
+         (id, user_id, chat_id, profile, content_url, content_id, video_url, reference_image_url, character_id, still_prompt, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'awaiting_confirm')
        RETURNING id`,
       [
-        opts.userId, String(opts.chatId), sourceUsername ?? username,
-        reel.permalink, reel.id, reel.videoUrl, opts.referenceImageUrl, opts.characterId ?? null,
+        id, opts.userId, String(opts.chatId), sourceUsername ?? username,
+        reel.permalink, reel.id, acquired.url, opts.referenceImageUrl, opts.characterId ?? null,
         opts.stillPrompt?.trim() || null,
       ],
     )
@@ -596,16 +631,20 @@ export async function acquireWanJobSource(jobId: string, userId: string): Promis
     }
     if (!sourceUrl) throw new WanJobError('SOURCE_UNAVAILABLE', 'No playable video URL for this reel')
 
-    // Already on our storage (e.g. an audio re-join) — copying it again gains nothing.
-    let videoUrl = sourceUrl
-    const ownStorage = process.env.SUPABASE_URL ? `${process.env.SUPABASE_URL}/storage/v1/object/public/` : null
-    if (!ownStorage || !sourceUrl.startsWith(ownStorage)) {
-      try {
-        videoUrl = await uploadImageFromUrl(sourceUrl, `monitor/${jobId}/source.mp4`)
-      } catch (err) {
-        throw new WanJobError('STORAGE_FAILED', `Could not store the source video: ${err instanceof Error ? err.message : String(err)}`)
+    // Access is done; this is download. A found reel whose file cannot be
+    // fetched or is not a video is DOWNLOAD_FAILED, never "could not fetch".
+    let acquired
+    try {
+      acquired = await acquireReelVideo({ mediaUrl: sourceUrl, storagePath: `monitor/${jobId}/source.mp4` })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (err instanceof ReelDownloadError) {
+        throw new WanJobError('DOWNLOAD_FAILED', `The Reel was found, but the video could not be downloaded: ${msg}`)
       }
+      throw new WanJobError('STORAGE_FAILED', `Could not store the source video: ${msg}`)
     }
+    const videoUrl = acquired.url
+    if (acquired.copied) await rememberAcquiredReel(userId, job.content_id, videoUrl)
 
     await query(
       `UPDATE copy_paste_wan_jobs SET status = 'awaiting_confirm', video_url = $2, updated_at = now()
