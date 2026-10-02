@@ -51,22 +51,38 @@ export const PREVIEW_FORMULA = '=IMAGE(INDIRECT("A"&ROW()))'
 const VALIDATION_REFRESH_MS = 10 * 60_000
 
 export interface PhotoSheet extends SheetIO {
-  /** Creates the tab when it is missing. True when it had to. */
-  ensureTab(): Promise<boolean>
-  /** Appends one row from column A (formulas evaluated); returns its 1-based row number. */
-  appendRow(values: string[]): Promise<number>
+  /** Creates the tab when it is missing; reports how many rows the tab's grid has. */
+  ensureTab(): Promise<{ created: boolean; rowCount: number }>
+  /**
+   * Writes one row from column A (formulas evaluated), growing the grid first
+   * when the row is past its end.
+   */
+  writeRow(rowNumber: number, values: string[], rowCount: number): Promise<void>
 }
 
+interface TabMeta { properties?: { sheetId?: number; title?: string; gridProperties?: { rowCount?: number } } }
+
+/**
+ * Rows are written to an explicit row, never through values:append — the
+ * Pošalji checkboxes put FALSE in every row of column I, so append would treat
+ * the whole grid as one table and write below its last row (row 1001 of an
+ * empty tab, found in the L1 test).
+ */
 export function googlePhotoSheet(sheetId: string = RECREATE_SHEET_ID): PhotoSheet {
   const io = googleSheetIO(sheetId, PHOTO_LAYOUT)
+  let tabId: number | null = null
   return {
     ...io,
 
     async ensureTab() {
-      const meta = await sheetsRequest(`${sheetId}?fields=sheets.properties(sheetId,title)`)
+      const meta = await sheetsRequest(`${sheetId}?fields=sheets.properties(sheetId,title,gridProperties.rowCount)`)
       if (!meta.ok) throw new Error(`Failed to read spreadsheet metadata: ${meta.status} ${await meta.text()}`)
-      const data = await meta.json() as { sheets?: { properties?: { title?: string } }[] }
-      if (data.sheets?.some(s => s.properties?.title === PHOTO_TAB)) return false
+      const data = await meta.json() as { sheets?: TabMeta[] }
+      const found = data.sheets?.find(s => s.properties?.title === PHOTO_TAB)
+      if (found?.properties?.sheetId != null) {
+        tabId = found.properties.sheetId
+        return { created: false, rowCount: found.properties.gridProperties?.rowCount ?? 0 }
+      }
       const res = await sheetsRequest(`${sheetId}:batchUpdate`, {
         method: 'POST',
         body: JSON.stringify({
@@ -74,20 +90,29 @@ export function googlePhotoSheet(sheetId: string = RECREATE_SHEET_ID): PhotoShee
         }),
       })
       if (!res.ok) throw new Error(`Failed to create "${PHOTO_TAB}" tab: ${res.status} ${await res.text()}`)
-      return true
+      const reply = await res.json() as { replies?: { addSheet?: TabMeta }[] }
+      const added = reply.replies?.[0]?.addSheet?.properties
+      tabId = added?.sheetId ?? null
+      return { created: true, rowCount: added?.gridProperties?.rowCount ?? 0 }
     },
 
-    async appendRow(values) {
-      const range = encodeURIComponent(`${a1Tab(PHOTO_TAB)}!A:${columnLetter(values.length - 1)}`)
-      const res = await sheetsRequest(
-        `${sheetId}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
-        { method: 'POST', body: JSON.stringify({ values: [values] }) },
-      )
-      if (!res.ok) throw new Error(`Failed to append to "${PHOTO_TAB}": ${res.status} ${await res.text()}`)
-      const data = await res.json() as { updates?: { updatedRange?: string } }
-      const row = data.updates?.updatedRange?.match(/![A-Z]+(\d+)/)?.[1]
-      if (!row) throw new Error(`Append to "${PHOTO_TAB}" did not say which row it wrote`)
-      return Number(row)
+    async writeRow(rowNumber, values, rowCount) {
+      if (rowNumber > rowCount) {
+        if (tabId == null) throw new Error(`"${PHOTO_TAB}" tab id unknown — ensureTab first`)
+        const grow = await sheetsRequest(`${sheetId}:batchUpdate`, {
+          method: 'POST',
+          body: JSON.stringify({
+            requests: [{ appendDimension: { sheetId: tabId, dimension: 'ROWS', length: rowNumber - rowCount + 100 } }],
+          }),
+        })
+        if (!grow.ok) throw new Error(`Failed to add rows to "${PHOTO_TAB}": ${grow.status} ${await grow.text()}`)
+      }
+      const range = encodeURIComponent(`${a1Tab(PHOTO_TAB)}!A${rowNumber}:${columnLetter(values.length - 1)}${rowNumber}`)
+      const res = await sheetsRequest(`${sheetId}/values/${range}?valueInputOption=USER_ENTERED`, {
+        method: 'PUT',
+        body: JSON.stringify({ values: [values] }),
+      })
+      if (!res.ok) throw new Error(`Failed to write row ${rowNumber} of "${PHOTO_TAB}": ${res.status} ${await res.text()}`)
     },
   }
 }
@@ -136,7 +161,7 @@ export async function addPhotoRow(
 ): Promise<PhotoRowResult> {
   return serialized(async () => {
     const sheet = opts.sheet ?? googlePhotoSheet()
-    const created = await sheet.ensureTab()
+    const { created, rowCount } = await sheet.ensureTab()
     const rows = await sheet.readRows()
 
     const header = rows[0] ?? []
@@ -155,7 +180,10 @@ export async function addPhotoRow(
     const existing = rows.findIndex((r, i) => i > 0 && String(r[PHOTO_COL.image] ?? '').trim() === input.imageUrl)
     if (existing > 0) return { rowNumber: existing + 1, appended: false }
 
-    const rowNumber = await sheet.appendRow([input.imageUrl, PREVIEW_FORMULA, input.source, formatAdded(input.addedAt)])
+    // Below the last row that has a photo — the checkbox column is FALSE all the way down.
+    const lastWithPhoto = rows.reduce((last, r, i) => (i > 0 && String(r[PHOTO_COL.image] ?? '').trim() ? i : last), 0)
+    const rowNumber = lastWithPhoto + 2
+    await sheet.writeRow(rowNumber, [input.imageUrl, PREVIEW_FORMULA, input.source, formatAdded(input.addedAt)], rowCount)
     return { rowNumber, appended: true }
   })
 }

@@ -25,18 +25,19 @@ import {
 
 class MemoryTab implements PhotoSheet {
   exists = false
+  rowCount = 1000
   grid: string[][] = []
   validations: string[][] = []
-  appends = 0
+  writes = 0
   async ensureTab() {
-    if (this.exists) return false
+    if (this.exists) return { created: false, rowCount: this.rowCount }
     this.exists = true
-    return true
+    return { created: true, rowCount: this.rowCount }
   }
   async readRows() {
     // Like a real read: the answer reflects the tab when the request went out and
     // arrives a moment later — two unserialised clips would both see "no row yet".
-    const snapshot = this.grid.map(r => [...r])
+    const snapshot = Array.from(this.grid, r => Array.from(r ?? [], c => c ?? ''))
     await new Promise(r => setTimeout(r, 5))
     return snapshot
   }
@@ -50,11 +51,18 @@ class MemoryTab implements PhotoSheet {
   }
   async applyValidation(names: string[]) {
     this.validations.push(names)
+    // What Sheets reports once the checkbox rule is on: FALSE in column I of every row below the header.
+    for (let r = 1; r < this.rowCount; r++) {
+      const row = (this.grid[r] ??= [])
+      row[PHOTO_COL.send] ??= 'FALSE'
+    }
   }
-  async appendRow(values: string[]) {
-    this.appends++
-    this.grid.push([...values])
-    return this.grid.length
+  async writeRow(rowNumber: number, values: string[], rowCount: number) {
+    assert.equal(rowCount, this.rowCount, 'the caller passes the grid size ensureTab reported')
+    if (rowNumber > this.rowCount) this.rowCount = rowNumber + 100
+    this.writes++
+    const row = (this.grid[rowNumber - 1] ??= [])
+    values.forEach((v, i) => { row[i] = v })
   }
 }
 
@@ -67,11 +75,12 @@ describe('addPhotoRow', () => {
   it('first clip: creates the tab, writes the 14 headers, sets the dropdowns, adds A–D and leaves E–N empty', async () => {
     const tab = new MemoryTab()
     const got = await addPhotoRow(row('https://store/p1.jpg'), { characterNames: NAMES, sheet: tab })
-    assert.deepEqual(got, { rowNumber: 2, appended: true })
+    assert.deepEqual(got, { rowNumber: 2, appended: true }, 'row 2 — not below the FALSE checkboxes that fill the grid')
     assert.equal(tab.exists, true)
     assert.deepEqual(tab.grid[0], PHOTO_HEADERS)
-    assert.deepEqual(tab.grid[1], ['https://store/p1.jpg', PREVIEW_FORMULA, 'https://www.instagram.com/p/ABC123/', '2026-10-02 14:33 UTC'])
+    assert.deepEqual(tab.grid[1].slice(0, 4), ['https://store/p1.jpg', PREVIEW_FORMULA, 'https://www.instagram.com/p/ABC123/', '2026-10-02 14:33 UTC'])
     assert.equal(tab.grid[1][PHOTO_COL.character], undefined)
+    assert.equal(tab.grid[1][PHOTO_COL.send], 'FALSE', 'Pošalji stays an unticked checkbox')
     assert.deepEqual(tab.validations, [NAMES])
   })
 
@@ -80,7 +89,7 @@ describe('addPhotoRow', () => {
     await addPhotoRow(row('https://store/p1.jpg'), { characterNames: NAMES, sheet: tab })
     const again = await addPhotoRow(row('https://store/p1.jpg'), { characterNames: NAMES, sheet: tab })
     assert.deepEqual(again, { rowNumber: 2, appended: false })
-    assert.equal(tab.appends, 1)
+    assert.equal(tab.writes, 1)
     const third = await addPhotoRow(row('https://store/p2.jpg'), { characterNames: NAMES, sheet: tab })
     assert.deepEqual(third, { rowNumber: 3, appended: true })
   })
@@ -91,7 +100,7 @@ describe('addPhotoRow', () => {
       addPhotoRow(row('https://store/same.jpg'), { characterNames: NAMES, sheet: tab }),
       addPhotoRow(row('https://store/same.jpg'), { characterNames: NAMES, sheet: tab }),
     ])
-    assert.equal(tab.appends, 1)
+    assert.equal(tab.writes, 1)
     assert.deepEqual([a.rowNumber, b.rowNumber].sort(), [2, 2])
     assert.deepEqual([a.appended, b.appended].sort(), [false, true])
   })
@@ -111,6 +120,16 @@ describe('addPhotoRow', () => {
     await addPhotoRow(row('https://store/2.jpg'), { characterNames: NAMES, sheet: tab })
     await addPhotoRow(row('https://store/3.jpg'), { characterNames: [...NAMES, 'Tiana Goth'], sheet: tab })
     assert.deepEqual(tab.validations, [NAMES, [...NAMES, 'Tiana Goth']])
+  })
+
+  it('a full grid grows instead of failing', async () => {
+    const tab = new MemoryTab()
+    tab.exists = true
+    tab.rowCount = 3
+    tab.grid = [[...PHOTO_HEADERS], ['https://store/a.jpg'], ['https://store/b.jpg']]
+    const got = await addPhotoRow(row('https://store/c.jpg'), { characterNames: NAMES, sheet: tab })
+    assert.deepEqual(got, { rowNumber: 4, appended: true })
+    assert.equal(tab.rowCount, 104)
   })
 
   it('formats the time as plain UTC text', () => {
@@ -154,11 +173,13 @@ describe('googlePhotoSheet requests', () => {
   })
   beforeEach(() => { calls.length = 0 })
 
-  const meta = (...titles: string[]) => Response.json({ sheets: titles.map((title, i) => ({ properties: { sheetId: i + 10, title } })) })
+  const meta = (...titles: string[]) => Response.json({ sheets: titles.map((title, i) => ({ properties: { sheetId: i + 10, title, gridProperties: { rowCount: 1000 } } })) })
 
   it('creates the tab only when it is missing', async () => {
-    respond = () => meta('Sheet1')
-    assert.equal(await googlePhotoSheet(SHEET).ensureTab(), true)
+    respond = (url, method) => method === 'POST'
+      ? Response.json({ replies: [{ addSheet: { properties: { sheetId: 77, title: 'Photo Replicator', gridProperties: { rowCount: 1000 } } } }] })
+      : meta('Sheet1')
+    assert.deepEqual(await googlePhotoSheet(SHEET).ensureTab(), { created: true, rowCount: 1000 })
     assert.deepEqual(calls[1], {
       method: 'POST',
       url: `${base}:batchUpdate`,
@@ -166,24 +187,35 @@ describe('googlePhotoSheet requests', () => {
     })
     calls.length = 0
     respond = () => meta('Sheet1', 'Photo Replicator')
-    assert.equal(await googlePhotoSheet(SHEET).ensureTab(), false)
+    assert.deepEqual(await googlePhotoSheet(SHEET).ensureTab(), { created: false, rowCount: 1000 })
     assert.equal(calls.length, 1, 'only the metadata read')
+    assert.equal(calls[0].url, `${base}?fields=sheets.properties(sheetId,title,gridProperties.rowCount)`)
   })
 
-  it('reads A1:N of the quoted tab, appends with formulas evaluated, and returns the row', async () => {
-    respond = (url) => url.includes(':append')
-      ? Response.json({ updates: { updatedRange: "'Photo Replicator'!A7:D7" } })
-      : Response.json({ values: [PHOTO_HEADERS] })
+  it('reads A1:N of the quoted tab and writes a row at an explicit row, formulas evaluated', async () => {
+    respond = (url) => url.includes('?fields=') ? meta('Sheet1', 'Photo Replicator') : Response.json({ values: [PHOTO_HEADERS] })
     const io = googlePhotoSheet(SHEET)
     await io.readRows()
-    const rowNumber = await io.appendRow(['https://store/p.jpg', PREVIEW_FORMULA, 'https://www.instagram.com/p/X/', '2026-10-02 14:33 UTC'])
-    assert.equal(rowNumber, 7)
+    await io.writeRow(7, ['https://store/p.jpg', PREVIEW_FORMULA, 'https://www.instagram.com/p/X/', '2026-10-02 14:33 UTC'], 1000)
     assert.equal(calls[0].url, `${base}/values/'Photo%20Replicator'!A1%3AN`)
     assert.deepEqual(calls[1], {
-      method: 'POST',
-      url: `${base}/values/'Photo%20Replicator'!A%3AD:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+      method: 'PUT',
+      url: `${base}/values/'Photo%20Replicator'!A7%3AD7?valueInputOption=USER_ENTERED`,
       body: { values: [['https://store/p.jpg', PREVIEW_FORMULA, 'https://www.instagram.com/p/X/', '2026-10-02 14:33 UTC']] },
     })
+  })
+
+  it('past the end of the grid it adds rows first, on this tab', async () => {
+    respond = (url) => url.includes('?fields=') ? meta('Sheet1', 'Photo Replicator') : Response.json({})
+    const io = googlePhotoSheet(SHEET)
+    const { rowCount } = await io.ensureTab()
+    await io.writeRow(rowCount + 1, ['u', PREVIEW_FORMULA, 's', 't'], rowCount)
+    assert.deepEqual(calls[1], {
+      method: 'POST',
+      url: `${base}:batchUpdate`,
+      body: { requests: [{ appendDimension: { sheetId: 11, dimension: 'ROWS', length: 101 } }] },
+    })
+    assert.equal(calls[2].method, 'PUT')
   })
 
   it('dropdowns: Pošalji checkbox (I), Karakter (E), Format (F), Slajdova (G) — on this tab only', async () => {
@@ -208,10 +240,7 @@ describe('googlePhotoSheet requests', () => {
 
   it('a whole clip never sends a request about Sheet1', async () => {
     resetPhotoSheetState()
-    respond = (url) => url.includes('?fields=') ? meta('Sheet1', 'Photo Replicator')
-      : url.includes(':append') ? Response.json({ updates: { updatedRange: "'Photo Replicator'!A2:D2" } })
-      : url.includes('/values/') ? Response.json({})
-      : Response.json({})
+    respond = (url) => url.includes('?fields=') ? meta('Sheet1', 'Photo Replicator') : Response.json({})
     const got = await addPhotoRow(row('https://store/z.jpg'), { characterNames: NAMES, sheet: googlePhotoSheet(SHEET) })
     assert.deepEqual(got, { rowNumber: 2, appended: true })
     const sent = JSON.stringify(calls)
