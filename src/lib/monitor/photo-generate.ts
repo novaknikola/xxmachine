@@ -19,6 +19,7 @@ import { composeStillPrompt, getCharacter } from '@/lib/content-ops/characters'
 import { sendMediaGroup, sendPhoto, sendTextWithKeyboard } from '@/lib/telegram'
 import { notifyMonitorUser } from './notify'
 import { renderWanStillPrompt } from './wan-jobs'
+import { photoUpgradeEnabled, upgradePhotoSource } from './photo-source-upgrade'
 import {
   MAX_PHOTO_GENERATIONS,
   getPhotoJob,
@@ -155,6 +156,18 @@ export async function runPhotoGeneration(
     const skinSize = PHOTO_SKIN_SIZE[aspect]
     const additions = composeStillPrompt(character.wan_prompt, job.prompt_addition)
     const basePrompt = renderWanStillPrompt(additions)
+    // 2D: a sharper copy of the same photo, decided once per job; never blocks or fails it.
+    if (photoUpgradeEnabled() && !job.resolved_source_url && !job.source_note) {
+      const upgrade = await upgradePhotoSource(job)
+      await query(
+        `UPDATE photo_replicator_jobs SET resolved_source_url = $2, source_note = $3, updated_at = now() WHERE id = $1`,
+        [jobId, upgrade.url, upgrade.note],
+      )
+      job.resolved_source_url = upgrade.url
+      job.source_note = upgrade.note
+      console.log(`[photo-generate] job ${jobId} source: ${upgrade.note}`)
+      await opts.heartbeat?.()
+    }
     const source = job.resolved_source_url ?? job.source_url
 
     const base = await editImage({
