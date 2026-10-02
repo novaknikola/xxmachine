@@ -47,16 +47,40 @@ const STATUS_BY_CODE: Record<PhotoSourceError['code'], number> = {
   STORAGE_FAILED: 502,
 }
 
+/** An Instagram carousel holds at most 20 slides. */
+const MAX_CAROUSEL_SLIDE = 20
+
+/** The carousel slide (?img_index=N) an Instagram URL names, when N is a real slide number. */
+function slideIndex(raw: string): number | null {
+  try {
+    const s = raw.trim()
+    const value = new URL(/^https?:\/\//i.test(s) ? s : `https://${s}`).searchParams.get('img_index')
+    if (!value || !/^\d{1,2}$/.test(value)) return null
+    const n = Number(value)
+    return n >= 1 && n <= MAX_CAROUSEL_SLIDE ? n : null
+  } catch {
+    return null
+  }
+}
+
 /**
  * What the Izvor column shows: the post's permalink when the Clipper found one
  * (or the page is the post), otherwise the page without its query string.
+ * The permalink keeps one thing from the query: ?img_index=N, the carousel
+ * slide that was on screen, when Instagram put it there — in the link itself
+ * or in the page URL of that same post.
  */
 export function photoSourceLink(permalink: unknown, pageUrl: unknown): string {
   for (const raw of [permalink, pageUrl]) {
     if (typeof raw !== 'string' || !raw.trim()) continue
     const parsed = parseReelUrl(raw, { allowBareShortcode: false })
+    if (!parsed) continue
     // /p/ opens photos and reels alike; the parser itself always writes /reel/.
-    if (parsed) return `https://www.instagram.com/p/${parsed.shortCode}/`
+    const link = `https://www.instagram.com/p/${parsed.shortCode}/`
+    const page = typeof pageUrl === 'string' ? pageUrl : ''
+    const samePost = parseReelUrl(page, { allowBareShortcode: false })?.shortCode === parsed.shortCode
+    const slide = slideIndex(raw) ?? (samePost ? slideIndex(page) : null)
+    return slide ? `${link}?img_index=${slide}` : link
   }
   if (typeof pageUrl !== 'string') return ''
   try {
