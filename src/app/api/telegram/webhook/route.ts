@@ -604,6 +604,19 @@ export async function POST(req: NextRequest) {
 
     const [action, postId] = data.split(':')
 
+    // ── Photo Replicator preview: phok / phre / phno:<job id>:<attempt> ────
+    // photo-approval.ts: one conditional UPDATE per tap, like wanok below.
+    if (action === 'phok' || action === 'phre' || action === 'phno') {
+      const { handlePhotoApproval } = await import('@/lib/monitor/photo-approval')
+      await handlePhotoApproval({
+        callbackId,
+        data,
+        chatId: cbMessage?.chat?.id as number | undefined,
+        messageId: cbMessage?.message_id as number | undefined,
+      })
+      return NextResponse.json({ ok: true })
+    }
+
     // ── Scene still approval: wanok / wanre / wanno ────────────────────────
     // Each claim is a single conditional UPDATE, so a double tap or a
     // redelivered callback cannot start Wan (or a regeneration) twice.

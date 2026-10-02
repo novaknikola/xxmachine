@@ -10,6 +10,7 @@ import { syncPoseLibraryFromPinterest, reapStaleAdhocJobs } from '@/lib/pose-rec
 import { notifyMonitorUser } from '@/lib/monitor/notify'
 import { refreshDueTokens } from '@/lib/instagram/tokens'
 import { syncViralSheet } from '@/lib/monitor/viral-sheet'
+import { runPhotoReplicatorTick } from '@/lib/monitor/photo-sync'
 
 const CRON_SECRET = process.env.CRON_SECRET
 const QUEUE_CONCURRENCY = 2
@@ -162,7 +163,7 @@ export async function GET(req: NextRequest) {
         AND attempts < max_attempts
         AND job_type NOT IN ('comfyui_pod_bulk', 'my_pod_i2v', 'my_pod_animate', 'my_pod_talk',
                              'copy_paste_v2', 'copy_paste_finish', 'copy_paste_wan', 'copy_prompts_generate', 'seedance_i2v', 'infinite_talk',
-                             'kling_recreate_v1')`,
+                             'kling_recreate_v1', 'photo_replicator')`,
   ).catch(err => console.error('[cron/tick] reset stuck queue jobs:', err))
 
   // copy_paste_v2 and copy_prompts_generate write progressAt after every batch.
@@ -192,8 +193,12 @@ export async function GET(req: NextRequest) {
   // 2026-09-20, twice in one hour) has no business sitting undetected for an
   // hour. 15 minutes gives real generations plenty of room without leaving a
   // person watching a dead job for nearly an hour before this sweep says so.
+  //
+  // photo_replicator (Photo Replicator, photo-generate.ts) heartbeats after
+  // every slide; a 3-slide carousel is a few Seedream + Z-Image calls, so 20
+  // minutes without one means the worker died.
   const staleThreshold = (jobType: string) =>
-    jobType === 'copy_paste_wan' ? '15 minutes' : '60 minutes'
+    jobType === 'copy_paste_wan' ? '15 minutes' : jobType === 'photo_replicator' ? '20 minutes' : '60 minutes'
   const staleErrorFor = (jobType: string) =>
     `Job stalled — no progress for ${staleThreshold(jobType)}. Check WaveSpeed usage before resubmitting; the original call may have already billed.`
   try {
@@ -201,11 +206,13 @@ export async function GET(req: NextRequest) {
       `SELECT id, user_id, job_type FROM generation_queue
         WHERE status = 'processing'
           AND job_type IN ('copy_paste_v2', 'copy_paste_finish', 'copy_paste_wan', 'copy_prompts_generate', 'seedance_i2v', 'infinite_talk',
-                           'kling_recreate_v1')
+                           'kling_recreate_v1', 'photo_replicator')
           AND COALESCE(
                 NULLIF(output->>'progressAt', '')::timestamptz,
                 started_at
-              ) < now() - (CASE WHEN job_type = 'copy_paste_wan' THEN interval '15 minutes' ELSE interval '60 minutes' END)`,
+              ) < now() - (CASE WHEN job_type = 'copy_paste_wan' THEN interval '15 minutes'
+                                WHEN job_type = 'photo_replicator' THEN interval '20 minutes'
+                                ELSE interval '60 minutes' END)`,
     )
     for (const job of staleJobs) {
       const STALE_JOB_ERROR = staleErrorFor(job.job_type)
@@ -221,6 +228,11 @@ export async function GET(req: NextRequest) {
           const { failStaleWanItems } = await import('@/lib/monitor/wan-jobs')
           await failStaleWanItems(job.id, STALE_JOB_ERROR)
             .catch(err => console.error('[cron/tick] fail stale wan items:', err))
+        }
+        if (job.job_type === 'photo_replicator') {
+          const { failStalePhotoJob } = await import('@/lib/monitor/photo-jobs')
+          await failStalePhotoJob(job.id, STALE_JOB_ERROR)
+            .catch(err => console.error('[cron/tick] fail stale photo job:', err))
         }
         if (job.job_type === 'kling_recreate_v1') {
           const rec = await one<{ chat_id: string | number | null; sheet_row: number | null; source_label: string | null }>(
@@ -500,6 +512,16 @@ export async function GET(req: NextRequest) {
     viralSheet = { error: err instanceof Error ? err.message : String(err) }
   }
 
+  // ── Photo Replicator tab → photo jobs (behind PHOTO_REPLICATOR_SYNC_ENABLED) ──
+  // Drive archive progress first (DB only), then ticked rows and the J–N write-back.
+  let photoReplicator: Awaited<ReturnType<typeof runPhotoReplicatorTick>> | { error: string } | 'skipped' = 'skipped'
+  try {
+    photoReplicator = await runPhotoReplicatorTick()
+  } catch (err) {
+    console.error('[cron/tick] photo replicator sync error:', err)
+    photoReplicator = { error: err instanceof Error ? err.message : String(err) }
+  }
+
   // ── Google Drive auto-archive uploads ─────────────────────────
   let driveArchive: Awaited<ReturnType<typeof processDriveExports>> | { error: string } = {
     processed: 0,
@@ -530,6 +552,7 @@ export async function GET(req: NextRequest) {
     monitor: monitorScans,
     driveArchive,
     viralSheet,
+    photoReplicator,
     autoSchedule: 'fire-and-forget — not awaited, check logs for its own [auto-schedule] lines',
   })
 }

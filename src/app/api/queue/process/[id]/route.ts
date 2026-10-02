@@ -1703,6 +1703,29 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ ok: true, done: doneCount })
     }
 
+    // ── photo_replicator — one generation of a Photo Replicator job ─────────
+    // photo-generate.ts claims the job (queued → generating) before anything is
+    // billed, so a duplicate queue job finds nothing to do. Queued with
+    // max_attempts = 1: a failure is final here and a person re-ticks the row.
+    if (job.job_type === 'photo_replicator') {
+      const { photoJobId } = (job.input ?? {}) as { photoJobId?: string }
+      if (!photoJobId) throw new Error('No photo job in input')
+      const { runPhotoGeneration } = await import('@/lib/monitor/photo-generate')
+      const heartbeat = () => query(
+        `UPDATE generation_queue SET output = jsonb_build_object('progressAt', $2::text) WHERE id = $1`,
+        [id, new Date().toISOString()],
+      )
+      const generated = await runPhotoGeneration(photoJobId, job.user_id, { heartbeat })
+      await query(
+        `UPDATE generation_queue
+            SET status='done', finished_at=now(), progress=100, done_items=1,
+                output=jsonb_build_object('photoJobId', $2::text, 'attempt', $3::int, 'urls', $4::jsonb, 'previewSent', $5::boolean)
+          WHERE id=$1 AND status='processing'`,
+        [id, photoJobId, generated.attempt, JSON.stringify(generated.slides.map(s => s.url)), generated.previewSent],
+      )
+      return NextResponse.json({ ok: true, photoJobId, attempt: generated.attempt })
+    }
+
     // ── infinite_talk — still + Fish voice-over → talking clip ─────────────
     if (job.job_type === 'infinite_talk') {
       const { items, voiceId, style, resolution, prompt, folderName } =

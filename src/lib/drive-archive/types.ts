@@ -10,6 +10,8 @@ export type DriveArchiveSourceType =
   | 'queue_job'
   /** Pins saved straight to stories from an imported board — no generation involved. */
   | 'pinterest_pin'
+  /** An approved Photo Replicator result; source_id is the photo_replicator_jobs id. */
+  | 'photo_replicator'
 
 export interface EnqueueDriveArchiveInput {
   userId: string

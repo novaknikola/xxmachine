@@ -52,6 +52,32 @@ export async function sendVideo(
   })
 }
 
+/** Text with an inline keyboard — e.g. the Approve buttons under an album, which can't carry any itself. */
+export async function sendTextWithKeyboard(chatId: string | number, text: string, replyMarkup: object) {
+  return call('sendMessage', {
+    chat_id: chatId,
+    text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+    reply_markup: replyMarkup,
+  })
+}
+
+/** 2–10 photos as one album, in order. Returns the sent messages. */
+export async function sendMediaGroup(
+  chatId: string | number,
+  photos: { url: string; caption?: string }[],
+): Promise<{ message_id: number }[]> {
+  return call('sendMediaGroup', {
+    chat_id: chatId,
+    media: photos.map(p => ({
+      type: 'photo',
+      media: p.url,
+      ...(p.caption ? { caption: p.caption, parse_mode: 'HTML' } : {}),
+    })),
+  })
+}
+
 export async function editMessageReplyMarkup(
   chatId: string | number,
   messageId: number,

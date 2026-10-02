@@ -105,7 +105,7 @@ export function errorText(code: WanErrorCode | null, message: string | null): st
 }
 
 /** The owner account — its Telegram gets the stills, its characters fill the dropdown. */
-async function resolveOwner(): Promise<{ id: string; telegram_chat_id: string | null } | null> {
+export async function resolveOwner(): Promise<{ id: string; telegram_chat_id: string | null } | null> {
   const email = process.env.OWNER_EMAIL
   if (!email) return null
   return await one<{ id: string; telegram_chat_id: string | null }>(
