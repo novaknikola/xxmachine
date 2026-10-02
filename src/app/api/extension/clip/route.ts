@@ -2,6 +2,7 @@ import { createHash } from 'crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { one, query } from '@/lib/db'
 import { requireApiToken } from '@/lib/api-token'
+import { clipToPhotoReplicator, PHOTO_REPLICATOR_TARGET } from '@/lib/monitor/photo-clip'
 
 const DEFAULT_BOARD_KEY = 'browser-clips'
 const MAX_IMAGES_PER_REQUEST = 200
@@ -64,6 +65,14 @@ export async function POST(req: NextRequest) {
     folder?: string
     pageUrl?: string
     title?: string
+    /** 'photo-replicator' = the Clipper's "→ Photo Replicator" menu; absent = Copy Prompts, as before. */
+    target?: string
+    permalink?: string
+  }
+
+  if (body.target === PHOTO_REPLICATOR_TARGET) {
+    const result = await clipToPhotoReplicator(auth, body)
+    return NextResponse.json(result.body, { status: result.status })
   }
 
   const rawUrls = Array.isArray(body.imageUrls)

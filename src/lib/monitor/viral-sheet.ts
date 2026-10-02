@@ -348,7 +348,7 @@ async function findLiveSheetJob(userId: string, failedJobId: string): Promise<Sh
 
 const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets'
 
-async function sheetsRequest(path: string, init: RequestInit = {}): Promise<Response> {
+export async function sheetsRequest(path: string, init: RequestInit = {}): Promise<Response> {
   const accessToken = await getGoogleAccessToken(SHEETS_SCOPE)
   return fetch(`https://sheets.googleapis.com/v4/spreadsheets/${path}`, {
     ...init,
@@ -356,13 +356,37 @@ async function sheetsRequest(path: string, init: RequestInit = {}): Promise<Resp
   })
 }
 
-export function googleSheetIO(sheetId: string = RECREATE_SHEET_ID): SheetIO {
+/** Which tab a SheetIO works on, and which of its columns get a checkbox or a dropdown (0-based). */
+export interface SheetLayout {
+  tab: string
+  /** readRows covers A1 to this column. */
+  lastColumn: string
+  checkboxColumns: number[]
+  /** Filled with the character names applyValidation is given. */
+  characterColumn: number
+  fixedDropdowns?: { column: number; values: string[] }[]
+}
+
+export const VIRAL_LAYOUT: SheetLayout = {
+  tab: VIRAL_TAB,
+  lastColumn: columnLetter(COL.result),
+  checkboxColumns: [COL.send],
+  characterColumn: COL.character,
+}
+
+/** A1 notation needs quotes around a tab name with spaces or punctuation ("Sheet1" stays bare). */
+export function a1Tab(tab: string): string {
+  return /^[A-Za-z0-9_]+$/.test(tab) ? tab : `'${tab.replace(/'/g, "''")}'`
+}
+
+export function googleSheetIO(sheetId: string = RECREATE_SHEET_ID, layout: SheetLayout = VIRAL_LAYOUT): SheetIO {
   let tabId: number | null = null
+  const tab = layout.tab
 
   return {
     async readRows() {
-      const res = await sheetsRequest(`${sheetId}/values/${encodeURIComponent(`${VIRAL_TAB}!A1:P`)}`)
-      if (!res.ok) throw new Error(`Failed to read "${VIRAL_TAB}": ${res.status} ${await res.text()}`)
+      const res = await sheetsRequest(`${sheetId}/values/${encodeURIComponent(`${a1Tab(tab)}!A1:${layout.lastColumn}`)}`)
+      if (!res.ok) throw new Error(`Failed to read "${tab}": ${res.status} ${await res.text()}`)
       const data = await res.json() as { values?: string[][] }
       return data.values ?? []
     },
@@ -376,7 +400,7 @@ export function googleSheetIO(sheetId: string = RECREATE_SHEET_ID): SheetIO {
           data: updates.map(u => ({ range: u.a1, values: [[u.value]] })),
         }),
       })
-      if (!res.ok) throw new Error(`Failed to write "${VIRAL_TAB}": ${res.status} ${await res.text()}`)
+      if (!res.ok) throw new Error(`Failed to write "${tab}": ${res.status} ${await res.text()}`)
     },
 
     async applyValidation(characterNames) {
@@ -384,28 +408,28 @@ export function googleSheetIO(sheetId: string = RECREATE_SHEET_ID): SheetIO {
         const meta = await sheetsRequest(`${sheetId}?fields=sheets.properties(sheetId,title)`)
         if (!meta.ok) throw new Error(`Failed to read spreadsheet metadata: ${meta.status} ${await meta.text()}`)
         const data = await meta.json() as { sheets?: { properties?: { sheetId?: number; title?: string } }[] }
-        const tab = data.sheets?.find(s => s.properties?.title === VIRAL_TAB)
-        if (tab?.properties?.sheetId == null) throw new Error(`Tab "${VIRAL_TAB}" not found`)
-        tabId = tab.properties.sheetId
+        const found = data.sheets?.find(s => s.properties?.title === tab)
+        if (found?.properties?.sheetId == null) throw new Error(`Tab "${tab}" not found`)
+        tabId = found.properties.sheetId
       }
       const column = (col: number) => ({ sheetId: tabId, startRowIndex: 1, startColumnIndex: col, endColumnIndex: col + 1 })
-      const requests: unknown[] = [{
-        setDataValidation: { range: column(COL.send), rule: { condition: { type: 'BOOLEAN' } } },
-      }]
-      if (characterNames.length) {
-        requests.push({
-          setDataValidation: {
-            range: column(COL.character),
-            rule: {
-              condition: { type: 'ONE_OF_LIST', values: characterNames.map(userEnteredValue => ({ userEnteredValue })) },
-              strict: true,
-              showCustomUi: true,
-            },
+      const dropdown = (col: number, values: string[]) => ({
+        setDataValidation: {
+          range: column(col),
+          rule: {
+            condition: { type: 'ONE_OF_LIST', values: values.map(userEnteredValue => ({ userEnteredValue })) },
+            strict: true,
+            showCustomUi: true,
           },
-        })
-      }
+        },
+      })
+      const requests: unknown[] = layout.checkboxColumns.map(col => ({
+        setDataValidation: { range: column(col), rule: { condition: { type: 'BOOLEAN' } } },
+      }))
+      if (characterNames.length) requests.push(dropdown(layout.characterColumn, characterNames))
+      for (const d of layout.fixedDropdowns ?? []) requests.push(dropdown(d.column, d.values))
       const res = await sheetsRequest(`${sheetId}:batchUpdate`, { method: 'POST', body: JSON.stringify({ requests }) })
-      if (!res.ok) throw new Error(`Failed to set "${VIRAL_TAB}" dropdowns: ${res.status} ${await res.text()}`)
+      if (!res.ok) throw new Error(`Failed to set "${tab}" dropdowns: ${res.status} ${await res.text()}`)
     },
   }
 }

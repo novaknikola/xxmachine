@@ -4,7 +4,7 @@ function storageUrl(path: string) {
   return `${process.env.SUPABASE_URL}/storage/v1/object/${BUCKET}/${path}`
 }
 
-function publicUrl(path: string) {
+export function publicUrl(path: string) {
   return `${process.env.SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${path}`
 }
 

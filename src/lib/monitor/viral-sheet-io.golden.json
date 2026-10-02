@@ -1,0 +1,260 @@
+{
+  "calls": [
+    {
+      "method": "GET",
+      "url": "https://sheets.googleapis.com/v4/spreadsheets/golden-sheet/values/Sheet1!A1%3AP",
+      "headers": {
+        "Authorization": "Bearer golden-token",
+        "Content-Type": "application/json"
+      },
+      "body": null
+    },
+    {
+      "method": "POST",
+      "url": "https://sheets.googleapis.com/v4/spreadsheets/golden-sheet/values:batchUpdate",
+      "headers": {
+        "Authorization": "Bearer golden-token",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "valueInputOption": "RAW",
+        "data": [
+          {
+            "range": "Sheet1!K2",
+            "values": [
+              [
+                false
+              ]
+            ]
+          },
+          {
+            "range": "Sheet1!L2",
+            "values": [
+              [
+                "◷ U redu"
+              ]
+            ]
+          },
+          {
+            "range": "Sheet1!O2",
+            "values": [
+              [
+                1234
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "url": "https://sheets.googleapis.com/v4/spreadsheets/golden-sheet?fields=sheets.properties(sheetId,title)",
+      "headers": {
+        "Authorization": "Bearer golden-token",
+        "Content-Type": "application/json"
+      },
+      "body": null
+    },
+    {
+      "method": "POST",
+      "url": "https://sheets.googleapis.com/v4/spreadsheets/golden-sheet:batchUpdate",
+      "headers": {
+        "Authorization": "Bearer golden-token",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "requests": [
+          {
+            "setDataValidation": {
+              "range": {
+                "sheetId": 42,
+                "startRowIndex": 1,
+                "startColumnIndex": 10,
+                "endColumnIndex": 11
+              },
+              "rule": {
+                "condition": {
+                  "type": "BOOLEAN"
+                }
+              }
+            }
+          },
+          {
+            "setDataValidation": {
+              "range": {
+                "sheetId": 42,
+                "startRowIndex": 1,
+                "startColumnIndex": 9,
+                "endColumnIndex": 10
+              },
+              "rule": {
+                "condition": {
+                  "type": "ONE_OF_LIST",
+                  "values": [
+                    {
+                      "userEnteredValue": "Tiana Goth"
+                    },
+                    {
+                      "userEnteredValue": "Diana Normal"
+                    }
+                  ]
+                },
+                "strict": true,
+                "showCustomUi": true
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "url": "https://sheets.googleapis.com/v4/spreadsheets/golden-sheet:batchUpdate",
+      "headers": {
+        "Authorization": "Bearer golden-token",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "requests": [
+          {
+            "setDataValidation": {
+              "range": {
+                "sheetId": 42,
+                "startRowIndex": 1,
+                "startColumnIndex": 10,
+                "endColumnIndex": 11
+              },
+              "rule": {
+                "condition": {
+                  "type": "BOOLEAN"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "url": "https://sheets.googleapis.com/v4/spreadsheets/1nzHi3xWy3yzjXVyvDPC79W15f76OobVHgdtNa69uF1E/values/Sheet1!A1%3AP",
+      "headers": {
+        "Authorization": "Bearer golden-token",
+        "Content-Type": "application/json"
+      },
+      "body": null
+    },
+    {
+      "method": "GET",
+      "url": "https://sheets.googleapis.com/v4/spreadsheets/golden-sheet/values/Sheet1!A1%3AP",
+      "headers": {
+        "Authorization": "Bearer golden-token",
+        "Content-Type": "application/json"
+      },
+      "body": null
+    },
+    {
+      "method": "POST",
+      "url": "https://sheets.googleapis.com/v4/spreadsheets/golden-sheet/values:batchUpdate",
+      "headers": {
+        "Authorization": "Bearer golden-token",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "valueInputOption": "RAW",
+        "data": [
+          {
+            "range": "Sheet1!K3",
+            "values": [
+              [
+                true
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "url": "https://sheets.googleapis.com/v4/spreadsheets/golden-sheet?fields=sheets.properties(sheetId,title)",
+      "headers": {
+        "Authorization": "Bearer golden-token",
+        "Content-Type": "application/json"
+      },
+      "body": null
+    },
+    {
+      "method": "GET",
+      "url": "https://sheets.googleapis.com/v4/spreadsheets/golden-sheet?fields=sheets.properties(sheetId,title)",
+      "headers": {
+        "Authorization": "Bearer golden-token",
+        "Content-Type": "application/json"
+      },
+      "body": null
+    },
+    {
+      "method": "GET",
+      "url": "https://sheets.googleapis.com/v4/spreadsheets/golden-sheet?fields=sheets.properties(sheetId,title)",
+      "headers": {
+        "Authorization": "Bearer golden-token",
+        "Content-Type": "application/json"
+      },
+      "body": null
+    },
+    {
+      "method": "POST",
+      "url": "https://sheets.googleapis.com/v4/spreadsheets/golden-sheet:batchUpdate",
+      "headers": {
+        "Authorization": "Bearer golden-token",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "requests": [
+          {
+            "setDataValidation": {
+              "range": {
+                "sheetId": 42,
+                "startRowIndex": 1,
+                "startColumnIndex": 10,
+                "endColumnIndex": 11
+              },
+              "rule": {
+                "condition": {
+                  "type": "BOOLEAN"
+                }
+              }
+            }
+          },
+          {
+            "setDataValidation": {
+              "range": {
+                "sheetId": 42,
+                "startRowIndex": 1,
+                "startColumnIndex": 9,
+                "endColumnIndex": 10
+              },
+              "rule": {
+                "condition": {
+                  "type": "ONE_OF_LIST",
+                  "values": [
+                    {
+                      "userEnteredValue": "A"
+                    }
+                  ]
+                },
+                "strict": true,
+                "showCustomUi": true
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "errors": [
+    "Failed to read \"Sheet1\": 500 boom",
+    "Failed to write \"Sheet1\": 500 boom",
+    "Failed to read spreadsheet metadata: 500 boom",
+    "Tab \"Sheet1\" not found",
+    "Failed to set \"Sheet1\" dropdowns: 400 bad request"
+  ]
+}
