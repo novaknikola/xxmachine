@@ -7,7 +7,7 @@ import {
   type DriveArchiveKind,
   type DriveArchiveStage,
 } from './content-format'
-import { archiveDateKey, characterDriveFolderName, sanitizeDriveKey } from './paths'
+import { archiveDateKey, characterDriveFolderName, sanitizeDriveKey, sanitizeDriveSection } from './paths'
 import { sanitizeArchiveLabel } from './label'
 import type { PoolClient } from 'pg'
 
@@ -79,6 +79,8 @@ export function archiveFolderPaths(opts: {
   dateKey?: string | null
   /** Per-set subfolder under the date folder (one carousel). '' = flat, as before. */
   seriesFolder?: string | null
+  /** Folder above the character (e.g. IGreplicator). '' = character at the root, as before. */
+  section?: string | null
 }) {
   const characterKey = sanitizeDriveKey(opts.characterKey)
   const stage = normalizeDriveStage(opts.stage)
@@ -93,7 +95,8 @@ export function archiveFolderPaths(opts: {
   })()
 
   const girlName = characterDriveFolderName(characterKey)
-  const girlPath = girlName
+  const sectionName = sanitizeDriveSection(opts.section)
+  const girlPath = sectionName ? `${sectionName}/${girlName}` : girlName
   const formatPath = `${girlPath}/${formatName}`
   const stagePath = `${formatPath}/${stage}`
   const dayPath = `${stagePath}/${dateKey}`
@@ -101,7 +104,7 @@ export function archiveFolderPaths(opts: {
   const leafPath = seriesName ? `${dayPath}/${seriesName}` : dayPath
 
   return {
-    characterKey, stage, dateKey, formatName, kindCache, seriesName,
+    characterKey, stage, dateKey, formatName, kindCache, seriesName, sectionName,
     girlName, girlPath, formatPath, stagePath, dayPath, leafPath,
   }
 }
@@ -115,6 +118,7 @@ export async function resolveArchiveFolder(opts: {
   accessToken: string
   rootFolderId?: string | null
   seriesFolder?: string | null
+  section?: string | null
 }): Promise<string> {
   const p = archiveFolderPaths(opts)
   const { characterKey, stage, dateKey, formatName, kindCache, girlName } = p
@@ -169,10 +173,26 @@ export async function resolveArchiveFolder(opts: {
         )
       }
 
+      // The section folder is shared by every character in it, so it is found
+      // by name and reused — unlike a character root, which is always fresh.
+      const parentOfCharacter = p.sectionName
+        ? await ensureCachedSegment(client, {
+            userId: opts.userId,
+            path: p.sectionName,
+            parentId: rootId,
+            name: p.sectionName,
+            accessToken: opts.accessToken,
+            characterKey: '_section',
+            kind: kindCache,
+            stage: '_',
+            dateKey: '_',
+          })
+        : rootId
+
       const characterFolderId = await ensureCachedSegment(client, {
         userId: opts.userId,
         path: girlPath,
-        parentId: rootId,
+        parentId: parentOfCharacter,
         name: girlName,
         accessToken: opts.accessToken,
         characterKey,

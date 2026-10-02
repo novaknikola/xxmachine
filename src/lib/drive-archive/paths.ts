@@ -7,6 +7,15 @@ export { sanitizeArchiveLabel } from './label'
 
 const RESERVED_KEYS = new Set(['_none', '_default', '_unsorted'])
 
+/** Replicator output lives in its own section: XXMachine Archives/IGreplicator/<character>/… */
+export const IGREPLICATOR_DRIVE_SECTION = 'IGreplicator'
+
+/** Section folder names are shown as typed; anything else collapses to '' (no section). */
+export function sanitizeDriveSection(raw: string | null | undefined): string {
+  const s = (raw ?? '').trim()
+  return /^[A-Za-z0-9_-]{1,40}$/.test(s) ? s : ''
+}
+
 /**
  * Safe folder/file segment: lowercase, alphanumeric + hyphen/underscore.
  * Preserves reserved keys (_none, _default). Maps legacy "none" → _none.

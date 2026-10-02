@@ -215,6 +215,8 @@ export interface VideoRepurposeJobInput {
   outputDriveFolderId?: string | null
   /** Absent (older rows) means true. False for API clients that poll instead. */
   notifyTelegram?: boolean
+  /** Archive section folder above the character (e.g. IGreplicator). */
+  driveSection?: string | null
 }
 
 export interface ImageRepurposeJobInput {
