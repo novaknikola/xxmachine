@@ -1703,6 +1703,28 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ ok: true, done: doneCount })
     }
 
+    // ── content_ops_image_repurpose — the farm's per-account image variants ──
+    // content-ops/image-repurpose.ts: ffmpeg only, nothing billed; resumes from done_items.
+    if (job.job_type === 'content_ops_image_repurpose') {
+      const { runFarmImageRepurpose } = await import('@/lib/content-ops/image-repurpose')
+      const { sets, cancelled } = await runFarmImageRepurpose({
+        queueJobId: id,
+        userId: job.user_id,
+        input: job.input as never,
+        previous: (job.output as { sets?: (string[] | string)[] } | null)?.sets ?? [],
+        doneItems: job.done_items,
+        stillRunning: () => jobStillRunning(id),
+      })
+      if (cancelled) return NextResponse.json({ ok: true, cancelled: true })
+      await query(
+        `UPDATE generation_queue SET status='done', finished_at=now(), progress=100, done_items=total_items,
+                output=jsonb_build_object('sets', $2::jsonb)
+          WHERE id=$1 AND status='processing'`,
+        [id, JSON.stringify(sets)],
+      )
+      return NextResponse.json({ ok: true, done: sets.length })
+    }
+
     // ── photo_replicator — one generation of a Photo Replicator job ─────────
     // photo-generate.ts claims the job (queued → generating) before anything is
     // billed, so a duplicate queue job finds nothing to do. Queued with
