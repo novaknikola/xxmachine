@@ -50,6 +50,10 @@ export const PREVIEW_FORMULA = '=IMAGE(INDIRECT("A"&ROW()))'
 /** How often the dropdowns are re-applied (rows added since get them too). */
 const VALIDATION_REFRESH_MS = 10 * 60_000
 
+/** A default 21px row shrinks the =IMAGE() preview to a speck. */
+const PREVIEW_ROW_PX = 120
+const PREVIEW_COL_PX = 100
+
 export interface PhotoSheet extends SheetIO {
   /** Creates the tab when it is missing; reports how many rows the tab's grid has. */
   ensureTab(): Promise<{ created: boolean; rowCount: number }>
@@ -113,6 +117,24 @@ export function googlePhotoSheet(sheetId: string = RECREATE_SHEET_ID): PhotoShee
         body: JSON.stringify({ values: [values] }),
       })
       if (!res.ok) throw new Error(`Failed to write row ${rowNumber} of "${PHOTO_TAB}": ${res.status} ${await res.text()}`)
+
+      // Room for the preview. Cosmetic: the row is already written, so a failure here is only logged.
+      if (tabId != null) {
+        const size = (dimension: 'ROWS' | 'COLUMNS', startIndex: number, pixelSize: number) => ({
+          updateDimensionProperties: {
+            range: { sheetId: tabId, dimension, startIndex, endIndex: startIndex + 1 },
+            properties: { pixelSize },
+            fields: 'pixelSize',
+          },
+        })
+        const sized = await sheetsRequest(`${sheetId}:batchUpdate`, {
+          method: 'POST',
+          body: JSON.stringify({
+            requests: [size('ROWS', rowNumber - 1, PREVIEW_ROW_PX), size('COLUMNS', PHOTO_COL.preview, PREVIEW_COL_PX)],
+          }),
+        }).catch(() => null)
+        if (!sized?.ok) console.warn(`[photo-sheet] preview size not set on row ${rowNumber}: ${sized?.status ?? 'network error'}`)
+      }
     },
   }
 }

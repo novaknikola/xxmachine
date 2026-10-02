@@ -216,6 +216,22 @@ describe('googlePhotoSheet requests', () => {
       body: { requests: [{ appendDimension: { sheetId: 11, dimension: 'ROWS', length: 101 } }] },
     })
     assert.equal(calls[2].method, 'PUT')
+    // Then room for the =IMAGE() preview: this row 120px tall, column B 100px wide — this tab only.
+    assert.deepEqual(calls[3].body, {
+      requests: [
+        { updateDimensionProperties: { range: { sheetId: 11, dimension: 'ROWS', startIndex: 1000, endIndex: 1001 }, properties: { pixelSize: 120 }, fields: 'pixelSize' } },
+        { updateDimensionProperties: { range: { sheetId: 11, dimension: 'COLUMNS', startIndex: 1, endIndex: 2 }, properties: { pixelSize: 100 }, fields: 'pixelSize' } },
+      ],
+    })
+  })
+
+  it('a failed preview resize does not fail the row', async () => {
+    respond = (url, method) => url.includes('?fields=') ? meta('Sheet1', 'Photo Replicator')
+      : method === 'POST' ? new Response('quota', { status: 429 }) : Response.json({})
+    const io = googlePhotoSheet(SHEET)
+    await io.ensureTab()
+    await io.writeRow(2, ['u', PREVIEW_FORMULA, 's', 't'], 1000)
+    assert.deepEqual(calls.map(c => c.method), ['GET', 'PUT', 'POST'])
   })
 
   it('dropdowns: Pošalji checkbox (I), Karakter (E), Format (F), Slajdova (G) — on this tab only', async () => {
