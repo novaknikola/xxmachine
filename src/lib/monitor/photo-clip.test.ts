@@ -42,7 +42,7 @@ describe('clipToPhotoReplicator', () => {
     })
     assert.deepEqual(f.rehosts, [body.imageUrl])
     assert.deepEqual(f.rows, [{
-      input: { imageUrl: STORED.url, source: 'https://www.instagram.com/p/DPhoto123/', addedAt: new Date('2026-10-02T14:33:00Z') },
+      input: { imageUrl: STORED.url, source: 'https://www.instagram.com/p/DPhoto123/?img_index=2', addedAt: new Date('2026-10-02T14:33:00Z') },
       names: ['Diana Goth', 'Tiana Normal'],
     }])
   })
@@ -97,14 +97,39 @@ describe('clipToPhotoReplicator', () => {
 
 describe('photoSourceLink', () => {
   it('prefers the post permalink, canonical /p/ form, no query', () => {
-    assert.equal(photoSourceLink('https://www.instagram.com/p/DPhoto123/?img_index=2', 'https://www.instagram.com/'), 'https://www.instagram.com/p/DPhoto123/')
+    assert.equal(photoSourceLink('https://www.instagram.com/p/DPhoto123/', 'https://www.instagram.com/'), 'https://www.instagram.com/p/DPhoto123/')
     assert.equal(photoSourceLink('https://www.instagram.com/reel/DReel4567/', ''), 'https://www.instagram.com/p/DReel4567/')
     assert.equal(photoSourceLink('https://www.instagram.com/someuser/p/DPhoto123/', ''), 'https://www.instagram.com/p/DPhoto123/')
+  })
+
+  it('keeps the carousel slide: ?img_index=1 and ?img_index=2 are preserved', () => {
+    assert.equal(photoSourceLink('https://www.instagram.com/p/DPhoto123/?img_index=1', 'https://www.instagram.com/'), 'https://www.instagram.com/p/DPhoto123/?img_index=1')
+    assert.equal(photoSourceLink('https://www.instagram.com/p/DPhoto123/?img_index=2', 'https://www.instagram.com/'), 'https://www.instagram.com/p/DPhoto123/?img_index=2')
+    assert.equal(photoSourceLink('https://www.instagram.com/someuser/p/DPhoto123/?img_index=2', ''), 'https://www.instagram.com/p/DPhoto123/?img_index=2')
+  })
+
+  it('without img_index nothing changes, and other query parameters are still dropped', () => {
+    assert.equal(photoSourceLink('https://www.instagram.com/p/DPhoto123/?utm_source=ig_web_copy_link', ''), 'https://www.instagram.com/p/DPhoto123/')
+    assert.equal(photoSourceLink('https://www.instagram.com/p/DPhoto123/?img_index=3&utm_source=ig_web&igsh=abc', ''), 'https://www.instagram.com/p/DPhoto123/?img_index=3')
+  })
+
+  it('a value that is not a slide number is ignored', () => {
+    for (const bad of ['0', '21', '-1', '1.5', 'abc', '', '2x', '999']) {
+      assert.equal(photoSourceLink(`https://www.instagram.com/p/DPhoto123/?img_index=${bad}`, ''), 'https://www.instagram.com/p/DPhoto123/', `img_index=${bad}`)
+    }
+    assert.equal(photoSourceLink('https://www.instagram.com/p/DPhoto123/?img_index=02', ''), 'https://www.instagram.com/p/DPhoto123/?img_index=2')
+  })
+
+  it('the slide may come from the page URL — only when the page is that same post', () => {
+    assert.equal(photoSourceLink('https://www.instagram.com/p/DPhoto123/', 'https://www.instagram.com/p/DPhoto123/?img_index=2'), 'https://www.instagram.com/p/DPhoto123/?img_index=2')
+    assert.equal(photoSourceLink('https://www.instagram.com/p/DPhoto123/', 'https://www.instagram.com/p/DOther9876/?img_index=2'), 'https://www.instagram.com/p/DPhoto123/')
+    assert.equal(photoSourceLink(undefined, 'https://www.instagram.com/p/DPhoto123/?img_index=4'), 'https://www.instagram.com/p/DPhoto123/?img_index=4')
   })
 
   it('falls back to the page being on the post, then to the page without its query', () => {
     assert.equal(photoSourceLink(undefined, 'https://www.instagram.com/p/DPhoto123/?hl=en'), 'https://www.instagram.com/p/DPhoto123/')
     assert.equal(photoSourceLink('', 'https://www.instagram.com/explore/?next=1#x'), 'https://www.instagram.com/explore/')
+    assert.equal(photoSourceLink('', 'https://www.instagram.com/explore/?img_index=2'), 'https://www.instagram.com/explore/', 'not a post: query dropped as before')
     assert.equal(photoSourceLink(null, 'javascript:alert(1)'), '')
     assert.equal(photoSourceLink(null, 'not a url'), '')
   })
